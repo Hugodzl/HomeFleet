@@ -45,6 +45,14 @@ export type ToolResultEvent = z.infer<typeof ToolResultEventSchema>;
 export const ResultEventSchema = JobEventBaseSchema.extend({
   type: z.literal("result"),
   result: JobResultSchema,
+}).superRefine((event, ctx) => {
+  if (event.result.jobId !== event.jobId) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["result", "jobId"],
+      message: "result.jobId must match the event jobId",
+    });
+  }
 });
 export type ResultEvent = z.infer<typeof ResultEventSchema>;
 

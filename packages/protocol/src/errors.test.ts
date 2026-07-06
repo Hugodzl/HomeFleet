@@ -40,3 +40,13 @@ test("HfpErrorSchema round-trips an error with arbitrary details", () => {
 test("HfpErrorSchema rejects a missing message", () => {
   expect(HfpErrorSchema.safeParse({ code: "INTERNAL" }).success).toBe(false);
 });
+
+test("HfpErrorSchema rejects non-JSON-serializable details", () => {
+  expect(
+    HfpErrorSchema.safeParse({
+      code: "INTERNAL",
+      message: "boom",
+      details: () => "not json",
+    }).success,
+  ).toBe(false);
+});

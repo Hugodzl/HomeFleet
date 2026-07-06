@@ -84,7 +84,10 @@ as a single JSON document. The stream ends after the terminal `result` event.
 - Unknown fields MUST be ignored on read and MUST NOT be sent. This allows
   minor-version additions without breaking older peers.
 - Timestamps are ISO 8601 UTC strings with a trailing `Z`
-  (e.g. `"2026-07-06T12:00:00Z"`).
+  (e.g. `"2026-07-06T12:00:00Z"`); timezone offsets are rejected.
+- Identifiers are canonical lowercase: device IDs, commit hashes, and job
+  UUIDs. Senders MUST emit lowercase (`crypto.randomUUID()` already does);
+  receivers reject other casings.
 - Fields documented with defaults are optional on the wire; receivers apply
   the default when the field is absent.
 
@@ -96,18 +99,18 @@ What a node advertises about itself during `hello` and pairing.
 | ------------------- | --------------------------------------- | ---------------------------------------------- |
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
 | `name`              | string                                  | Human-readable, 1–64 chars                     |
-| `daemonVersion`     | string                                  | `homefleetd` semver                            |
-| `protocolVersion`   | string                                  | HFP semver, `"0.1.0"` for this document        |
+| `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
+| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
 | `executors`         | `("command" \| "agent")[]`              | Executor kinds this node offers                |
 | `models`            | `ModelInfo[]`                           | Models reachable via the node's OpenAI-compatible endpoint(s) |
-| `hardware`          | `{ cpu, ramBytes, gpus: GpuInfo[] }`    | `cpu`: string; `ramBytes`: number              |
+| `hardware`          | `{ cpu, ramBytes, gpus: GpuInfo[] }`    | `cpu`: string; `ramBytes`: integer ≥ 0         |
 | `maxConcurrentJobs` | integer ≥ 1                             |                                                |
 | `activeJobs`        | integer ≥ 0                             |                                                |
 
-`ModelInfo` is `{ id: string, contextWindow?: number }`; `GpuInfo` is
-`{ name: string, vramBytes?: number }`.
+`ModelInfo` is `{ id: string, contextWindow?: integer ≥ 1 }`; `GpuInfo` is
+`{ name: string, vramBytes?: integer ≥ 0 }`.
 
 ```json
 {
@@ -170,8 +173,10 @@ for HFP v0.
 
 ### Job parameters — `JobParams`
 
-A tagged union on `type`. This union is the protocol's extension point:
-future job types are added as new variants without redesigning the job
+A tagged union on `type`, where `type` is a `JobType`
+(`"recon" | "command"` in this version). This union is the protocol's
+extension point: a future job type is added as a new params schema, a new
+union variant, and a new `JobType` entry — without redesigning the job
 model.
 
 #### `ReconJobParams` (`type: "recon"`)
@@ -191,7 +196,10 @@ Read-only repository analysis executed by the worker's local model.
 | Field          | Type    | Constraints        | Default  |
 | -------------- | ------- | ------------------ | -------- |
 | `maxToolCalls` | integer | ≥ 1, ≤ 200         | `50`     |
-| `maxWallMs`    | integer | ≥ 1000             | `600000` |
+| `maxWallMs`    | integer | ≥ 1000, ≤ 3600000  | `600000` |
+
+In v0, both the agent wall-time budget (`maxWallMs`) and the command timeout
+(`timeoutMs`) are capped at one hour.
 
 ```json
 {
@@ -245,7 +253,9 @@ the worker. The worker MUST reject job types it does not support with
 ### Job snapshot — `JobSnapshot`
 
 Polling view of a job: `{ jobId, status: JobStatus, result?: JobResult }`.
-`result` is present **iff** `status` is terminal.
+`result` is present **iff** `status` is terminal. When `result` is present,
+`result.jobId` MUST equal the snapshot's `jobId` and `result.status` MUST
+equal the snapshot's `status`.
 
 ```json
 { "jobId": "0b294587-2342-4718-b6bb-2b3c837e2a9c", "status": "running" }
@@ -264,23 +274,30 @@ not an error: the response simply carries the existing terminal status.
 
 ### Job result — `JobResult`
 
-| Field     | Type             | Notes                                                |
-| --------- | ---------------- | ---------------------------------------------------- |
-| `jobId`   | string (UUID)    |                                                      |
-| `status`  | `JobStatus`      | Terminal states only: `succeeded`, `failed`, `canceled` |
-| `summary` | string?          | Model-produced summary (recon jobs)                  |
-| `output`  | `CommandOutput`? | Captured output (command jobs)                       |
-| `stats`   | `JobStats`       |                                                      |
-| `error`   | `HfpError`?      | Present on failure                                   |
+| Field     | Type                | Notes                                                |
+| --------- | ------------------- | ---------------------------------------------------- |
+| `jobId`   | string (UUID)       |                                                      |
+| `type`    | `JobType`           | `"recon" \| "command"` — makes results discriminable |
+| `status`  | `TerminalJobStatus` | `"succeeded" \| "failed" \| "canceled"`              |
+| `summary` | string?             | Model-produced summary (recon jobs)                  |
+| `output`  | `CommandOutput`?    | Captured output (command jobs)                       |
+| `stats`   | `JobStats`          |                                                      |
+| `error`   | `HfpError`?         | See error-presence rules below                       |
 
-`CommandOutput` is `{ stdout: string, stderr: string, exitCode: number | null }`;
-`exitCode` is `null` when the process was killed by timeout or cancellation.
+Error-presence rules: a `failed` result MUST carry `error`; a `succeeded`
+result MUST NOT carry `error`; a `canceled` result MAY carry `error` (if
+present, typically code `CANCELED`).
 
-`JobStats` is `{ toolCalls: integer ≥ 0, wallMs: integer ≥ 0, promptTokens?: integer, completionTokens?: integer }`.
+`CommandOutput` is `{ stdout: string, stderr: string, exitCode: integer | null }`;
+`exitCode` is `null` when the process was killed by timeout or cancellation
+(it may be negative or large — platform exit codes are passed through).
+
+`JobStats` is `{ toolCalls: integer ≥ 0, wallMs: integer ≥ 0, promptTokens?: integer ≥ 0, completionTokens?: integer ≥ 0 }`.
 
 ```json
 {
   "jobId": "0b294587-2342-4718-b6bb-2b3c837e2a9c",
+  "type": "recon",
   "status": "succeeded",
   "summary": "Repo uses pnpm workspaces with three packages.",
   "stats": { "toolCalls": 7, "wallMs": 42137, "promptTokens": 1500, "completionTokens": 300 }
@@ -308,6 +325,8 @@ Variants:
 | `tool_result` | `name: string`, `resultSummary: string`, `isError: boolean`    |
 | `result`      | `result: JobResult` — terminal, ends the stream                |
 
+On a `result` event, `result.jobId` MUST equal the event's `jobId`.
+
 ```json
 { "type": "status", "jobId": "0b294587-2342-4718-b6bb-2b3c837e2a9c", "seq": 0, "ts": "2026-07-06T12:00:00Z", "status": "running" }
 ```
@@ -322,8 +341,9 @@ Variants:
 
 ### Errors — `HfpError`
 
-`{ code: HfpErrorCode, message: string, details?: unknown }`, where
-`HfpErrorCode` is one of:
+`{ code: HfpErrorCode, message: string, details?: <JSON value> }` —
+`details`, when present, is any JSON-serializable value. `HfpErrorCode` is
+one of:
 
 | Code                    | Meaning                                                     |
 | ----------------------- | ----------------------------------------------------------- |
@@ -368,7 +388,8 @@ queued ---> running +-----------> failed
 
 - The protocol version is a semver string (this document: **0.1.0**),
   exported as `HFP_PROTOCOL_VERSION`; the HTTP path prefix carries the major
-  version (`/hfp/v0`).
+  version (`/hfp/v0`, exported as `HFP_PATH_PREFIX` and derived from the
+  protocol version so the two cannot drift).
 - Nodes exchange `protocolVersion` inside `NodeInfo` during `hello` and
   pairing. Nodes with the same major version MUST interoperate; a node MAY
   refuse to talk to a peer with a different major version.
@@ -406,8 +427,9 @@ queued ---> running +-----------> failed
 
 - **New job types** extend the `JobParams` discriminated union — e.g.
   code-writing delegation (diff/branch results) and model-pool orchestration
-  jobs. Each new variant comes with its own result conventions and error
-  codes as needed.
+  jobs. Adding one means a new params schema, a new union variant, and a new
+  `JobType` entry; each variant comes with its own result conventions and
+  error codes as needed.
 - **Workspace transfer** (git bundles over HFP, ADR-0005) will add endpoints
   and messages for negotiating and shipping bundles; `WorkspaceRef` is
   already the anchor for that negotiation.

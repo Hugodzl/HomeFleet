@@ -38,11 +38,26 @@ test("GpuInfoSchema round-trips with and without vramBytes", () => {
   expect(GpuInfoSchema.parse(minimal)).toEqual(minimal);
 });
 
+test("GpuInfoSchema rejects negative or non-integer vramBytes", () => {
+  expect(GpuInfoSchema.safeParse({ name: "GPU", vramBytes: -1 }).success).toBe(
+    false,
+  );
+  expect(GpuInfoSchema.safeParse({ name: "GPU", vramBytes: 1.5 }).success).toBe(
+    false,
+  );
+});
+
 test("ModelInfoSchema round-trips with and without contextWindow", () => {
   const full = { id: "qwen3.5-4b", contextWindow: 32768 };
   const minimal = { id: "qwen3.6-35b-a3b" };
   expect(ModelInfoSchema.parse(full)).toEqual(full);
   expect(ModelInfoSchema.parse(minimal)).toEqual(minimal);
+});
+
+test("ModelInfoSchema rejects a contextWindow below 1", () => {
+  expect(ModelInfoSchema.safeParse({ id: "m", contextWindow: 0 }).success).toBe(
+    false,
+  );
 });
 
 test("NodeRoleSchema accepts defined roles and rejects others", () => {
@@ -95,4 +110,38 @@ test("NodeInfoSchema rejects negative activeJobs", () => {
   expect(
     NodeInfoSchema.safeParse({ ...validNodeInfo, activeJobs: -1 }).success,
   ).toBe(false);
+});
+
+test("NodeInfoSchema accepts a name of exactly 64 chars", () => {
+  const name = "x".repeat(64);
+  expect(NodeInfoSchema.parse({ ...validNodeInfo, name }).name).toBe(name);
+});
+
+test("NodeInfoSchema requires semver version strings", () => {
+  expect(
+    NodeInfoSchema.safeParse({ ...validNodeInfo, daemonVersion: "1.0" })
+      .success,
+  ).toBe(false);
+  expect(
+    NodeInfoSchema.safeParse({ ...validNodeInfo, protocolVersion: "v0.1.0" })
+      .success,
+  ).toBe(false);
+});
+
+test("NodeInfoSchema rejects negative ramBytes", () => {
+  expect(
+    NodeInfoSchema.safeParse({
+      ...validNodeInfo,
+      hardware: { ...validNodeInfo.hardware, ramBytes: -1 },
+    }).success,
+  ).toBe(false);
+});
+
+test("NodeInfoSchema strips unknown fields on parse", () => {
+  const parsed = NodeInfoSchema.parse({
+    ...validNodeInfo,
+    futureField: "ignored",
+  });
+  expect(parsed).toEqual(validNodeInfo);
+  expect(parsed).not.toHaveProperty("futureField");
 });

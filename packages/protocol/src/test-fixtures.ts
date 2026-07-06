@@ -38,6 +38,7 @@ export const validNodeInfo: NodeInfo = {
 
 export const validJobResult: JobResult = {
   jobId: validJobId,
+  type: "recon",
   status: "succeeded",
   summary: "Repo uses pnpm workspaces with three packages.",
   stats: {

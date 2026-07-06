@@ -13,16 +13,21 @@ export const DeviceIdSchema = z
   );
 export type DeviceId = z.infer<typeof DeviceIdSchema>;
 
+/** Light semver check — enough for v0 version strings like "0.1.0". */
+const SemverSchema = z
+  .string()
+  .regex(/^\d+\.\d+\.\d+$/, "must be a semver string (X.Y.Z)");
+
 export const GpuInfoSchema = z.object({
   name: z.string(),
-  vramBytes: z.number().optional(),
+  vramBytes: z.int().min(0).optional(),
 });
 export type GpuInfo = z.infer<typeof GpuInfoSchema>;
 
 /** A model reachable via the node's OpenAI-compatible endpoint(s). */
 export const ModelInfoSchema = z.object({
   id: z.string(),
-  contextWindow: z.number().optional(),
+  contextWindow: z.int().min(1).optional(),
 });
 export type ModelInfo = z.infer<typeof ModelInfoSchema>;
 
@@ -35,15 +40,15 @@ export type ExecutorKind = z.infer<typeof ExecutorKindSchema>;
 export const NodeInfoSchema = z.object({
   deviceId: DeviceIdSchema,
   name: z.string().min(1).max(64),
-  daemonVersion: z.string(),
-  protocolVersion: z.string(),
+  daemonVersion: SemverSchema,
+  protocolVersion: SemverSchema,
   platform: z.enum(["win32", "linux", "darwin"]),
   roles: z.array(NodeRoleSchema),
   executors: z.array(ExecutorKindSchema),
   models: z.array(ModelInfoSchema),
   hardware: z.object({
     cpu: z.string(),
-    ramBytes: z.number(),
+    ramBytes: z.int().min(0),
     gpus: z.array(GpuInfoSchema),
   }),
   maxConcurrentJobs: z.int().min(1),

@@ -50,6 +50,18 @@ test("ResultEventSchema round-trips a terminal result", () => {
   expect(ResultEventSchema.parse(event)).toEqual(event);
 });
 
+test("ResultEventSchema rejects a result whose jobId differs from the event's", () => {
+  const event = {
+    ...base,
+    jobId: "11111111-1111-4111-8111-111111111111",
+    seq: 12,
+    type: "result",
+    result: validJobResult,
+  };
+  expect(ResultEventSchema.safeParse(event).success).toBe(false);
+  expect(JobEventSchema.safeParse(event).success).toBe(false);
+});
+
 test("JobEventSchema parses each variant through the union", () => {
   const events = [
     { ...base, type: "status", status: "queued" },
@@ -96,6 +108,14 @@ test("JobEventSchema rejects a malformed ts", () => {
   expect(JobEventSchema.safeParse({ ...event, ts: "2026-07-06" }).success).toBe(
     false,
   );
+});
+
+test("JobEventSchema rejects a ts with a timezone offset (UTC Z only)", () => {
+  const event = { ...base, type: "status", status: "running" };
+  expect(
+    JobEventSchema.safeParse({ ...event, ts: "2026-07-06T12:00:00+02:00" })
+      .success,
+  ).toBe(false);
 });
 
 test("JobEvent narrows through a switch on type", () => {

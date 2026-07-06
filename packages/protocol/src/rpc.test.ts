@@ -81,6 +81,26 @@ test("JobSnapshotSchema rejects a non-terminal snapshot carrying result", () => 
   ).toBe(false);
 });
 
+test("JobSnapshotSchema rejects result.status differing from snapshot status", () => {
+  expect(
+    JobSnapshotSchema.safeParse({
+      jobId: validJobId,
+      status: "canceled",
+      result: validJobResult, // status: "succeeded"
+    }).success,
+  ).toBe(false);
+});
+
+test("JobSnapshotSchema rejects result.jobId differing from snapshot jobId", () => {
+  expect(
+    JobSnapshotSchema.safeParse({
+      jobId: "11111111-1111-4111-8111-111111111111",
+      status: "succeeded",
+      result: validJobResult, // jobId: validJobId
+    }).success,
+  ).toBe(false);
+});
+
 test("CancelResponseSchema round-trips", () => {
   const response = { jobId: validJobId, status: "canceled" };
   expect(CancelResponseSchema.parse(response)).toEqual(response);

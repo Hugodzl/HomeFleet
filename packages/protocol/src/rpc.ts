@@ -4,16 +4,13 @@
  */
 import { z } from "zod";
 import {
+  isTerminalJobStatus,
   JobIdSchema,
   JobParamsSchema,
   JobResultSchema,
-  type JobStatus,
   JobStatusSchema,
 } from "./job.js";
 import { NodeInfoSchema } from "./node.js";
-
-const isTerminal = (status: JobStatus): boolean =>
-  status === "succeeded" || status === "failed" || status === "canceled";
 
 /** `POST /hfp/v0/hello` */
 export const HelloRequestSchema = z.object({
@@ -46,19 +43,38 @@ export const JobSnapshotSchema = z
     result: JobResultSchema.optional(),
   })
   .superRefine((snapshot, ctx) => {
-    if (isTerminal(snapshot.status) && snapshot.result === undefined) {
+    if (isTerminalJobStatus(snapshot.status) && snapshot.result === undefined) {
       ctx.addIssue({
         code: "custom",
         path: ["result"],
         message: "result is required when status is terminal",
       });
     }
-    if (!isTerminal(snapshot.status) && snapshot.result !== undefined) {
+    if (
+      !isTerminalJobStatus(snapshot.status) &&
+      snapshot.result !== undefined
+    ) {
       ctx.addIssue({
         code: "custom",
         path: ["result"],
         message: "result must be absent when status is not terminal",
       });
+    }
+    if (snapshot.result !== undefined) {
+      if (snapshot.result.status !== snapshot.status) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["result", "status"],
+          message: "result.status must match the snapshot status",
+        });
+      }
+      if (snapshot.result.jobId !== snapshot.jobId) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["result", "jobId"],
+          message: "result.jobId must match the snapshot jobId",
+        });
+      }
     }
   });
 export type JobSnapshot = z.infer<typeof JobSnapshotSchema>;

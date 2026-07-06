@@ -19,6 +19,7 @@ export type HfpErrorCode = z.infer<typeof HfpErrorCodeSchema>;
 export const HfpErrorSchema = z.object({
   code: HfpErrorCodeSchema,
   message: z.string(),
-  details: z.unknown().optional(),
+  /** Machine-readable extras; must be a JSON-serializable value. */
+  details: z.json().optional(),
 });
 export type HfpError = z.infer<typeof HfpErrorSchema>;
