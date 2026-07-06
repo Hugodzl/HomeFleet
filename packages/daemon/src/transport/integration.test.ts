@@ -2,8 +2,14 @@
  * Loopback integration tests: two full daemon stacks (identity, trust
  * store, pairing, server, client) on 127.0.0.1 ephemeral ports.
  */
+import { once } from "node:events";
 import { createServer, request as httpsRequest } from "node:https";
-import type { AddressInfo } from "node:net";
+import {
+  type AddressInfo,
+  connect as netConnect,
+  createServer as netCreateServer,
+  type Socket,
+} from "node:net";
 import { HelloResponseSchema, type NodeInfo } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { resolveDataDir } from "../config/paths.js";
@@ -19,7 +25,9 @@ import {
   FingerprintMismatchError,
   HfpClient,
   HfpRequestError,
+  HfpTimeoutError,
 } from "./client.js";
+import { MAX_BODY_BYTES } from "./limits.js";
 import { NodeServer } from "./server.js";
 
 const HOST = "127.0.0.1";
@@ -231,7 +239,7 @@ test("the client severs the connection before sending when the server fingerprin
       port,
       expectedDeviceId: a.identity.deviceId,
       method: "POST",
-      path: "/hfp/v0/hello",
+      path: "/hello",
       body: { nodeInfo: a.nodeInfo() },
       responseSchema: HelloResponseSchema,
     })
@@ -289,17 +297,178 @@ test("malformed JSON is rejected with 400 INVALID_REQUEST", async () => {
   expect(JSON.parse(response.body)).toMatchObject({ code: "INVALID_REQUEST" });
 });
 
-test("unknown endpoints return 404 with an HfpError body", async () => {
+test("unknown endpoints: 404 for paired peers, 401 for unpaired peers", async () => {
   const a = await createDaemon("alpha");
   const b = await createDaemon("bravo");
 
-  const response = await rawRequest({
+  // Unpaired peers must not be able to map the route table: unknown paths
+  // look exactly like paired routes (401).
+  const probed = await rawRequest({
     port: b.port,
     path: "/hfp/v0/definitely-not-a-route",
     body: "{}",
     key: a.identity.keyPem,
     cert: a.identity.certPem,
   });
-  expect(response.status).toBe(404);
+  expect(probed.status).toBe(401);
+  expect(JSON.parse(probed.body)).toMatchObject({ code: "UNAUTHORIZED" });
+
+  // Paired peers get an honest 404.
+  await b.trustStore.add({
+    deviceId: a.identity.deviceId,
+    name: "alpha",
+    addedAt: new Date().toISOString(),
+  });
+  const paired = await rawRequest({
+    port: b.port,
+    path: "/hfp/v0/definitely-not-a-route",
+    body: "{}",
+    key: a.identity.keyPem,
+    cert: a.identity.certPem,
+  });
+  expect(paired.status).toBe(404);
+  expect(JSON.parse(paired.body)).toMatchObject({ code: "INVALID_REQUEST" });
+});
+
+test("start() on an occupied port throws without wedging the instance", async () => {
+  const a = await createDaemon("alpha");
+
+  // A second server configured for A's (occupied) port.
+  const tempDir = await makeTempDataDir("homefleet-it-clash-");
+  const identity = await loadOrCreateIdentity(tempDir);
+  const trustStore = await TrustStore.load(tempDir);
+  const nodeInfo = (): NodeInfo => makeNodeInfo(identity.deviceId, "clash");
+  const clashing = new NodeServer({
+    identity,
+    trustStore,
+    nodeInfoProvider: nodeInfo,
+    pairingManager: new PairingManager({
+      trustStore,
+      nodeInfoProvider: nodeInfo,
+    }),
+    host: HOST,
+    port: a.port,
+  });
+  cleanups.push(async () => {
+    await clashing.stop();
+    await removeTempDataDir(tempDir);
+  });
+
+  await expect(clashing.start()).rejects.toThrow(/EADDRINUSE/);
+  // The failed start must not wedge the instance: stop() is a no-op ...
+  await expect(clashing.stop()).resolves.toBeUndefined();
+  // ... and once the port frees up, the same instance starts cleanly.
+  await a.server.stop();
+  const { port } = await clashing.start();
+  expect(port).toBe(a.port);
+  await clashing.stop();
+});
+
+test("raw TLS garbage on the port does not kill the daemon", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo");
+  await b.trustStore.add({
+    deviceId: a.identity.deviceId,
+    name: "alpha",
+    addedAt: new Date().toISOString(),
+  });
+
+  // Throw non-TLS bytes at the HTTPS port; the server's default
+  // tlsClientError handling must drop the connection, nothing more.
+  // (The string is long enough that its would-be TLS record length exceeds
+  // the maximum, so OpenSSL errors immediately instead of waiting for a
+  // full record. resume() consumes the server's TLS alert so 'close' can
+  // fire on this paused socket.)
+  const socket = netConnect(b.port, HOST);
+  socket.on("error", () => {});
+  socket.resume();
+  await once(socket, "connect");
+  socket.write("THIS IS NOT A TLS HANDSHAKE\r\n\r\n");
+  await once(socket, "close");
+
+  // The daemon is still alive and serving.
+  const hello = await a.client.hello(
+    { host: HOST, port: b.port, expectedDeviceId: b.identity.deviceId },
+    a.nodeInfo(),
+  );
+  expect(hello.nodeInfo.deviceId).toBe(b.identity.deviceId);
+});
+
+test("two concurrent correct-code pair requests: exactly one is accepted", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo");
+  const c = await createDaemon("charlie");
+
+  const { code } = b.pairing.beginPairing();
+  const [first, second] = await Promise.all([
+    a.client.pair({ host: HOST, port: b.port }, code, a.nodeInfo()),
+    c.client.pair({ host: HOST, port: b.port }, code, c.nodeInfo()),
+  ]);
+
+  // The code is consumed synchronously on the first match, so exactly one
+  // of the two concurrent requests can win — never both.
+  const accepted = [first.response.accepted, second.response.accepted].filter(
+    (wasAccepted) => wasAccepted,
+  );
+  expect(accepted).toHaveLength(1);
+  expect(b.trustStore.list()).toHaveLength(1);
+  const winner = first.response.accepted ? a : c;
+  expect(b.trustStore.has(winner.identity.deviceId)).toBe(true);
+});
+
+test("oversized request bodies are rejected with 413", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo");
+
+  const response = await rawRequest({
+    port: b.port,
+    path: "/hfp/v0/pair",
+    body: "x".repeat(MAX_BODY_BYTES + 1024),
+    key: a.identity.keyPem,
+    cert: a.identity.certPem,
+  });
+  expect(response.status).toBe(413);
   expect(JSON.parse(response.body)).toMatchObject({ code: "INVALID_REQUEST" });
+});
+
+test("the client times out against a server that accepts TCP but never responds", async () => {
+  const a = await createDaemon("alpha");
+
+  // Accepts the TCP connection and then does nothing: no TLS handshake, no
+  // response, ever.
+  const openSockets: Socket[] = [];
+  const stalledServer = netCreateServer((socket) => {
+    openSockets.push(socket);
+  });
+  await new Promise<void>((resolve) => stalledServer.listen(0, HOST, resolve));
+  cleanups.push(async () => {
+    for (const socket of openSockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve) => {
+      stalledServer.close(() => resolve());
+    });
+  });
+  const { port } = stalledServer.address() as AddressInfo;
+
+  const error = await a.client
+    .request({
+      host: HOST,
+      port,
+      expectedDeviceId: a.identity.deviceId,
+      method: "POST",
+      path: "/hello",
+      body: { nodeInfo: a.nodeInfo() },
+      responseSchema: HelloResponseSchema,
+      timeoutMs: 250,
+    })
+    .then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+
+  expect(error).toBeInstanceOf(HfpTimeoutError);
+  const timeout = error as HfpTimeoutError;
+  expect(timeout.timeoutMs).toBe(250);
+  expect(timeout.port).toBe(port);
 });

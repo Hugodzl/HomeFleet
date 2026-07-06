@@ -18,15 +18,19 @@ export {
   type PairingManagerOptions,
 } from "./pairing/pairing.js";
 export {
+  DEFAULT_REQUEST_TIMEOUT_MS,
   FingerprintMismatchError,
   HfpClient,
   HfpRequestError,
   type HfpRequestOptions,
+  HfpResponseTooLargeError,
   type HfpTarget,
+  HfpTimeoutError,
+  MissingServerCertificateError,
   type PairTarget,
 } from "./transport/client.js";
+export { MAX_BODY_BYTES } from "./transport/limits.js";
 export {
-  MAX_BODY_BYTES,
   NodeServer,
   type NodeServerOptions,
   type PeerInfo,

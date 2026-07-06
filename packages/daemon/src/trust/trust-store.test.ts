@@ -1,4 +1,4 @@
-import { readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
@@ -113,4 +113,40 @@ test("a structurally invalid trust store file throws on load", async () => {
     "utf8",
   );
   await expect(TrustStore.load(dir)).rejects.toThrow(/Corrupt trust store/);
+});
+
+test("a non-ENOENT read failure throws instead of yielding an empty store", async () => {
+  const dir = await newDataDir();
+  // A directory where the file should be makes readFile fail with a
+  // non-ENOENT error (EISDIR/EPERM depending on platform). Failing open
+  // here would let the next add() silently wipe all pairings.
+  await mkdir(path.join(dir, "trusted-devices.json"));
+  await expect(TrustStore.load(dir)).rejects.toThrow(
+    /Failed to read trust store/,
+  );
+});
+
+test("concurrent adds and removes serialize into a consistent file", async () => {
+  const dir = await newDataDir();
+  const store = await TrustStore.load(dir);
+  const alpha = entry("a", "alpha");
+  const bravo = entry("b", "bravo");
+  const carol = entry("c", "carol");
+  const delta = entry("d", "delta");
+
+  // Fire mutations without awaiting between them: persists must chain, not
+  // interleave temp-file writes and renames.
+  await Promise.all([
+    store.add(alpha),
+    store.add(bravo),
+    store.add(carol),
+    store.remove(alpha.deviceId),
+    store.add(delta),
+  ]);
+
+  expect(await readdir(dir)).toEqual(["trusted-devices.json"]);
+  const reloaded = await TrustStore.load(dir);
+  expect(new Set(reloaded.list().map((device) => device.deviceId))).toEqual(
+    new Set([bravo.deviceId, carol.deviceId, delta.deviceId]),
+  );
 });

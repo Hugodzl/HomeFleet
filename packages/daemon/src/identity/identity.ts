@@ -37,12 +37,25 @@ const SIGNING_ALGORITHM = {
 const NOT_BEFORE = new Date(Date.UTC(2026, 0, 1));
 const NOT_AFTER = new Date(Date.UTC(2076, 0, 1));
 
+/**
+ * Answers false only for a definitive ENOENT; any other stat failure (EPERM
+ * under antivirus, EMFILE, ...) rethrows. Treating a transient error as
+ * "missing" here is how an identity would get silently regenerated — the
+ * private key destroyed and every pairing orphaned — the exact failure this
+ * module promises cannot happen.
+ */
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await stat(filePath);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return false;
+    }
+    throw error;
   }
 }
 

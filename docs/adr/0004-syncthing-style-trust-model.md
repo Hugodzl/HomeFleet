@@ -11,7 +11,7 @@ A self-managed CA adds complexity with no benefit at 2–10 devices.
 
 ## Decision
 
-Each daemon generates a keypair + self-signed certificate on first run. The device ID is the certificate's SHA-256 fingerprint. All daemon-to-daemon traffic is HTTPS with `requestCert: true` and `rejectUnauthorized: false`, followed by a **manual fingerprint check against the paired-device list**. Pairing exchanges short human-readable codes to confirm fingerprints out-of-band. Unpaired peers are rejected at the TLS layer boundary.
+Each daemon generates a keypair + self-signed certificate on first run. The device ID is the certificate's SHA-256 fingerprint. All daemon-to-daemon traffic is HTTPS with `requestCert: true` and `rejectUnauthorized: false`, followed by a **manual fingerprint check against the paired-device list**. Pairing exchanges short human-readable codes to confirm fingerprints out-of-band. Unpaired peers are rejected per-request at the HTTP layer: the peer certificate's fingerprint is re-checked against the paired-device list on every request. This is stronger than a connection-time check — unpairing a device takes effect immediately, even for connections that were already open.
 
 Certificate tooling: **@peculiar/x509** (WebCrypto-based, actively maintained). Explicitly not node-forge — unmaintained since 2022 with an unfixed ASN.1 signature-verification bypass.
 

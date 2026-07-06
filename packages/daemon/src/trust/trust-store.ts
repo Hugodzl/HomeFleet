@@ -19,13 +19,23 @@ const TrustStoreFileSchema = z.array(TrustedDeviceSchema);
 
 const TRUST_STORE_FILE = "trusted-devices.json";
 
+function isEnoent(error: unknown): boolean {
+  return (
+    error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 /**
  * The paired-device list. Load with {@link TrustStore.load}; mutations
- * persist immediately and atomically (write temp file, then rename).
+ * persist immediately and atomically (write temp file, then rename), and
+ * persists are serialized so concurrent add/remove calls cannot interleave.
  */
 export class TrustStore {
   private readonly filePath: string;
   private readonly entries: Map<string, TrustedDevice>;
+  /** Serializes persists; see {@link TrustStore.persist}. */
+  private persistQueue: Promise<unknown> = Promise.resolve();
+  private tempCounter = 0;
 
   private constructor(filePath: string, entries: Map<string, TrustedDevice>) {
     this.filePath = filePath;
@@ -33,17 +43,26 @@ export class TrustStore {
   }
 
   /**
-   * Loads the trust store from `dataDir`. A missing file yields an empty
-   * store; a file that exists but does not validate throws (silently
-   * dropping trust entries would orphan pairings).
+   * Loads the trust store from `dataDir`. A missing file (ENOENT) yields an
+   * empty store; any other read error and any file that does not validate
+   * throws. Failing open on, say, a transient EPERM would produce a live
+   * empty-but-writable store whose next `add()` silently and permanently
+   * drops every previously paired device.
    */
   static async load(dataDir: string): Promise<TrustStore> {
     const filePath = path.join(dataDir, TRUST_STORE_FILE);
     let text: string | null = null;
     try {
       text = await readFile(filePath, "utf8");
-    } catch {
-      // Missing file: first run — start empty.
+    } catch (error) {
+      if (!isEnoent(error)) {
+        throw new Error(
+          `Failed to read trust store ${filePath}; refusing to start with an ` +
+            "empty trust list (a later write would permanently drop all pairings).",
+          { cause: error },
+        );
+      }
+      // ENOENT: first run — start empty.
     }
     const entries = new Map<string, TrustedDevice>();
     if (text !== null) {
@@ -97,10 +116,27 @@ export class TrustStore {
     return removed;
   }
 
-  /** Atomic persist: write to a temp file, then rename over the real one. */
-  private async persist(): Promise<void> {
+  /**
+   * Atomic persist: write to a temp file, then rename over the real one.
+   *
+   * Persists are chained through {@link TrustStore.persistQueue} so
+   * concurrent add/remove calls execute their writes strictly one after
+   * another (each write snapshots the entries at execution time, so the
+   * final file always reflects the final in-memory state). The temp path is
+   * unique per write as a second line of defense.
+   */
+  private persist(): Promise<void> {
+    const task = this.persistQueue.then(() => this.writeSnapshot());
+    // Keep the queue alive even when a write fails; the failure still
+    // propagates to this persist's caller via `task`.
+    this.persistQueue = task.catch(() => {});
+    return task;
+  }
+
+  private async writeSnapshot(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.tmp`;
+    this.tempCounter += 1;
+    const tempPath = `${this.filePath}.tmp-${process.pid}-${this.tempCounter}`;
     const json = JSON.stringify([...this.entries.values()], null, 2);
     try {
       await writeFile(tempPath, json, "utf8");

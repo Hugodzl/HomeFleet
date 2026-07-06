@@ -4,7 +4,7 @@
  * machine and enters it on the other; a correct code makes both sides
  * persist each other's device ID.
  */
-import { randomInt } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import type { NodeInfo, PairRequest, PairResponse } from "@homefleet/protocol";
 import type { TrustStore } from "../trust/trust-store.js";
 
@@ -39,6 +39,19 @@ export function generatePairingCode(): string {
   return code;
 }
 
+/**
+ * Constant-time code comparison. Both codes are written into fixed-width
+ * zero-filled buffers (codes are 6-10 ASCII chars by schema) so neither the
+ * comparison time nor a length mismatch leaks how much of a guess matched.
+ */
+function pairingCodesEqual(a: string, b: string): boolean {
+  const bufferA = Buffer.alloc(16);
+  const bufferB = Buffer.alloc(16);
+  bufferA.write(a, "utf8");
+  bufferB.write(b, "utf8");
+  return timingSafeEqual(bufferA, bufferB);
+}
+
 interface ActivePairingCode {
   code: string;
   expiresAt: number;
@@ -51,6 +64,13 @@ export interface PairingManagerOptions {
   nodeInfoProvider: () => NodeInfo;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Called when the brute-force guard burns the active code after
+   * {@link MAX_PAIRING_FAILURES} wrong attempts, so a CLI/UI can tell the
+   * user their code was invalidated (and why pairing suddenly stopped
+   * working) rather than failing silently.
+   */
+  onBurn?: () => void;
 }
 
 /**
@@ -70,12 +90,14 @@ export class PairingManager {
   private readonly trustStore: TrustStore;
   private readonly nodeInfoProvider: () => NodeInfo;
   private readonly now: () => number;
+  private readonly onBurn: (() => void) | undefined;
   private active: ActivePairingCode | null = null;
 
   constructor(options: PairingManagerOptions) {
     this.trustStore = options.trustStore;
     this.nodeInfoProvider = options.nodeInfoProvider;
     this.now = options.now ?? Date.now;
+    this.onBurn = options.onBurn;
   }
 
   /**
@@ -125,11 +147,12 @@ export class PairingManager {
       return { accepted: false };
     }
 
-    if (request.code !== active.code) {
+    if (!pairingCodesEqual(request.code, active.code)) {
       active.failures += 1;
       if (active.failures >= MAX_PAIRING_FAILURES) {
         // Brute-force guard: burn the code after too many wrong attempts.
         this.active = null;
+        this.onBurn?.();
       }
       return { accepted: false };
     }

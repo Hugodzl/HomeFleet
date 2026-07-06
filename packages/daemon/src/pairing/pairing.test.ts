@@ -68,7 +68,7 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(removeTempDataDir));
 });
 
-async function makeManager(): Promise<{
+async function makeManager(options?: { onBurn?: () => void }): Promise<{
   manager: PairingManager;
   trustStore: TrustStore;
   clock: { now: number };
@@ -81,6 +81,7 @@ async function makeManager(): Promise<{
     trustStore,
     nodeInfoProvider: () => makeNodeInfo(OWN_DEVICE_ID, "self"),
     now: () => clock.now,
+    onBurn: options?.onBurn,
   });
   return { manager, trustStore, clock };
 }
@@ -197,6 +198,31 @@ test("five wrong attempts invalidate the active code (brute-force guard)", async
     "peer",
   );
   expect(afterGuard).toEqual({ accepted: false });
+});
+
+test("onBurn fires exactly once, when the brute-force guard trips", async () => {
+  let burns = 0;
+  const { manager } = await makeManager({
+    onBurn: () => {
+      burns += 1;
+    },
+  });
+  const { code } = manager.beginPairing();
+  const wrong = code === "ABCDEFGH" ? "ABCDEFGJ" : "ABCDEFGH";
+
+  // Four wrong attempts: the code is still alive, no burn notification.
+  for (let i = 0; i < MAX_PAIRING_FAILURES - 1; i += 1) {
+    await manager.handlePairRequest(peerRequest(wrong), PEER_DEVICE_ID, "peer");
+  }
+  expect(burns).toBe(0);
+
+  // The fifth wrong attempt burns the code and notifies.
+  await manager.handlePairRequest(peerRequest(wrong), PEER_DEVICE_ID, "peer");
+  expect(burns).toBe(1);
+
+  // Further wrong attempts hit "no active code" — no repeat notifications.
+  await manager.handlePairRequest(peerRequest(wrong), PEER_DEVICE_ID, "peer");
+  expect(burns).toBe(1);
 });
 
 test("four wrong attempts do not invalidate the code", async () => {

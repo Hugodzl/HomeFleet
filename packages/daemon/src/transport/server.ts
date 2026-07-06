@@ -21,9 +21,7 @@ import { certFingerprint } from "../identity/fingerprint.js";
 import type { Identity } from "../identity/identity.js";
 import type { PairingManager } from "../pairing/pairing.js";
 import type { TrustStore } from "../trust/trust-store.js";
-
-/** Maximum accepted JSON request-body size. */
-export const MAX_BODY_BYTES = 1024 * 1024;
+import { MAX_BODY_BYTES } from "./limits.js";
 
 /** What the TLS layer knows about the requesting peer. */
 export interface PeerInfo {
@@ -168,7 +166,9 @@ export class NodeServer {
         void this.handleRequest(req, res);
       },
     );
-    this.server = server;
+    // Only claim `this.server` after listen succeeds: a failed bind (e.g.
+    // EADDRINUSE) must leave the instance restartable — never wedged in a
+    // state where retries say "already started" and stop() rejects.
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(this.port, this.host, () => {
@@ -176,6 +176,10 @@ export class NodeServer {
         resolve();
       });
     });
+    // Post-listen async errors (e.g. accept-loop EMFILE) must not crash the
+    // process; a net.Server with no 'error' listener would throw them.
+    server.on("error", () => {});
+    this.server = server;
     const address = server.address();
     if (address === null || typeof address === "string") {
       throw new Error("NodeServer bound to a non-TCP address");
@@ -267,7 +271,9 @@ export class NodeServer {
    */
   private identifyPeer(req: IncomingMessage): PeerInfo {
     const socket = req.socket as TLSSocket;
-    const cert = socket.getPeerCertificate(true);
+    // Leaf certificate only: the fingerprint is computed over the presented
+    // cert itself, never a chain (self-signed certs have no chain anyway).
+    const cert = socket.getPeerCertificate();
     // Without a client certificate, getPeerCertificate returns an empty
     // object (or null); `raw` is only present on a real certificate.
     if (cert === null || cert.raw === undefined) {
@@ -283,8 +289,20 @@ export class NodeServer {
   ): Promise<void> {
     try {
       const pathname = (req.url ?? "").split("?")[0] ?? "";
+      const peer = this.identifyPeer(req);
       const match = this.matchRoute(req.method ?? "", pathname);
       if (match === null) {
+        // Defense in depth: unpaired peers get the same 401 for unknown
+        // paths as for paired routes, so probing cannot map the route
+        // table. Paired peers get an honest 404.
+        if (!peer.paired) {
+          this.sendJson(
+            res,
+            401,
+            hfpError("UNAUTHORIZED", "peer is not paired"),
+          );
+          return;
+        }
         this.sendJson(
           res,
           404,
@@ -293,7 +311,6 @@ export class NodeServer {
         return;
       }
 
-      const peer = this.identifyPeer(req);
       if (match.route.auth === "paired" && !peer.paired) {
         this.sendJson(res, 401, hfpError("UNAUTHORIZED", "peer is not paired"));
         return;
