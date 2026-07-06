@@ -15,6 +15,9 @@
   },
   "dependencies": {
     "@homefleet/executors": "workspace:*",
-    "@homefleet/protocol": "workspace:*"
+    "@homefleet/protocol": "workspace:*",
+    "@peculiar/x509": "^2.0.0",
+    "reflect-metadata": "^0.2.2",
+    "zod": "^4.4.3"
   }
 }
