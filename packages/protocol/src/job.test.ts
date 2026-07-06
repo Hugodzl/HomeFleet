@@ -28,6 +28,31 @@ test("JobIdSchema rejects uppercase UUIDs (canonical form is lowercase)", () => 
   expect(JobIdSchema.safeParse(validJobId.toUpperCase()).success).toBe(false);
 });
 
+test("JobIdSchema enforces the RFC 4122 version and variant nibbles", () => {
+  // Nil UUID: version nibble 0 — not a valid RFC 4122 UUID.
+  expect(
+    JobIdSchema.safeParse("00000000-0000-0000-0000-000000000000").success,
+  ).toBe(false);
+  // Version nibble 9 does not exist.
+  expect(
+    JobIdSchema.safeParse("0b294587-2342-9718-b6bb-2b3c837e2a9c").success,
+  ).toBe(false);
+  // Variant nibble must be 8, 9, a, or b.
+  expect(
+    JobIdSchema.safeParse("0b294587-2342-4718-c6bb-2b3c837e2a9c").success,
+  ).toBe(false);
+  expect(
+    JobIdSchema.safeParse("0b294587-2342-4718-76bb-2b3c837e2a9c").success,
+  ).toBe(false);
+});
+
+test("JobIdSchema accepts crypto.randomUUID() output", () => {
+  for (let i = 0; i < 32; i += 1) {
+    const id = crypto.randomUUID();
+    expect(JobIdSchema.parse(id)).toBe(id);
+  }
+});
+
 test("JobTypeSchema accepts defined job types and rejects others", () => {
   expect(JobTypeSchema.parse("recon")).toBe("recon");
   expect(JobTypeSchema.parse("command")).toBe("command");

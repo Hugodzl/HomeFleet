@@ -68,7 +68,8 @@ HFP is bound to HTTPS with mutual TLS:
 | GET    | `/hfp/v0/jobs/{id}/events` | —                 | SSE stream of `JobEvent`       |
 | POST   | `/hfp/v0/jobs/{id}/cancel` | —                 | `CancelResponse`               |
 
-`{id}` is the job ID (a UUID) returned by `POST /hfp/v0/jobs`. On failure,
+`{id}` is the job ID (an RFC 4122 UUID, canonical lowercase) returned by
+`POST /hfp/v0/jobs`. On failure,
 endpoints respond with an appropriate HTTP status code and an `HfpError`
 JSON body.
 
@@ -86,8 +87,10 @@ as a single JSON document. The stream ends after the terminal `result` event.
 - Timestamps are ISO 8601 UTC strings with a trailing `Z`
   (e.g. `"2026-07-06T12:00:00Z"`); timezone offsets are rejected.
 - Identifiers are canonical lowercase: device IDs, commit hashes, and job
-  UUIDs. Senders MUST emit lowercase (`crypto.randomUUID()` already does);
-  receivers reject other casings.
+  IDs (RFC 4122 UUIDs, canonical lowercase). Senders MUST emit lowercase
+  (`crypto.randomUUID()` already does); receivers reject other casings, and
+  reject UUID-shaped strings that are not valid RFC 4122 UUIDs (e.g. the nil
+  UUID).
 - Fields documented with defaults are optional on the wire; receivers apply
   the default when the field is absent.
 
@@ -237,8 +240,8 @@ on their local allowlist.
 ### Delegation — `DelegateRequest` / `DelegateResponse`
 
 `DelegateRequest`: `{ params: JobParams }`.
-`DelegateResponse`: `{ jobId: string }` where `jobId` is a UUID minted by
-the worker. The worker MUST reject job types it does not support with
+`DelegateResponse`: `{ jobId: string }` where `jobId` is an RFC 4122 UUID
+(canonical lowercase) minted by the worker. The worker MUST reject job types it does not support with
 `UNSUPPORTED_JOB_TYPE` and MAY reject with `BUSY` when at
 `maxConcurrentJobs`.
 

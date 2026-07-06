@@ -4,12 +4,16 @@
 import { z } from "zod";
 import { HfpErrorSchema } from "./errors.js";
 
-/** Canonical lowercase UUID (crypto.randomUUID() already emits lowercase). */
+/**
+ * Canonical lowercase RFC 4122 UUID (crypto.randomUUID() already emits one).
+ * The version nibble (`[1-8]`) and variant nibble (`[89ab]`) are enforced, so
+ * shapes like the nil UUID or a version-0 UUID are rejected.
+ */
 export const JobIdSchema = z
   .string()
   .regex(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    "jobId must be a lowercase UUID",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    "jobId must be a lowercase RFC 4122 UUID",
   );
 export type JobId = z.infer<typeof JobIdSchema>;
 
@@ -77,6 +81,17 @@ export const JobParamsSchema = z.discriminatedUnion("type", [
   CommandJobParamsSchema,
 ]);
 export type JobParams = z.infer<typeof JobParamsSchema>;
+
+/**
+ * Compile-time guard: `JobTypeSchema` and the `JobParamsSchema` union must
+ * declare exactly the same set of job types. If a variant is added to either
+ * side without the other, this assignment stops typechecking.
+ */
+const _jobTypesInSync: JobParams["type"] extends JobType
+  ? JobType extends JobParams["type"]
+    ? true
+    : never
+  : never = true;
 
 export const JobStatusSchema = z.enum([
   "queued",
