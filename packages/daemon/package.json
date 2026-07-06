@@ -1,0 +1,20 @@
+{
+  "name": "@homefleet/daemon",
+  "version": "0.0.0",
+  "description": "homefleetd — the HomeFleet per-machine daemon (MCP front, node service, discovery, dispatch)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@homefleet/executors": "workspace:*",
+    "@homefleet/protocol": "workspace:*"
+  }
+}

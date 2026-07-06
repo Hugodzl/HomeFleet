@@ -1,0 +1,19 @@
+{
+  "name": "@homefleet/executors",
+  "version": "0.0.0",
+  "description": "HomeFleet job executors: command runner and minimal agent loop",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@homefleet/protocol": "workspace:*"
+  }
+}
