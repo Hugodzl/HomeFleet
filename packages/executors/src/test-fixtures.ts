@@ -44,7 +44,12 @@ export interface MockToolCall {
   id?: string;
   name: string;
   /** JSON-stringified into the wire `function.arguments`. */
-  arguments: unknown;
+  arguments?: unknown;
+  /**
+   * Verbatim wire `function.arguments` text; overrides `arguments`. Lets a
+   * script hand the loop argument text that is not valid JSON.
+   */
+  argumentsRaw?: string;
 }
 
 /**
@@ -203,7 +208,8 @@ export class MockOpenAiEndpoint {
                 type: "function",
                 function: {
                   name: call.name,
-                  arguments: JSON.stringify(call.arguments),
+                  arguments:
+                    call.argumentsRaw ?? JSON.stringify(call.arguments ?? {}),
                 },
               };
             }),
