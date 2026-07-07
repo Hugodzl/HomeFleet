@@ -7,6 +7,7 @@ import {
   type AgentTool,
   buildToolset,
   globToRegExp,
+  MAX_GREP_FILE_BYTES,
   MAX_GREP_MATCHES,
   MAX_READ_FILE_BYTES,
   READ_FILE_TRUNCATION_MARKER,
@@ -280,6 +281,50 @@ test("grep caps the number of matches", async () => {
   expect(lines[lines.length - 1]).toContain("match cap");
 });
 
+test("list_dir reports a symlink distinctly, even one targeting a directory", async () => {
+  const ws = await makeWorkspace();
+  const outside = await tempDir();
+  await writeFile(path.join(outside, "file.txt"), "x");
+  let linkedFile = false;
+  let linkedDir = false;
+  try {
+    await symlink(
+      path.join(outside, "file.txt"),
+      path.join(ws, "l-file"),
+      "file",
+    );
+    linkedFile = true;
+  } catch {
+    // Windows without developer mode/elevation — skip the symlink cases.
+  }
+  try {
+    await symlink(outside, path.join(ws, "l-dir"), "dir");
+    linkedDir = true;
+  } catch {
+    // As above.
+  }
+  if (!linkedFile && !linkedDir) {
+    return;
+  }
+  const result = await tool("list_dir").execute({ path: "." }, context(ws));
+  const entries = JSON.parse(result.content) as {
+    name: string;
+    kind: string;
+  }[];
+  const kindOf = (name: string): string | undefined =>
+    entries.find((entry) => entry.name === name)?.kind;
+  // Real files/dirs keep their kinds.
+  expect(kindOf("README.md")).toBe("file");
+  expect(kindOf("src")).toBe("dir");
+  // A symlink is never mislabeled as file/dir — even the dir-targeting one.
+  if (linkedFile) {
+    expect(kindOf("l-file")).toBe("symlink");
+  }
+  if (linkedDir) {
+    expect(kindOf("l-dir")).toBe("symlink");
+  }
+});
+
 test("grep reports an invalid pattern as a tool error", async () => {
   const ws = await makeWorkspace();
   const result = await tool("grep").execute(
@@ -288,6 +333,37 @@ test("grep reports an invalid pattern as a tool error", async () => {
   );
   expect(result.isError).toBe(true);
   expect(result.content).toContain("invalid pattern");
+});
+
+test("grep terminates a catastrophic-backtracking pattern instead of hanging", async () => {
+  const ws = await tempDir();
+  // A long non-matching line that makes (a+)+$ backtrack catastrophically.
+  await writeFile(path.join(ws, "evil.txt"), `${"a".repeat(60)}!`);
+  for (const pattern of ["(a+)+$", "(a*)*$", "(a|aa)+$"]) {
+    const started = Date.now();
+    const result = await tool("grep").execute({ pattern }, context(ws));
+    const elapsed = Date.now() - started;
+    // Promptly returns a timeout tool-result rather than freezing the loop.
+    expect(elapsed).toBeLessThan(5_000);
+    expect(result.isError).toBe(true);
+    expect(result.content).toMatch(/too expensive|timed out/i);
+  }
+}, 30_000);
+
+test("grep skips a file over the per-file byte cap and says so", async () => {
+  const ws = await tempDir();
+  await writeFile(path.join(ws, "small.txt"), "TODO here\n");
+  await writeFile(
+    path.join(ws, "huge.txt"),
+    `${"x".repeat(MAX_GREP_FILE_BYTES + 1_000)}\nTODO hidden\n`,
+  );
+  const result = await tool("grep").execute({ pattern: "TODO" }, context(ws));
+  expect(result.isError).toBe(false);
+  // The small file's match is present; the oversize file was not searched.
+  expect(result.content).toContain("small.txt:1:TODO here");
+  expect(result.content).not.toContain("TODO hidden");
+  expect(result.content).toContain("huge.txt");
+  expect(result.content).toMatch(/skipped|too large|exceeds/i);
 });
 
 test("grep reports no matches without erroring", async () => {

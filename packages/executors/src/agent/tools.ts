@@ -17,6 +17,7 @@
  */
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { type CommandAllowlist, safeSpawn } from "../spawn.js";
 import { decodeUtf8Capped } from "../truncation.js";
@@ -30,6 +31,30 @@ export const READ_FILE_TRUNCATION_MARKER = `\n[content truncated: file exceeds $
 
 /** Match cap for grep. */
 export const MAX_GREP_MATCHES = 100;
+
+/**
+ * Per-file byte cap for grep: a file larger than this is skipped, not read
+ * into memory. read_file caps at 64 KiB; grep scans whole files, so this is
+ * looser (1 MiB) but still bounds any single file — one huge file would
+ * otherwise be an OOM risk (defense-in-depth alongside the ReDoS timeout).
+ */
+export const MAX_GREP_FILE_BYTES = 1_048_576;
+
+/**
+ * Total-scanned-bytes cap across all files in one grep, so a workspace full
+ * of just-under-the-per-file-cap files cannot add up to an OOM.
+ */
+export const MAX_GREP_TOTAL_BYTES = 16 * 1_048_576;
+
+/**
+ * Hard wall-clock bound on the grep match work. The pattern is
+ * model-supplied and runs synchronously per line; a catastrophic-
+ * backtracking pattern (e.g. `(a+)+$` on a long non-matching line) freezes
+ * the single-threaded event loop, so maxWallMs — checked only between agent
+ * loop iterations — cannot save it. grep runs the match in a worker thread
+ * the main thread can `terminate()` on expiry; this is that deadline.
+ */
+export const GREP_MATCH_TIMEOUT_MS = 2000;
 
 /** Result cap for glob. */
 export const MAX_GLOB_RESULTS = 1_000;
@@ -251,10 +276,13 @@ const readFileTool = makeTool({
   },
 });
 
+/** The kinds list_dir reports for a directory entry. */
+type DirEntryKind = "file" | "dir" | "symlink";
+
 const listDirTool = makeTool({
   name: "list_dir",
   description:
-    'List a workspace directory. Returns a JSON array of { name, kind } entries where kind is "file" or "dir".',
+    'List a workspace directory. Returns a JSON array of { name, kind } entries where kind is "file", "dir", or "symlink".',
   parameters: {
     type: "object",
     properties: {
@@ -268,22 +296,182 @@ const listDirTool = makeTool({
   argsSchema: z.object({ path: z.string() }),
   run: async (args, context) => {
     const real = await resolveInWorkspace(context.workspaceDir, args.path);
+    // withFileTypes gives lstat semantics: a symlink reports as a symlink,
+    // NOT as whatever it targets. Checked FIRST so a link to a directory is
+    // never mislabeled "dir" (the walk skips symlinks, so the model would
+    // otherwise be told a traversable dir exists that grep/glob ignore).
     const entries = await readdir(real, { withFileTypes: true });
     const listed = entries
-      .map((entry) => ({
+      .map((entry): { name: string; kind: DirEntryKind } => ({
         name: entry.name,
-        kind: entry.isDirectory() ? "dir" : "file",
+        kind: entry.isSymbolicLink()
+          ? "symlink"
+          : entry.isDirectory()
+            ? "dir"
+            : "file",
       }))
       .sort((a, b) => byName(a.name, b.name));
     return { content: JSON.stringify(listed), isError: false };
   },
 });
 
+/** What the grep worker posts back to the main thread. */
+interface GrepWorkerResult {
+  /** `false` only for an uncompilable pattern (a normal tool error). */
+  ok: boolean;
+  /** Present when `ok` is false: the RegExp construction error message. */
+  error?: string;
+  matches: string[];
+  /** The MAX_GREP_MATCHES cap was hit. */
+  capped: boolean;
+  /** Files skipped for exceeding the per-file byte cap. */
+  skipped: string[];
+  /** The total-scanned-bytes cap was hit and scanning stopped early. */
+  bytesCapped: boolean;
+}
+
+/**
+ * Runs the whole grep — workspace walk, bounded reads, per-line matching —
+ * inside a worker thread. Kept as a plain-JS string so it needs no TS/ESM
+ * transform: `new Worker(src, { eval: true })` runs identically under vitest
+ * and a compiled/tsx runtime, and adds no dependency (item: ReDoS). It must
+ * NOT import project code — everything it needs is inlined or in workerData.
+ *
+ * The point of the worker is that the MAIN thread can `terminate()` it when
+ * a catastrophic-backtracking pattern blocks: a blocked regex on the main
+ * thread would freeze the event loop and no timer could fire.
+ */
+const GREP_WORKER_SOURCE = /* js */ `
+const { parentPort, workerData } = require("node:worker_threads");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const {
+  realRoot, pattern, skippedDirNames, maxMatches, maxFileBytes, maxTotalBytes,
+} = workerData;
+const skip = new Set(skippedDirNames);
+
+let regex;
+try {
+  regex = new RegExp(pattern);
+} catch (error) {
+  parentPort.postMessage({
+    ok: false,
+    error: error && error.message ? error.message : String(error),
+    matches: [], capped: false, skipped: [], bytesCapped: false,
+  });
+}
+
+if (regex) {
+  const matches = [];
+  const skipped = [];
+  let capped = false;
+  let bytesCapped = false;
+  let totalBytes = 0;
+
+  // Same walk as walkFiles(): sorted, symlink-skipping, .git/node_modules
+  // pruned, regular files only. Kept in sync with the TS version by hand.
+  const files = [];
+  const walk = (dirAbs, relPrefix) => {
+    const entries = fs.readdirSync(dirAbs, { withFileTypes: true });
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (skip.has(entry.name)) continue;
+        walk(path.join(dirAbs, entry.name), relPrefix + entry.name + "/");
+      } else if (entry.isFile()) {
+        files.push(relPrefix + entry.name);
+      }
+    }
+  };
+  walk(realRoot, "");
+
+  outer: for (const rel of files) {
+    const abs = path.join(realRoot, rel);
+    let size = 0;
+    try {
+      size = fs.statSync(abs).size;
+    } catch {
+      continue;
+    }
+    if (size > maxFileBytes) {
+      skipped.push(rel);
+      continue;
+    }
+    if (totalBytes + size > maxTotalBytes) {
+      bytesCapped = true;
+      break;
+    }
+    totalBytes += size;
+    const lines = fs.readFileSync(abs, "utf8").split(/\\r?\\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!regex.test(lines[i])) continue;
+      if (matches.length >= maxMatches) {
+        capped = true;
+        break outer;
+      }
+      matches.push(rel + ":" + (i + 1) + ":" + lines[i]);
+    }
+  }
+
+  parentPort.postMessage({ ok: true, matches, capped, skipped, bytesCapped });
+}
+`;
+
+/**
+ * Runs {@link GREP_WORKER_SOURCE} with a hard {@link GREP_MATCH_TIMEOUT_MS}
+ * deadline. Resolves with the worker result, or rejects with a distinctive
+ * "too expensive" error when the deadline fires (the worker is terminated).
+ */
+async function runGrepWorker(
+  realRoot: string,
+  pattern: string,
+): Promise<GrepWorkerResult> {
+  return new Promise<GrepWorkerResult>((resolve, reject) => {
+    const worker = new Worker(GREP_WORKER_SOURCE, {
+      eval: true,
+      workerData: {
+        realRoot,
+        pattern,
+        skippedDirNames: [...SKIPPED_DIR_NAMES],
+        maxMatches: MAX_GREP_MATCHES,
+        maxFileBytes: MAX_GREP_FILE_BYTES,
+        maxTotalBytes: MAX_GREP_TOTAL_BYTES,
+      },
+    });
+    let done = false;
+    const finish = (fn: () => void): void => {
+      if (done) {
+        return;
+      }
+      done = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      fn();
+    };
+    // The deadline the main thread owns: a blocked regex cannot fire its own
+    // timer, but this one runs on the (unblocked) main thread.
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(new Error("grep pattern too expensive or timed out")),
+      );
+    }, GREP_MATCH_TIMEOUT_MS);
+    worker.once("message", (result: GrepWorkerResult) => {
+      finish(() => resolve(result));
+    });
+    worker.once("error", (error) => {
+      finish(() => reject(error));
+    });
+  });
+}
+
 const grepTool = makeTool({
   name: "grep",
   description:
     "Search all workspace files line by line with a JavaScript regular expression. " +
-    `Returns path:line:text matches (at most ${MAX_GREP_MATCHES}); skips .git and node_modules.`,
+    `Returns path:line:text matches (at most ${MAX_GREP_MATCHES}); skips .git, node_modules, ` +
+    `and any file over ${MAX_GREP_FILE_BYTES} bytes.`,
   parameters: {
     type: "object",
     properties: {
@@ -296,43 +484,39 @@ const grepTool = makeTool({
   },
   argsSchema: z.object({ pattern: z.string() }),
   run: async (args, context) => {
-    let regex: RegExp;
+    const realRoot = await realpath(context.workspaceDir);
+    let result: GrepWorkerResult;
     try {
-      regex = new RegExp(args.pattern);
+      result = await runGrepWorker(realRoot, args.pattern);
     } catch (error) {
+      // The hard-timeout / terminate path: a pattern that would otherwise
+      // freeze the loop. Surfaced to the model as an error tool-result.
       return {
         isError: true,
-        content: `invalid pattern: ${error instanceof Error ? error.message : String(error)}`,
+        content: error instanceof Error ? error.message : String(error),
       };
     }
-    const realRoot = await realpath(context.workspaceDir);
-    const matches: string[] = [];
-    let capped = false;
-    for (const rel of await walkFiles(realRoot)) {
-      if (capped) {
-        break;
-      }
-      const lines = (await readFile(path.join(realRoot, rel), "utf8")).split(
-        /\r?\n/,
-      );
-      for (const [index, line] of lines.entries()) {
-        if (!regex.test(line)) {
-          continue;
-        }
-        if (matches.length >= MAX_GREP_MATCHES) {
-          capped = true;
-          break;
-        }
-        matches.push(`${rel}:${index + 1}:${line}`);
-      }
+    if (!result.ok) {
+      return { isError: true, content: `invalid pattern: ${result.error}` };
     }
-    if (capped) {
-      matches.push(
+    const lines = [...result.matches];
+    if (result.capped) {
+      lines.push(
         `[match cap reached: first ${MAX_GREP_MATCHES} matches shown]`,
       );
     }
+    if (result.bytesCapped) {
+      lines.push(
+        `[scan cap reached: stopped after ${MAX_GREP_TOTAL_BYTES} bytes]`,
+      );
+    }
+    for (const rel of result.skipped) {
+      lines.push(
+        `[skipped ${rel}: file exceeds the ${MAX_GREP_FILE_BYTES}-byte per-file cap]`,
+      );
+    }
     return {
-      content: matches.length === 0 ? "no matches" : matches.join("\n"),
+      content: lines.length === 0 ? "no matches" : lines.join("\n"),
       isError: false,
     };
   },
@@ -378,7 +562,9 @@ function runCommandTool(allowlist: CommandAllowlist): AgentTool {
     name: "run_command",
     description:
       "Run an allowlisted command in the workspace and return its exit code and output. " +
-      `Allowed commands: ${allowed.join(", ")}.`,
+      `Allowed commands: ${allowed.join(", ")}. ` +
+      "Note: if an allowed command is a Windows batch file (.cmd/.bat), its " +
+      "arguments may not contain %, newlines, or ! (such a call is rejected).",
     parameters: {
       type: "object",
       properties: {

@@ -18,7 +18,9 @@ import {
 import {
   AgentExecutor,
   EVENT_SUMMARY_MAX_CHARS,
+  MAX_SUMMARY_BYTES,
   MIN_AGENT_CONTEXT_WINDOW,
+  SUMMARY_TRUNCATION_MARKER,
 } from "./agent-executor.js";
 
 const jobId = "0b294587-2342-4718-b6bb-2b3c837e2a9c";
@@ -389,6 +391,45 @@ test("non-JSON tool arguments are an error tool-result, not a crash", async () =
     isError: true,
     resultSummary: expect.stringContaining("not valid JSON"),
   });
+});
+
+test("an oversized model summary is capped so the result can always ship", async () => {
+  const ws = await makeWorkspace();
+  // A summary well past MAX_SUMMARY_BYTES that ends on a multi-byte char, so
+  // the cut must land on a character boundary.
+  const euros = Math.ceil(MAX_SUMMARY_BYTES / 3) + 5_000;
+  const endpoint = await startEndpoint([
+    { kind: "content", content: "€".repeat(euros) },
+  ]);
+  const executor = makeExecutor(endpoint);
+  const { context } = harness(ws);
+
+  const result = await executor.execute(params(), context);
+
+  assertValid(result);
+  expect(result.status).toBe("succeeded");
+  const summary = result.summary ?? "";
+  expect(summary.endsWith(SUMMARY_TRUNCATION_MARKER)).toBe(true);
+  const kept = summary.slice(0, -SUMMARY_TRUNCATION_MARKER.length);
+  expect(Buffer.byteLength(kept, "utf8")).toBeLessThanOrEqual(
+    MAX_SUMMARY_BYTES,
+  );
+  // No split multi-byte character at the boundary.
+  expect(kept.includes("�")).toBe(false);
+  expect(kept.endsWith("€")).toBe(true);
+});
+
+test("a summary at or below the cap is passed through unchanged", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([
+    { kind: "content", content: "concise" },
+  ]);
+  const executor = makeExecutor(endpoint);
+  const { context } = harness(ws);
+
+  const result = await executor.execute(params(), context);
+
+  expect(result.summary).toBe("concise");
 });
 
 test("a malformed endpoint response fails the job with INTERNAL", async () => {

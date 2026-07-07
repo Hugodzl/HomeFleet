@@ -17,7 +17,7 @@ import {
 } from "@homefleet/protocol";
 import type { ExecutionContext, Executor } from "../executor.js";
 import type { CommandAllowlist } from "../spawn.js";
-import { truncateChars } from "../truncation.js";
+import { decodeUtf8Capped, truncateChars } from "../truncation.js";
 import {
   type ChatMessage,
   OpenAiClient,
@@ -40,6 +40,37 @@ export const MIN_AGENT_CONTEXT_WINDOW = 16_384;
 
 /** Cap for tool_call/tool_result event summaries (UTF-16 code units). */
 export const EVENT_SUMMARY_MAX_CHARS = 512;
+
+/**
+ * Byte cap for the job summary (the model's final content). Every other
+ * model/child-controlled string in M4 is capped so a result always fits the
+ * transport's 1 MiB body limit (`MAX_BODY_BYTES`); the summary was the one
+ * uncapped survivor. 256 KiB matches the per-stream capture cap.
+ *
+ * Enforced here in the executor, NOT as a `.max()` on JobResultSchema:
+ * tightening the wire contract is an RFC-sync change (M-later hardening),
+ * and doing it schema-side would turn an oversized summary into a validation
+ * throw rather than a graceful truncation. Future hardening: mirror this cap
+ * in the schema once the RFC is updated.
+ */
+export const MAX_SUMMARY_BYTES = 262_144;
+
+/** Appended to a summary cut at {@link MAX_SUMMARY_BYTES}. */
+export const SUMMARY_TRUNCATION_MARKER = `\n[summary truncated: exceeded ${MAX_SUMMARY_BYTES} bytes]`;
+
+/**
+ * Caps the model's final content to {@link MAX_SUMMARY_BYTES}, cutting on a
+ * UTF-8 character boundary (no split multi-byte char) and appending the
+ * marker on overflow. Reuses the same byte-capping machinery as the spawn
+ * capture and read_file.
+ */
+function capSummary(content: string): string {
+  const { text, truncated } = decodeUtf8Capped(
+    Buffer.from(content, "utf8"),
+    MAX_SUMMARY_BYTES,
+  );
+  return truncated ? text + SUMMARY_TRUNCATION_MARKER : text;
+}
 
 export interface AgentEndpointOptions {
   /** OpenAI-compatible base URL; `/chat/completions` is appended. */
@@ -141,6 +172,13 @@ export class AgentExecutor implements Executor<"recon"> {
       error: { code: "CANCELED", message: "job canceled" },
     });
 
+    // NOTE: contextWindow is validated-at-floor here (>= MIN_AGENT_CONTEXT_
+    // WINDOW) ONLY. It is NOT yet used to bound message-history growth: the
+    // loop appends every assistant turn and tool result without trimming, so
+    // this value must not be mistaken for "context remaining". Budgets
+    // (maxToolCalls / maxWallMs) are what bound a run today; ADR-0003's
+    // minimal loop is the deliberate v0 decision and history-trimming is
+    // future work, not built here.
     if (this.endpoint.contextWindow < MIN_AGENT_CONTEXT_WINDOW) {
       return failed(
         "INVALID_REQUEST",
@@ -223,12 +261,13 @@ export class AgentExecutor implements Executor<"recon"> {
             "endpoint returned neither content nor tool calls",
           );
         }
-        // Plain content is the summary: the job is done.
+        // Plain content is the summary: the job is done. Capped so the
+        // result always fits the transport body limit (see MAX_SUMMARY_BYTES).
         return {
           jobId: context.jobId,
           type: this.type,
           status: "succeeded",
-          summary: completion.content,
+          summary: capSummary(completion.content),
           stats: stats(),
         };
       }

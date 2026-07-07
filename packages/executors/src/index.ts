@@ -11,7 +11,9 @@ export {
   AgentExecutor,
   type AgentExecutorOptions,
   EVENT_SUMMARY_MAX_CHARS,
+  MAX_SUMMARY_BYTES,
   MIN_AGENT_CONTEXT_WINDOW,
+  SUMMARY_TRUNCATION_MARKER,
 } from "./agent/agent-executor.js";
 export {
   type ChatCompletion,
@@ -29,8 +31,11 @@ export {
 export {
   type AgentTool,
   buildToolset,
+  GREP_MATCH_TIMEOUT_MS,
   MAX_GLOB_RESULTS,
+  MAX_GREP_FILE_BYTES,
   MAX_GREP_MATCHES,
+  MAX_GREP_TOTAL_BYTES,
   MAX_READ_FILE_BYTES,
   READ_FILE_TRUNCATION_MARKER,
   type ToolExecutionContext,
@@ -51,10 +56,12 @@ export type {
 export {
   type CommandAllowlist,
   type CommandAllowlistEntry,
+  KILL_GRACE_MS,
   MAX_CAPTURED_STREAM_BYTES,
   resolveSpawnInvocation,
   type SafeSpawnOutcome,
   type SafeSpawnRequest,
+  type SpawnInvocation,
   STREAM_TRUNCATION_MARKER,
   safeSpawn,
 } from "./spawn.js";
