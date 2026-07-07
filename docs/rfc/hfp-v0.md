@@ -6,8 +6,9 @@ The HomeFleet Protocol (HFP) is a LAN protocol by which one HomeFleet daemon
 (`homefleetd`) delegates coding-oriented jobs — read-only repository
 reconnaissance and command execution — to another daemon on a paired machine.
 HFP messages are versioned JSON documents exchanged over HTTPS with mutual
-TLS. This document specifies HFP v0: node identity and capability exchange,
-pairing, job delegation, event streaming, results, and cancellation.
+TLS. This document specifies HFP v0: LAN discovery, node identity and
+capability exchange, pairing, job delegation, event streaming, results, and
+cancellation.
 
 The normative message shapes are the zod schemas in
 [`packages/protocol/src`](../../packages/protocol/src); this document
@@ -363,6 +364,100 @@ one of:
 { "code": "WORKSPACE_UNAVAILABLE", "message": "repo not on allowlist", "details": { "repoId": "homefleet" } }
 ```
 
+## Discovery
+
+Discovery is how daemons find connection candidates on the LAN before any
+pairing or connection happens. It runs over two channels — mDNS/DNS-SD and a
+UDP multicast fallback — that both carry the same payload,
+`DiscoveryAnnouncement`. Discovery is a hint channel, not a capabilities
+exchange: a peer learns "there may be a HomeFleet node at host:port", nothing
+more. Capabilities travel in `hello`, after pairing.
+
+### Security model: announcements are unauthenticated hints
+
+Discovery announcements are **UNAUTHENTICATED HINTS**. Receivers MUST
+validate them (schema validation plus the datagram size cap below) but MUST
+NOT let them establish trust or identity: identity is only ever established
+by the mTLS certificate-fingerprint pin at connect time (ADR-0004). The
+`deviceId` in an announcement is a routing and deduplication hint; a forged
+announcement can at worst cause a connection attempt that fails the
+fingerprint pin. Invalid, oversized, or otherwise unparseable announcements
+MUST be dropped silently — the discovery channels receive untrusted bytes
+and never answer garbage.
+
+### `DiscoveryAnnouncement`
+
+| Field             | Type    | Notes                                                        |
+| ----------------- | ------- | ------------------------------------------------------------ |
+| `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
+| `name`            | string  | Human-readable, 1–64 chars (same constraints as `NodeInfo.name`) |
+| `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
+| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document            |
+
+```json
+{
+  "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "name": "tower",
+  "port": 47113,
+  "protocolVersion": "0.1.0"
+}
+```
+
+### Constants
+
+Exported by `@homefleet/protocol` so advertisers and listeners cannot drift:
+
+| Constant                       | Value           | Meaning                                  |
+| ------------------------------ | --------------- | ---------------------------------------- |
+| `DISCOVERY_MDNS_SERVICE_TYPE`  | `homefleet`     | mDNS service type (`_homefleet._tcp`)    |
+| `DISCOVERY_MULTICAST_GROUP`    | `239.255.42.98` | Default UDP multicast group              |
+| `DISCOVERY_UDP_PORT`           | `56371`         | Default UDP discovery port               |
+| `DISCOVERY_MAX_DATAGRAM_BYTES` | `4096`          | Max UDP datagram size; larger is dropped |
+
+### mDNS channel
+
+Nodes advertise a DNS-SD service of type `_homefleet._tcp`:
+
+- The **instance name** is the node's name. mDNS instance labels are limited
+  to 63 bytes; longer names are truncated, and implementations SHOULD resolve
+  instance-name collisions by renaming (e.g. appending `" (2)"`), keeping the
+  result within the 63-byte limit.
+- The **SRV port** is the announcement's `port` (the HFP HTTPS port).
+- The **TXT record** carries the remaining announcement fields:
+  key `id` = `deviceId`, key `pv` = `protocolVersion`.
+
+Browsers reconstruct the announcement from instance name, SRV port, and TXT
+record, and MUST drop services whose reconstruction fails validation.
+
+### UDP multicast channel
+
+A fallback for networks where mDNS is filtered. The wire format is
+`DiscoveryDatagram`: a `DiscoveryAnnouncement` plus a `kind` field, encoded
+as one JSON document per datagram, at most 4096 bytes.
+
+| Field  | Type                        | Notes                        |
+| ------ | --------------------------- | ---------------------------- |
+| `kind` | `"announce" \| "response"`  | See exchange rules below     |
+
+```json
+{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.1.0" }
+```
+
+Exchange rules:
+
+- On startup — and periodically thereafter (default every 60 s), because UDP
+  is lossy — a node sends a `kind: "announce"` datagram to the multicast
+  group and port above.
+- A node receiving a valid `announce` from another device SHOULD reply with
+  a `kind: "response"` datagram, unicast to the sender's address and port,
+  so both sides learn each other.
+- A node MUST NOT reply to a `response` — the tag exists so replies cannot
+  trigger reply storms.
+- A node MUST ignore datagrams carrying its own `deviceId` (its own
+  multicast echo).
+- Datagrams larger than `DISCOVERY_MAX_DATAGRAM_BYTES` MUST be dropped
+  without parsing.
+
 ## Job Lifecycle
 
 ```
@@ -411,6 +506,11 @@ queued ---> running +-----------> failed
   mTLS connection whose peer certificate fingerprint has been checked
   against the paired-device list. Unpaired peers MUST be rejected before any
   HFP handler other than `pair` runs (ADR-0004).
+- **Discovery is untrusted input.** Announcements are unauthenticated hints
+  (see Discovery): schema-validated and size-capped, but never a basis for
+  trust or identity. Identity comes from the fingerprint pin at connect
+  time; the worst a forged announcement achieves is a failed connection
+  attempt.
 - **Pairing is consent.** The pairing code is a short-lived, human-relayed
   secret confirming fingerprints out-of-band. Daemons SHOULD expire codes
   quickly and rate-limit `pair` attempts to resist brute force of the

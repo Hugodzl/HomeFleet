@@ -4,6 +4,7 @@
  * The zod schemas are the source of truth; every exported `XxxSchema` has a
  * matching inferred `Xxx` type. Spec: docs/rfc/hfp-v0.md.
  */
+export * from "./discovery.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./job.js";

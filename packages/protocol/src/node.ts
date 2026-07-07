@@ -14,9 +14,15 @@ export const DeviceIdSchema = z
 export type DeviceId = z.infer<typeof DeviceIdSchema>;
 
 /** Light semver check — enough for v0 version strings like "0.1.0". */
-const SemverSchema = z
+export const SemverSchema = z
   .string()
   .regex(/^\d+\.\d+\.\d+$/, "must be a semver string (X.Y.Z)");
+
+/**
+ * Human-readable node name, 1-64 chars. Shared by `NodeInfo` and
+ * `DiscoveryAnnouncement` so the two cannot drift.
+ */
+export const NodeNameSchema = z.string().min(1).max(64);
 
 export const GpuInfoSchema = z.object({
   name: z.string(),
@@ -39,7 +45,7 @@ export type ExecutorKind = z.infer<typeof ExecutorKindSchema>;
 
 export const NodeInfoSchema = z.object({
   deviceId: DeviceIdSchema,
-  name: z.string().min(1).max(64),
+  name: NodeNameSchema,
   daemonVersion: SemverSchema,
   protocolVersion: SemverSchema,
   platform: z.enum(["win32", "linux", "darwin"]),
