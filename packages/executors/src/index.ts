@@ -11,3 +11,13 @@ export type {
   ToolCallEventPayload,
   ToolResultEventPayload,
 } from "./executor.js";
+export {
+  type CommandAllowlist,
+  type CommandAllowlistEntry,
+  MAX_CAPTURED_STREAM_BYTES,
+  resolveSpawnInvocation,
+  type SafeSpawnOutcome,
+  type SafeSpawnRequest,
+  STREAM_TRUNCATION_MARKER,
+  safeSpawn,
+} from "./spawn.js";
