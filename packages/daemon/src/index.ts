@@ -62,6 +62,42 @@ export {
   statusForCode,
 } from "./jobs/routes.js";
 export {
+  DelegationRegistry,
+  type DelegationRoute,
+  MAX_TRACKED_DELEGATIONS,
+} from "./mcp/delegation-registry.js";
+export {
+  type McpHttpServerOptions,
+  type RunningMcpHttpServer,
+  startMcpHttpServer,
+} from "./mcp/http-transport.js";
+export {
+  DEFAULT_HELLO_TIMEOUT_MS,
+  endpointSourceFromDiscovery,
+  NodeDirectory,
+  type NodeDirectoryEntry,
+  type NodeDirectoryOptions,
+  type NodeEndpoint,
+  type NodeEndpointSource,
+  type ResolvedNode,
+} from "./mcp/node-directory.js";
+export {
+  createMcpServer,
+  MCP_SERVER_NAME,
+  MCP_SERVER_VERSION,
+} from "./mcp/server.js";
+export {
+  DelegateTaskOutputSchema,
+  type DelegationClient,
+  JobResultOutputSchema,
+  JobStatusOutputSchema,
+  ListNodesOutputSchema,
+  type McpToolCollaborators,
+  type NodeSummary,
+  NodeSummarySchema,
+  registerHomeFleetTools,
+} from "./mcp/tools.js";
+export {
   DEFAULT_PAIRING_TTL_MS,
   generatePairingCode,
   MAX_PAIRING_FAILURES,
