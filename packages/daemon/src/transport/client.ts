@@ -12,14 +12,25 @@
  */
 import { once } from "node:events";
 import { request as httpRequest, type IncomingMessage } from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import {
+  type CancelResponse,
+  CancelResponseSchema,
+  type DelegateRequest,
+  type DelegateResponse,
+  DelegateResponseSchema,
   type HelloRequest,
   type HelloResponse,
   HelloResponseSchema,
   HFP_PATH_PREFIX,
   type HfpError,
   HfpErrorSchema,
+  type JobEvent,
+  JobEventSchema,
+  type JobParams,
+  type JobSnapshot,
+  JobSnapshotSchema,
   type NodeInfo,
   type PairRequest,
   type PairResponse,
@@ -29,6 +40,17 @@ import type { z } from "zod";
 import { certFingerprint } from "../identity/fingerprint.js";
 import type { Identity } from "../identity/identity.js";
 import { MAX_BODY_BYTES } from "./limits.js";
+
+/**
+ * Per-record cap on a buffered (not-yet-terminated) SSE event: the largest
+ * legitimate event is a `result` carrying a full `JobResult`, itself bounded
+ * by the transport body limit, so 2× that is generous while still rejecting
+ * an unbounded event from an untrusted peer.
+ */
+export const MAX_SSE_EVENT_BYTES = 2 * MAX_BODY_BYTES;
+
+/** Cap on total bytes read across one event stream (untrusted peer). */
+export const MAX_SSE_TOTAL_BYTES = 16 * 1024 * 1024;
 
 /**
  * Default per-request timeout. Covers connect + TLS handshake as well as
@@ -232,6 +254,113 @@ export class HfpClient {
     return { response, serverDeviceId };
   }
 
+  /** `POST /hfp/v0/jobs` — delegate a job to a paired worker. */
+  async delegate(
+    target: HfpTarget,
+    params: JobParams,
+  ): Promise<DelegateResponse> {
+    const body: DelegateRequest = { params };
+    return this.request({
+      ...target,
+      method: "POST",
+      path: "/jobs",
+      body,
+      responseSchema: DelegateResponseSchema,
+    });
+  }
+
+  /** `GET /hfp/v0/jobs/{id}` — poll a delegated job's snapshot. */
+  async jobSnapshot(target: HfpTarget, jobId: string): Promise<JobSnapshot> {
+    return this.request({
+      ...target,
+      method: "GET",
+      path: `/jobs/${encodeURIComponent(jobId)}`,
+      responseSchema: JobSnapshotSchema,
+    });
+  }
+
+  /** `POST /hfp/v0/jobs/{id}/cancel` — request cancellation of a delegated job. */
+  async cancelJob(target: HfpTarget, jobId: string): Promise<CancelResponse> {
+    return this.request({
+      ...target,
+      method: "POST",
+      path: `/jobs/${encodeURIComponent(jobId)}/cancel`,
+      responseSchema: CancelResponseSchema,
+    });
+  }
+
+  /**
+   * `GET /hfp/v0/jobs/{id}/events` — stream a delegated job's events over SSE.
+   *
+   * Reuses {@link connectPinned} (the fingerprint pin is NOT reimplemented):
+   * the verified socket is held for the stream's lifetime and destroyed when
+   * the stream ends, the consumer stops early, or an error is thrown — the
+   * ownership-transfer contract for the streaming path. Each SSE `data:`
+   * record is parsed as one {@link JobEvent} (malformed records reject);
+   * events are yielded in order and the iterator ends after the terminal
+   * `result` event. `fromSeq` resumes from that seq via `Last-Event-ID`.
+   * A pinning/handshake failure surfaces the same typed errors as
+   * {@link request}.
+   */
+  async *streamJobEvents(
+    target: HfpTarget,
+    jobId: string,
+    options: { fromSeq?: number } = {},
+  ): AsyncGenerator<JobEvent, void, unknown> {
+    const timeoutMs = target.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const { socket } = await this.connectPinned({
+      host: target.host,
+      port: target.port,
+      expectedDeviceId: target.expectedDeviceId,
+      timeoutMs,
+    });
+    try {
+      // The stream can be sparse (a slow job); disable the socket-inactivity
+      // timeout for the streaming phase. connectPinned already used it to
+      // bound the connect + handshake; server heartbeats and job budgets
+      // bound the rest.
+      socket.setTimeout(0);
+
+      const headers: Record<string, string> = {
+        host: `${target.host}:${target.port}`,
+        accept: "text/event-stream",
+      };
+      const { fromSeq } = options;
+      if (fromSeq !== undefined && Number.isInteger(fromSeq) && fromSeq > 0) {
+        // "I already have through fromSeq-1" -> server resumes at fromSeq.
+        headers["last-event-id"] = String(fromSeq - 1);
+      }
+
+      const response = await new Promise<IncomingMessage>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            createConnection: () => socket,
+            method: "GET",
+            path: `${HFP_PATH_PREFIX}/jobs/${encodeURIComponent(jobId)}/events`,
+            headers,
+          },
+          resolve,
+        );
+        req.on("error", reject);
+        req.end();
+      });
+      // A late error (e.g. from the socket.destroy below) must not go unhandled.
+      response.on("error", () => {});
+
+      const status = response.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        // Unknown/unowned job (or any error) arrives as a JSON body before
+        // the stream opens: surface the same typed error as request().
+        const bodyText = await readCappedBody(response, MAX_BODY_BYTES);
+        throw buildRequestError(status, bodyText);
+      }
+
+      yield* parseSseEvents(response);
+    } finally {
+      socket.destroy();
+    }
+  }
+
   private async requestInternal<T>(options: {
     host: string;
     port: number;
@@ -402,6 +531,84 @@ export class HfpClient {
       socket.destroy();
     }
   }
+}
+
+/**
+ * Parses an SSE response into ordered {@link JobEvent}s, tolerating chunk
+ * boundaries that split a record (incl. multi-byte UTF-8, via StringDecoder)
+ * and ending after the terminal `result` event. Comment lines (`:` — the
+ * server's heartbeats) and `id:` lines carry no payload and are skipped: the
+ * seq travels inside the event JSON.
+ */
+async function* parseSseEvents(
+  response: IncomingMessage,
+): AsyncGenerator<JobEvent, void, unknown> {
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  let totalBytes = 0;
+  let dataLines: string[] = [];
+
+  for await (const chunk of response) {
+    const bytes = chunk as Buffer;
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_SSE_TOTAL_BYTES) {
+      throw new HfpResponseTooLargeError(MAX_SSE_TOTAL_BYTES);
+    }
+    buffer += decoder.write(bytes);
+    if (buffer.length > MAX_SSE_EVENT_BYTES) {
+      // An unterminated record grew past the per-event cap.
+      throw new HfpResponseTooLargeError(MAX_SSE_EVENT_BYTES);
+    }
+
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      let line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+      if (line === "") {
+        const event = flushSseEvent(dataLines);
+        dataLines = [];
+        if (event !== undefined) {
+          yield event;
+          if (event.type === "result") {
+            return;
+          }
+        }
+      } else if (line.startsWith("data:")) {
+        // Strip one optional leading space after the colon (SSE convention).
+        dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+}
+
+/** Assembles buffered `data:` lines into one validated JobEvent, or nothing. */
+function flushSseEvent(dataLines: string[]): JobEvent | undefined {
+  if (dataLines.length === 0) {
+    return undefined;
+  }
+  return JobEventSchema.parse(JSON.parse(dataLines.join("\n")));
+}
+
+/** Reads up to `limit` bytes of a (small, error) response body as text. */
+async function readCappedBody(
+  response: IncomingMessage,
+  limit: number,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of response) {
+    const bytes = chunk as Buffer;
+    total += bytes.length;
+    if (total > limit) {
+      break;
+    }
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function buildRequestError(status: number, bodyText: string): HfpRequestError {

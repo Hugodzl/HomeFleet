@@ -42,6 +42,25 @@ export type { UdpSendTarget } from "./discovery/udp.js";
 export { certFingerprint } from "./identity/fingerprint.js";
 export { type Identity, loadOrCreateIdentity } from "./identity/identity.js";
 export {
+  JobDispatchError,
+  type JobRecord,
+  type JobSubscriber,
+} from "./jobs/job.js";
+export {
+  DEFAULT_MAX_CONCURRENT_JOBS,
+  DEFAULT_MAX_QUEUED_JOBS,
+  DEFAULT_MAX_RETAINED_JOBS,
+  JobManager,
+  type JobManagerOptions,
+  type JobSubscription,
+  type WorkspaceResolver,
+} from "./jobs/job-manager.js";
+export {
+  registerJobRoutes,
+  SSE_HEARTBEAT_MS,
+  statusForCode,
+} from "./jobs/routes.js";
+export {
   DEFAULT_PAIRING_TTL_MS,
   generatePairingCode,
   MAX_PAIRING_FAILURES,
@@ -59,6 +78,8 @@ export {
   HfpResponseTooLargeError,
   type HfpTarget,
   HfpTimeoutError,
+  MAX_SSE_EVENT_BYTES,
+  MAX_SSE_TOTAL_BYTES,
   MissingServerCertificateError,
   type PairTarget,
 } from "./transport/client.js";
@@ -72,6 +93,9 @@ export {
   type RouteHandler,
   type RouteOptions,
   type RouteResult,
+  type StreamRouteContext,
+  type StreamRouteHandler,
+  type StreamRouteOptions,
 } from "./transport/server.js";
 export {
   type TrustedDevice,

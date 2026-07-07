@@ -52,6 +52,28 @@ export type RouteHandler<T> = (
 ) => RouteResult | Promise<RouteResult>;
 
 /**
+ * Context for a streaming route (M5 SSE). Unlike a JSON route, the handler
+ * takes over the raw {@link ServerResponse}: it owns writing headers, the
+ * body, and ending the response. The auth gate has already run — a `paired`
+ * stream route only reaches its handler for a paired peer.
+ */
+export interface StreamRouteContext {
+  peer: PeerInfo;
+  params: Record<string, string>;
+  req: IncomingMessage;
+  res: ServerResponse;
+}
+
+export type StreamRouteHandler = (
+  context: StreamRouteContext,
+) => void | Promise<void>;
+
+export interface StreamRouteOptions {
+  /** Defaults to `"paired"`. */
+  auth?: RouteAuth;
+}
+
+/**
  * `paired` routes reject peers that are not in the trust store (or present
  * no client certificate) with 401 UNAUTHORIZED before the handler runs.
  * `unpaired-ok` is reserved for `POST /hfp/v0/pair`.
@@ -64,7 +86,8 @@ export interface RouteOptions<T> {
   auth?: RouteAuth;
 }
 
-interface RegisteredRoute {
+interface JsonRegisteredRoute {
+  kind: "json";
   method: string;
   /** Full path split into segments; `:name` segments capture. */
   segments: string[];
@@ -75,6 +98,16 @@ interface RegisteredRoute {
     params: Record<string, string>,
   ) => Promise<RouteResult>;
 }
+
+interface StreamRegisteredRoute {
+  kind: "stream";
+  method: string;
+  segments: string[];
+  auth: RouteAuth;
+  invokeStream: StreamRouteHandler;
+}
+
+type RegisteredRoute = JsonRegisteredRoute | StreamRegisteredRoute;
 
 export interface NodeServerOptions {
   identity: Identity;
@@ -148,7 +181,35 @@ export class NodeServer {
       }
       return handler({ body: parsed.data, peer, params });
     };
-    this.routes.push({ method, segments: fullPath.split("/"), auth, invoke });
+    this.routes.push({
+      kind: "json",
+      method,
+      segments: fullPath.split("/"),
+      auth,
+      invoke,
+    });
+  }
+
+  /**
+   * Registers a streaming route (M5 SSE). Same path/auth semantics as
+   * {@link route}, but the handler takes over the raw response AFTER the
+   * identify-peer → paired chokepoint has run, so the auth gate is never
+   * bypassed. No request-body schema: streaming routes are bodyless GETs.
+   */
+  routeStream(
+    method: "GET" | "POST",
+    routePath: string,
+    options: StreamRouteOptions,
+    handler: StreamRouteHandler,
+  ): void {
+    const fullPath = `${HFP_PATH_PREFIX}${routePath}`;
+    this.routes.push({
+      kind: "stream",
+      method,
+      segments: fullPath.split("/"),
+      auth: options.auth ?? "paired",
+      invokeStream: handler,
+    });
   }
 
   async start(): Promise<{ port: number }> {
@@ -313,6 +374,18 @@ export class NodeServer {
 
       if (match.route.auth === "paired" && !peer.paired) {
         this.sendJson(res, 401, hfpError("UNAUTHORIZED", "peer is not paired"));
+        return;
+      }
+
+      // Streaming routes take over the response after the same auth gate; no
+      // JSON body is read (they are bodyless GETs).
+      if (match.route.kind === "stream") {
+        await match.route.invokeStream({
+          peer,
+          params: match.params,
+          req,
+          res,
+        });
         return;
       }
 
