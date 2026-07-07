@@ -75,7 +75,14 @@ endpoints respond with an appropriate HTTP status code and an `HfpError`
 JSON body.
 
 On the events stream, each SSE `data:` field carries one `JobEvent` encoded
-as a single JSON document. The stream ends after the terminal `result` event.
+as a single JSON document, and each record's SSE `id:` field carries that
+event's `seq`. The stream ends after the terminal `result` event. The worker
+MAY interleave SSE comment lines (`:` …) as keep-alives; clients ignore them.
+A client MAY resume with the standard `Last-Event-ID` request header: the
+worker replays the buffered events with `seq` greater than the supplied id
+(i.e. resumes at `Last-Event-ID + 1`) and then continues live. Events for a
+job are retained in memory only for the life of the daemon process; resume is
+best-effort within that lifetime.
 
 ## Messages
 
