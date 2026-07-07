@@ -115,7 +115,11 @@ export interface HfpTarget {
   host: string;
   port: number;
   expectedDeviceId: string;
-  /** Per-request timeout; defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  /**
+   * Per-request inactivity timeout; defaults to
+   * {@link DEFAULT_REQUEST_TIMEOUT_MS}. `0` disables the timeout entirely
+   * (Node socket semantics) — it does not mean "fail immediately".
+   */
   timeoutMs?: number;
 }
 
@@ -128,7 +132,11 @@ export interface PairTarget {
   host: string;
   port: number;
   expectedDeviceId?: string;
-  /** Per-request timeout; defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  /**
+   * Per-request inactivity timeout; defaults to
+   * {@link DEFAULT_REQUEST_TIMEOUT_MS}. `0` disables the timeout entirely
+   * (Node socket semantics) — it does not mean "fail immediately".
+   */
   timeoutMs?: number;
 }
 
@@ -141,7 +149,11 @@ export interface HfpRequestOptions<T> {
   path: string;
   body?: unknown;
   responseSchema: z.ZodType<T>;
-  /** Per-request timeout; defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  /**
+   * Per-request inactivity timeout; defaults to
+   * {@link DEFAULT_REQUEST_TIMEOUT_MS}. `0` disables the timeout entirely
+   * (Node socket semantics) — it does not mean "fail immediately".
+   */
   timeoutMs?: number;
 }
 
