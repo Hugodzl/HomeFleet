@@ -1,107 +1,14 @@
 import type { DiscoveryAnnouncement } from "@homefleet/protocol";
 import { expect, test } from "vitest";
+import { FakeMdnsBackend } from "../test-fixtures.js";
 import type { DiscoveryCandidate } from "./candidate.js";
 import {
   decodeFoundService,
   encodeAnnouncementTxt,
   MAX_INSTANCE_LABEL_BYTES,
-  type MdnsBackend,
   MdnsDiscovery,
-  type MdnsFoundService,
-  type MdnsPublishRequest,
   truncateInstanceLabel,
 } from "./mdns.js";
-
-interface FakePublication {
-  request: MdnsPublishRequest;
-  stopped: boolean;
-  stop(): Promise<void>;
-}
-
-interface FakeBrowser {
-  type: string;
-  onUp: (service: MdnsFoundService) => void;
-  stopped: boolean;
-  stop(): void;
-}
-
-/**
- * The one sanctioned fake: stands in for bonjour-service, which cannot be
- * exercised deterministically in CI. Publications are delivered to browsers
- * (existing and late-registered) like an mDNS cache would; the TXT
- * encode/decode under test is the real code in mdns.ts.
- */
-class FakeMdnsBackend implements MdnsBackend {
-  publications: FakePublication[] = [];
-  browsers: FakeBrowser[] = [];
-  destroyed = false;
-  /** Addresses attached to delivered services. */
-  addresses: string[] = ["192.168.1.20"];
-
-  publish(request: MdnsPublishRequest): FakePublication {
-    const publication: FakePublication = {
-      request,
-      stopped: false,
-      stop: async () => {
-        publication.stopped = true;
-      },
-    };
-    this.publications.push(publication);
-    for (const browser of this.browsers) {
-      this.deliverTo(browser, publication);
-    }
-    return publication;
-  }
-
-  browse(type: string, onUp: (service: MdnsFoundService) => void): FakeBrowser {
-    const browser: FakeBrowser = {
-      type,
-      onUp,
-      stopped: false,
-      stop() {
-        this.stopped = true;
-      },
-    };
-    this.browsers.push(browser);
-    for (const publication of this.publications) {
-      this.deliverTo(browser, publication);
-    }
-    return browser;
-  }
-
-  async destroy(): Promise<void> {
-    this.destroyed = true;
-  }
-
-  /** Delivers an arbitrary service to every live browser. */
-  deliver(service: MdnsFoundService): void {
-    for (const browser of this.browsers) {
-      if (!browser.stopped && browser.type === service.type) {
-        browser.onUp(service);
-      }
-    }
-  }
-
-  private deliverTo(browser: FakeBrowser, publication: FakePublication): void {
-    if (browser.stopped || publication.stopped) {
-      return;
-    }
-    if (browser.type !== publication.request.type) {
-      return;
-    }
-    browser.onUp({
-      type: publication.request.type,
-      name: publication.request.name,
-      port: publication.request.port,
-      txt: { ...publication.request.txt },
-      addresses: [...this.addresses],
-    });
-  }
-
-  activePublications(): FakePublication[] {
-    return this.publications.filter((publication) => !publication.stopped);
-  }
-}
 
 const deviceIdA = "aa".repeat(32);
 const deviceIdB = "bb".repeat(32);

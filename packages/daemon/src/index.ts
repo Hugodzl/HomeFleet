@@ -2,10 +2,41 @@
  * homefleetd — the HomeFleet per-machine daemon.
  *
  * M2 surface: device identity, trust store, mTLS transport with fingerprint
- * pinning, and the pairing-code flow. Discovery (M3) and job dispatch (M5)
- * build on these.
+ * pinning, and the pairing-code flow. M3 adds LAN discovery (mDNS + UDP
+ * multicast + static entries, merged by the aggregator) and the daemon
+ * config file. Job dispatch (M5) builds on these.
  */
+export {
+  type DaemonConfig,
+  DaemonConfigSchema,
+  type DiscoveryConfig,
+  DiscoveryConfigSchema,
+  loadDaemonConfig,
+  type StaticNode,
+  StaticNodeSchema,
+} from "./config/config.js";
 export { resolveDataDir } from "./config/paths.js";
+export {
+  DiscoveryAggregator,
+  type DiscoveryAggregatorOptions,
+} from "./discovery/aggregator.js";
+export type {
+  DiscoveryCandidate,
+  DiscoverySource,
+} from "./discovery/candidate.js";
+export {
+  type KnownNode,
+  KnownNodeSchema,
+  KnownNodesRegistry,
+} from "./discovery/known-nodes.js";
+export type {
+  MdnsBackend,
+  MdnsBrowser,
+  MdnsFoundService,
+  MdnsPublication,
+  MdnsPublishRequest,
+} from "./discovery/mdns.js";
+export type { UdpSendTarget } from "./discovery/udp.js";
 export { certFingerprint } from "./identity/fingerprint.js";
 export { type Identity, loadOrCreateIdentity } from "./identity/identity.js";
 export {
