@@ -34,6 +34,7 @@ import {
   HfpClient,
   HfpRequestError,
   type HfpTarget,
+  HfpTimeoutError,
 } from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
@@ -493,9 +494,45 @@ test("a client disconnecting mid-stream frees the server-side subscription", asy
     break;
   }
 
-  // The server notices the disconnect and drops the subscription.
-  await waitUntil(() => b.jobManager.subscriberCount(jobId) === 0);
-  expect(b.jobManager.subscriberCount(jobId)).toBe(0);
+  // The server notices the disconnect and drops the subscription. The count
+  // is owner-checked, so A queries with its own device id.
+  const owner = a.identity.deviceId;
+  await waitUntil(() => b.jobManager.subscriberCount(jobId, owner) === 0);
+  expect(b.jobManager.subscriberCount(jobId, owner)).toBe(0);
+}, 20_000);
+
+test("a silent stream trips the client idle timeout instead of hanging", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  // A long, silent job: after the initial running event nothing is sent, and
+  // the server heartbeat is far off. A short injected idle timeout must trip
+  // (throw HfpTimeoutError) rather than block the iterator on a half-open
+  // socket forever.
+  const { jobId } = await a.client.delegate(
+    target,
+    commandParams("node", ["-e", "setTimeout(()=>{},30000)"]),
+  );
+
+  const seen: JobEvent[] = [];
+  const thrown = await (async () => {
+    try {
+      for await (const event of a.client.streamJobEvents(target, jobId, {
+        idleTimeoutMs: 250,
+      })) {
+        seen.push(event);
+      }
+      return null;
+    } catch (error) {
+      return error;
+    }
+  })();
+
+  expect(thrown).toBeInstanceOf(HfpTimeoutError);
+  // The running event arrived before the silence that tripped the timeout.
+  expect(seen[0]?.type).toBe("status");
 }, 20_000);
 
 test("an unavailable workspace yields a terminal failed result (WORKSPACE_UNAVAILABLE)", async () => {

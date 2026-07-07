@@ -53,6 +53,16 @@ export const MAX_SSE_EVENT_BYTES = 2 * MAX_BODY_BYTES;
 export const MAX_SSE_TOTAL_BYTES = 16 * 1024 * 1024;
 
 /**
+ * Socket-inactivity timeout for the SSE streaming phase. It MUST exceed the
+ * server's SSE heartbeat interval (`SSE_HEARTBEAT_MS`, 15s) by a comfortable
+ * margin so a live stream — kept ticking by heartbeats between sparse job
+ * events — is never killed, while a silent or half-open peer (server slept,
+ * crashed, or was unplugged with no clean FIN/RST) still trips it instead of
+ * hanging the iterator forever. Overridable per call for tests.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 45_000;
+
+/**
  * Default per-request timeout. Covers connect + TLS handshake as well as
  * waiting on the response (as a socket-inactivity timeout). M3 discovery
  * will routinely `hello()` machines that are asleep or half-offline.
@@ -305,9 +315,10 @@ export class HfpClient {
   async *streamJobEvents(
     target: HfpTarget,
     jobId: string,
-    options: { fromSeq?: number } = {},
+    options: { fromSeq?: number; idleTimeoutMs?: number } = {},
   ): AsyncGenerator<JobEvent, void, unknown> {
     const timeoutMs = target.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const idleTimeoutMs = options.idleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS;
     const { socket } = await this.connectPinned({
       host: target.host,
       port: target.port,
@@ -315,11 +326,19 @@ export class HfpClient {
       timeoutMs,
     });
     try {
-      // The stream can be sparse (a slow job); disable the socket-inactivity
-      // timeout for the streaming phase. connectPinned already used it to
-      // bound the connect + handshake; server heartbeats and job budgets
-      // bound the rest.
-      socket.setTimeout(0);
+      // Re-arm the socket-inactivity timer for the (possibly sparse) streaming
+      // phase. connectPinned used `timeoutMs` to bound connect + handshake;
+      // here a longer idle timeout — reset by the server's SSE heartbeats and
+      // by every event — lets a live stream run indefinitely while a silent or
+      // half-open peer still trips it, so the iterator can never hang forever.
+      // Replace connectPinned's handler so the timeout error carries the
+      // stream idle timeout rather than the connect one.
+      socket.removeAllListeners("timeout");
+      socket.setTimeout(idleTimeoutMs, () => {
+        socket.destroy(
+          new HfpTimeoutError(target.host, target.port, idleTimeoutMs),
+        );
+      });
 
       const headers: Record<string, string> = {
         host: `${target.host}:${target.port}`,
@@ -356,6 +375,17 @@ export class HfpClient {
       }
 
       yield* parseSseEvents(response);
+    } catch (error) {
+      // A tripped idle timeout destroys the socket with HfpTimeoutError, but
+      // the failure usually surfaces through the response stream as a generic
+      // abort/reset; re-raise the typed timeout (mirrors rawRequest).
+      if (
+        !(error instanceof HfpTimeoutError) &&
+        socket.errored instanceof HfpTimeoutError
+      ) {
+        throw socket.errored;
+      }
+      throw error;
     } finally {
       socket.destroy();
     }
@@ -547,6 +577,10 @@ async function* parseSseEvents(
   let buffer = "";
   let totalBytes = 0;
   let dataLines: string[] = [];
+  // Byte size of the in-progress record's accumulated `data:` content, so the
+  // per-event cap is byte-accurate like the total cap (a string's `.length`
+  // is UTF-16 code units, which undercounts multi-byte characters).
+  let dataBytes = 0;
 
   for await (const chunk of response) {
     const bytes = chunk as Buffer;
@@ -555,10 +589,6 @@ async function* parseSseEvents(
       throw new HfpResponseTooLargeError(MAX_SSE_TOTAL_BYTES);
     }
     buffer += decoder.write(bytes);
-    if (buffer.length > MAX_SSE_EVENT_BYTES) {
-      // An unterminated record grew past the per-event cap.
-      throw new HfpResponseTooLargeError(MAX_SSE_EVENT_BYTES);
-    }
 
     let newlineIndex = buffer.indexOf("\n");
     while (newlineIndex >= 0) {
@@ -570,6 +600,7 @@ async function* parseSseEvents(
       if (line === "") {
         const event = flushSseEvent(dataLines);
         dataLines = [];
+        dataBytes = 0;
         if (event !== undefined) {
           yield event;
           if (event.type === "result") {
@@ -578,9 +609,17 @@ async function* parseSseEvents(
         }
       } else if (line.startsWith("data:")) {
         // Strip one optional leading space after the colon (SSE convention).
-        dataLines.push(line.slice(5).replace(/^ /, ""));
+        const content = line.slice(5).replace(/^ /, "");
+        dataLines.push(content);
+        dataBytes += Buffer.byteLength(content);
       }
       newlineIndex = buffer.indexOf("\n");
+    }
+
+    // The in-progress record is the buffered data-line content plus the
+    // current unterminated trailing line; cap it in bytes.
+    if (dataBytes + Buffer.byteLength(buffer) > MAX_SSE_EVENT_BYTES) {
+      throw new HfpResponseTooLargeError(MAX_SSE_EVENT_BYTES);
     }
   }
 }

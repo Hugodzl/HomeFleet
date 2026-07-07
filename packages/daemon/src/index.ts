@@ -47,6 +47,7 @@ export {
   type JobSubscriber,
 } from "./jobs/job.js";
 export {
+  DEFAULT_CANCEL_UNWIND_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_JOBS,
   DEFAULT_MAX_QUEUED_JOBS,
   DEFAULT_MAX_RETAINED_JOBS,
@@ -82,6 +83,7 @@ export {
   MAX_SSE_TOTAL_BYTES,
   MissingServerCertificateError,
   type PairTarget,
+  STREAM_IDLE_TIMEOUT_MS,
 } from "./transport/client.js";
 export { MAX_BODY_BYTES } from "./transport/limits.js";
 export {

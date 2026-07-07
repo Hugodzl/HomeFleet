@@ -58,6 +58,17 @@ export const DEFAULT_MAX_QUEUED_JOBS = 64;
 export const DEFAULT_MAX_RETAINED_JOBS = 256;
 
 /**
+ * Bounded wait for a running executor to unwind on `cancel`/`stop`. The
+ * shipped M4 executors self-bound (safeSpawn's kill grace, the agent's
+ * fetch-abort), so they always win this race and the happy path is unchanged
+ * — cancel still returns the TRUE terminal status. It is defense-in-depth
+ * against a future (M6) executor that ignores its AbortSignal or blocks:
+ * rather than hang the cancel HTTP handler or wedge daemon shutdown, the wait
+ * gives up and reports honestly / proceeds with teardown.
+ */
+export const DEFAULT_CANCEL_UNWIND_TIMEOUT_MS = 30_000;
+
+/**
  * Resolves a workspace reference to an absolute, already-materialized
  * directory. M5 does NOT transfer workspaces (that is M7, git bundles); the
  * daemon injects a resolver. A rejection yields a terminal `failed` result
@@ -78,6 +89,8 @@ export interface JobManagerOptions {
   maxQueuedJobs?: number;
   /** Defaults to {@link DEFAULT_MAX_RETAINED_JOBS}. Should be >= concurrent + queued. */
   maxRetainedJobs?: number;
+  /** Defaults to {@link DEFAULT_CANCEL_UNWIND_TIMEOUT_MS}. */
+  cancelUnwindTimeoutMs?: number;
   /** Diagnostic sink for evictions and dropped events; defaults to a no-op. */
   logger?: (message: string) => void;
 }
@@ -108,6 +121,7 @@ export class JobManager {
   private readonly maxConcurrentJobs: number;
   private readonly maxQueuedJobs: number;
   private readonly maxRetainedJobs: number;
+  private readonly cancelUnwindTimeoutMs: number;
   private readonly log: (message: string) => void;
 
   /** All retained jobs (active + terminal), keyed by id, insertion-ordered. */
@@ -135,6 +149,8 @@ export class JobManager {
       options.maxConcurrentJobs ?? DEFAULT_MAX_CONCURRENT_JOBS;
     this.maxQueuedJobs = options.maxQueuedJobs ?? DEFAULT_MAX_QUEUED_JOBS;
     this.maxRetainedJobs = options.maxRetainedJobs ?? DEFAULT_MAX_RETAINED_JOBS;
+    this.cancelUnwindTimeoutMs =
+      options.cancelUnwindTimeoutMs ?? DEFAULT_CANCEL_UNWIND_TIMEOUT_MS;
     this.log = options.logger ?? (() => {});
     if (this.maxConcurrentJobs < 1) {
       throw new Error("maxConcurrentJobs must be >= 1");
@@ -226,10 +242,20 @@ export class JobManager {
 
     // Running: abort the executor and await the terminal transition so the
     // response reflects the true outcome (usually canceled; possibly a
-    // succeeded/failed that raced the cancel).
+    // succeeded/failed that raced the cancel). Bounded so a misbehaving
+    // executor cannot hang the cancel handler: on overrun we return the
+    // current (still non-terminal) status, which is truthful — cancellation
+    // was requested and the abort fired; the unwind just has not completed.
     record.abort.abort();
     if (record.execution !== undefined) {
-      await record.execution;
+      const settled = await this.awaitBounded(record.execution);
+      if (!settled) {
+        this.log(
+          `cancel(${jobId}): executor did not unwind within ` +
+            `${this.cancelUnwindTimeoutMs}ms; reporting current status ` +
+            `"${record.status}"`,
+        );
+      }
     }
     return CancelResponseSchema.parse({
       jobId: record.jobId,
@@ -282,9 +308,13 @@ export class JobManager {
     };
   }
 
-  /** Diagnostic: number of live subscribers on a job (0 if absent). */
-  subscriberCount(jobId: string): number {
-    return this.records.get(jobId)?.subscribers.size ?? 0;
+  /**
+   * Diagnostic: number of live subscribers on a job the caller owns.
+   * Owner-checked like every other accessor, so it never leaks the existence
+   * of another peer's (or an absent) job — it throws `UNKNOWN_JOB` instead.
+   */
+  subscriberCount(jobId: string, owner: string): number {
+    return this.getOwned(jobId, owner).subscribers.size;
   }
 
   /**
@@ -307,7 +337,8 @@ export class JobManager {
       }
     }
 
-    // Abort running jobs and await their unwind.
+    // Abort running jobs and await their unwind — bounded, so a misbehaving
+    // executor cannot wedge shutdown: on overrun we log and tear down anyway.
     const executions: Promise<void>[] = [];
     for (const jobId of this.running) {
       const record = this.records.get(jobId);
@@ -318,7 +349,13 @@ export class JobManager {
         }
       }
     }
-    await Promise.allSettled(executions);
+    const settled = await this.awaitBounded(Promise.allSettled(executions));
+    if (!settled) {
+      this.log(
+        `stop(): ${executions.length} executor(s) did not unwind within ` +
+          `${this.cancelUnwindTimeoutMs}ms; proceeding with teardown`,
+      );
+    }
 
     // Any subscriber still attached (e.g. never saw its result): force-close.
     for (const record of this.records.values()) {
@@ -327,6 +364,37 @@ export class JobManager {
       }
       record.subscribers.clear();
     }
+  }
+
+  /**
+   * Awaits `work`, but never longer than the unwind timeout. Returns whether
+   * `work` settled in time (`false` == the guard fired first). The guard
+   * timer is unref'd and always cleared, so it holds nothing open.
+   */
+  private async awaitBounded(work: Promise<unknown>): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const guard = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, this.cancelUnwindTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([
+        work.then(
+          () => {},
+          () => {},
+        ),
+        guard,
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+    return !timedOut;
   }
 
   /** Resolves an id to a record the caller owns, or throws UNKNOWN_JOB. */

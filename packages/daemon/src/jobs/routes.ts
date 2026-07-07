@@ -161,8 +161,11 @@ function handleEventsStream(
 
   // Client disconnect (socket closed before the terminal event) frees the
   // subscription; 'close' also fires after our own res.end(), guarded by
-  // `ended`.
+  // `ended`. A genuine response 'error' (e.g. ECONNRESET on a half-open
+  // socket) routes to the same cleanup so it never surfaces as an unhandled
+  // error.
   res.on("close", end);
+  res.on("error", end);
 
   const subscription = manager.subscribe(jobId, owner, fromSeq, {
     onEvent: (event) => {
