@@ -49,9 +49,9 @@ export interface DiscoveryAggregatorOptions {
    */
   onCandidate?: (candidate: DiscoveryCandidate) => void;
   /**
-   * Receives background failures that must not crash discovery: mDNS socket
-   * errors and known-nodes persist failures. Defaults to swallowing them —
-   * discovery is best-effort by design.
+   * Receives background failures that must not crash discovery: mDNS and
+   * UDP socket errors and known-nodes persist failures. Defaults to
+   * swallowing them — discovery is best-effort by design.
    */
   onError?: (error: unknown) => void;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
