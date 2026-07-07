@@ -3,6 +3,11 @@
  * command executor, and the minimal agent loop. M4 surface — the M5 job
  * manager consumes these locally on the worker node.
  */
+
+export {
+  CommandExecutor,
+  type CommandExecutorOptions,
+} from "./command/command-executor.js";
 export type {
   ExecutionContext,
   Executor,
