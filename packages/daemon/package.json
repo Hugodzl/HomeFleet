@@ -16,6 +16,7 @@
   "dependencies": {
     "@homefleet/executors": "workspace:*",
     "@homefleet/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@peculiar/x509": "^2.0.0",
     "bonjour-service": "^1.4.1",
     "reflect-metadata": "^0.2.2",
