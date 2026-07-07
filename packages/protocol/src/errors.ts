@@ -12,6 +12,9 @@ export const HfpErrorCodeSchema = z.enum([
   "BUSY",
   "INVALID_REQUEST",
   "CANCELED",
+  "TIMEOUT",
+  "BUDGET_EXCEEDED",
+  "COMMAND_NOT_ALLOWED",
   "INTERNAL",
 ]);
 export type HfpErrorCode = z.infer<typeof HfpErrorCodeSchema>;

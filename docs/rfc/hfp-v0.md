@@ -358,6 +358,9 @@ one of:
 | `BUSY`                  | Worker at `maxConcurrentJobs`                               |
 | `INVALID_REQUEST`       | Request failed schema validation                            |
 | `CANCELED`              | Operation aborted by cancellation                           |
+| `TIMEOUT`               | Command killed after exceeding its `timeoutMs`              |
+| `BUDGET_EXCEEDED`       | Agent job exceeded a `JobBudgets` limit                     |
+| `COMMAND_NOT_ALLOWED`   | Command not on the worker's allowlist; never spawned        |
 | `INTERNAL`              | Unexpected worker-side failure                              |
 
 ```json

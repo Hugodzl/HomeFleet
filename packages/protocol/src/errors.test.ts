@@ -9,6 +9,9 @@ const ALL_CODES = [
   "BUSY",
   "INVALID_REQUEST",
   "CANCELED",
+  "TIMEOUT",
+  "BUDGET_EXCEEDED",
+  "COMMAND_NOT_ALLOWED",
   "INTERNAL",
 ] as const;
 
