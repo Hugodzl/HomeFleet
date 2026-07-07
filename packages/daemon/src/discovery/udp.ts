@@ -46,6 +46,12 @@ export interface UdpDiscoveryOptions {
    * actual multicast delivery is unreliable on loopback/CI.
    */
   sendTarget?: UdpSendTarget;
+  /**
+   * Receives async socket errors that are otherwise swallowed for crash
+   * prevention (e.g. Windows surfacing ECONNRESET for an unreachable send
+   * target) — mirroring the mDNS backend's onError.
+   */
+  onError?: (error: unknown) => void;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
 }
@@ -63,9 +69,18 @@ export class UdpDiscovery {
   private readonly announceIntervalMs: number;
   private readonly bindAddress: string | undefined;
   private readonly sendTarget: UdpSendTarget;
+  private readonly onError: ((error: unknown) => void) | undefined;
   private readonly now: () => number;
   private socket: Socket | null = null;
   private announceTimer: NodeJS.Timeout | null = null;
+  /**
+   * Set by {@link UdpDiscovery.stop}, checked by {@link UdpDiscovery.start}
+   * after its bind await: stop() during a pending bind sees no socket to
+   * close, so the resuming start() must notice the flag and close the
+   * freshly bound socket itself — otherwise it would be orphaned, with the
+   * re-announce timer keeping the process alive forever.
+   */
+  private stopped = false;
 
   constructor(options: UdpDiscoveryOptions) {
     this.announcement = options.announcement;
@@ -78,11 +93,15 @@ export class UdpDiscovery {
       address: options.multicastGroup,
       port: options.udpPort,
     };
+    this.onError = options.onError;
     this.now = options.now ?? Date.now;
   }
 
   /** Binds, joins the multicast group (best-effort), announces. */
   async start(): Promise<{ port: number }> {
+    if (this.stopped) {
+      throw new Error("UdpDiscovery cannot be restarted");
+    }
     if (this.socket !== null) {
       throw new Error("UdpDiscovery is already started");
     }
@@ -103,8 +122,20 @@ export class UdpDiscovery {
       });
     });
     // Post-bind async errors (e.g. a transient ECONNRESET surfaced by
-    // Windows for an unreachable send target) must not crash the process.
-    socket.on("error", () => {});
+    // Windows for an unreachable send target) must not crash the process —
+    // they are reported through onError instead.
+    socket.on("error", (error) => {
+      this.onError?.(error);
+    });
+    if (this.stopped) {
+      // stop() ran while the bind was pending; it had no socket to close,
+      // so close this one and never claim it (see the `stopped` doc).
+      const port = socket.address().port;
+      await new Promise<void>((resolve) => {
+        socket.close(() => resolve());
+      });
+      return { port };
+    }
     try {
       // Best-effort: receiving multicast is a bonus, not a requirement.
       // Membership can fail on loopback-only binds and on adapters without
@@ -133,6 +164,7 @@ export class UdpDiscovery {
 
   /** Idempotent: halts the timer and closes the socket. */
   async stop(): Promise<void> {
+    this.stopped = true;
     if (this.announceTimer !== null) {
       clearInterval(this.announceTimer);
       this.announceTimer = null;

@@ -6,9 +6,12 @@ import {
   makeTempDataDir,
   removeTempDataDir,
 } from "../test-fixtures.js";
-import { DiscoveryAggregator } from "./aggregator.js";
+import {
+  DiscoveryAggregator,
+  LAST_SEEN_PERSIST_THRESHOLD_MS,
+} from "./aggregator.js";
 import type { DiscoveryCandidate } from "./candidate.js";
-import { KnownNodesRegistry } from "./known-nodes.js";
+import { KnownNodesRegistry, MAX_KNOWN_NODES } from "./known-nodes.js";
 
 const deviceIdA = "aa".repeat(32);
 const deviceIdB = "bb".repeat(32);
@@ -56,7 +59,9 @@ afterEach(async () => {
 interface Harness {
   aggregator: DiscoveryAggregator;
   backend: FakeMdnsBackend;
+  registry: KnownNodesRegistry;
   seen: DiscoveryCandidate[];
+  errors: unknown[];
   dataDir: string;
 }
 
@@ -64,23 +69,27 @@ async function startAggregator(
   options: {
     configOverrides?: Record<string, unknown>;
     dataDir?: string;
+    registry?: KnownNodesRegistry;
     now?: () => number;
   } = {},
 ): Promise<Harness> {
   const dataDir = options.dataDir ?? (await newDataDir());
   const backend = new FakeMdnsBackend();
+  const registry = options.registry ?? (await KnownNodesRegistry.load(dataDir));
   const seen: DiscoveryCandidate[] = [];
+  const errors: unknown[] = [];
   const aggregator = new DiscoveryAggregator({
     config: config(options.configOverrides),
     announcement: announcement(deviceIdA),
-    knownNodes: await KnownNodesRegistry.load(dataDir),
+    knownNodes: registry,
     onCandidate: (candidate) => seen.push(candidate),
+    onError: (error) => errors.push(error),
     now: options.now ?? (() => T0),
     mdnsBackend: backend,
   });
   await aggregator.start();
   cleanups.push(() => aggregator.stop());
-  return { aggregator, backend, seen, dataDir };
+  return { aggregator, backend, registry, seen, errors, dataDir };
 }
 
 function deliverPeer(
@@ -123,12 +132,14 @@ test("static entries are surfaced as candidates at startup", async () => {
 test("known nodes are surfaced at startup, source preserved", async () => {
   const dataDir = await newDataDir();
   const registry = await KnownNodesRegistry.load(dataDir);
+  // In the past relative to the harness clock (T0), so it is not clamped.
+  const storedAt = new Date(T0 - 86_400_000).toISOString();
   await registry.record({
     deviceId: deviceIdB,
     name: "laptop",
     host: "192.168.1.50",
     port: 47400,
-    lastSeenAt: "2026-07-05T12:00:00.000Z",
+    lastSeenAt: storedAt,
     source: "udp",
   });
 
@@ -139,7 +150,7 @@ test("known nodes are surfaced at startup, source preserved", async () => {
     host: "192.168.1.50",
     port: 47400,
     source: "udp",
-    lastSeenAt: Date.parse("2026-07-05T12:00:00.000Z"),
+    lastSeenAt: T0 - 86_400_000,
   });
 });
 
@@ -353,4 +364,191 @@ test("cannot be restarted after stop", async () => {
   const { aggregator } = await startAggregator();
   await aggregator.stop();
   await expect(aggregator.start()).rejects.toThrow(/restarted/);
+});
+
+test("stop during a pending start tears down the UDP channel", async () => {
+  const dataDir = await newDataDir();
+  const aggregator = new DiscoveryAggregator({
+    config: config({
+      mdnsEnabled: false,
+      udpEnabled: true,
+      udpPort: 0,
+      bindAddress: "127.0.0.1",
+      announceIntervalMs: 20,
+    }),
+    announcement: announcement(deviceIdA),
+    knownNodes: await KnownNodesRegistry.load(dataDir),
+    udpSendTarget: { address: "127.0.0.1", port: 9 },
+  });
+  cleanups.push(() => aggregator.stop());
+
+  // stop() races the UDP bind that start() is awaiting. A leaked socket or
+  // re-announce timer here would hang vitest at exit.
+  const startPromise = aggregator.start();
+  const stopPromise = aggregator.stop();
+  await Promise.all([startPromise, stopPromise]);
+
+  expect(aggregator.udpBoundPort).toBeNull();
+});
+
+test("udp socket errors reach the aggregator's onError", async () => {
+  const dataDir = await newDataDir();
+  const errors: unknown[] = [];
+  const aggregator = new DiscoveryAggregator({
+    config: config({
+      mdnsEnabled: false,
+      udpEnabled: true,
+      udpPort: 0,
+      bindAddress: "127.0.0.1",
+    }),
+    announcement: announcement(deviceIdA),
+    knownNodes: await KnownNodesRegistry.load(dataDir),
+    onError: (error) => errors.push(error),
+    udpSendTarget: { address: "127.0.0.1", port: 9 },
+  });
+  await aggregator.start();
+  cleanups.push(() => aggregator.stop());
+
+  // No deterministic cross-platform way to force an async dgram error;
+  // emit on the real socket to exercise the real wiring (see udp.test.ts).
+  const internals = aggregator as unknown as {
+    udp: { socket: { emit(event: string, error: Error): void } };
+  };
+  internals.udp.socket.emit("error", new Error("boom"));
+
+  expect(errors).toHaveLength(1);
+  expect((errors[0] as Error).message).toBe("boom");
+});
+
+test("dedup: a stale identified sighting does not drop a fresh anonymous entry", async () => {
+  let nowValue = T0;
+  const { aggregator, backend } = await startAggregator({
+    now: () => nowValue,
+    configOverrides: {
+      staticNodes: [{ host: "192.168.1.30", port: 47200 }],
+    },
+  });
+
+  // B is known at another endpoint, fresher than everything below.
+  nowValue = T0 + 10_000;
+  deliverPeer(backend, deviceIdB, {
+    port: 47201,
+    addresses: ["192.168.1.31"],
+  });
+
+  // A stale B sighting claims the anonymous endpoint: it must change
+  // nothing — neither B's entry nor the anonymous one.
+  nowValue = T0;
+  deliverPeer(backend, deviceIdB, {
+    port: 47200,
+    addresses: ["192.168.1.30"],
+  });
+
+  const candidates = aggregator.candidates();
+  expect(candidates).toContainEqual({
+    host: "192.168.1.30",
+    port: 47200,
+    source: "static",
+    lastSeenAt: T0,
+  });
+  expect(candidates.find((c) => c.deviceId === deviceIdB)?.port).toBe(47201);
+});
+
+test("registry timestamps from the future are clamped to now", async () => {
+  const dataDir = await newDataDir();
+  const registry = await KnownNodesRegistry.load(dataDir);
+  // E.g. the wall clock rolled back between runs. Unclamped, this entry
+  // would outrank every live sighting for a day.
+  await registry.record({
+    deviceId: deviceIdB,
+    name: "laptop",
+    host: "192.168.1.50",
+    port: 47400,
+    lastSeenAt: new Date(T0 + 86_400_000).toISOString(),
+    source: "mdns",
+  });
+
+  const { aggregator, backend } = await startAggregator({ dataDir });
+  expect(
+    aggregator.candidates().find((c) => c.deviceId === deviceIdB)?.lastSeenAt,
+  ).toBe(T0);
+
+  // A live sighting at T0 now wins (ties go to the newer sighting).
+  deliverPeer(backend, deviceIdB, { name: "laptop", port: 47401 });
+  expect(
+    aggregator.candidates().find((c) => c.deviceId === deviceIdB)?.port,
+  ).toBe(47401);
+});
+
+test("the candidate map is capped, evicting the oldest sighting", async () => {
+  let nowValue = T0;
+  const { aggregator, backend } = await startAggregator({
+    now: () => nowValue,
+  });
+
+  const total = MAX_KNOWN_NODES + 5;
+  for (let i = 0; i < total; i += 1) {
+    nowValue = T0 + i * 1_000;
+    deliverPeer(backend, i.toString(16).padStart(64, "0"), {
+      name: "flood",
+    });
+  }
+
+  const candidates = aggregator.candidates();
+  expect(candidates).toHaveLength(MAX_KNOWN_NODES);
+  const ids = new Set(candidates.map((c) => c.deviceId));
+  // The 5 oldest sightings were evicted; the newest survive.
+  for (let i = 0; i < 5; i += 1) {
+    expect(ids.has(i.toString(16).padStart(64, "0"))).toBe(false);
+  }
+  expect(ids.has((total - 1).toString(16).padStart(64, "0"))).toBe(true);
+});
+
+test("repeated sightings inside the persist threshold write once", async () => {
+  let nowValue = T0;
+  const harness = await startAggregator({ now: () => nowValue });
+  const recordSpy = vi.spyOn(harness.registry, "record");
+  // Records run on the persist chain, behind earlier (real) file writes —
+  // positive count transitions need waitFor; the skip path is synchronous,
+  // so a short settle suffices before asserting nothing new was queued.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  deliverPeer(harness.backend, deviceIdB);
+  await vi.waitFor(() => expect(recordSpy).toHaveBeenCalledTimes(1));
+
+  // Re-sightings of the same stable node within the threshold: no writes.
+  for (let second = 1; second <= 10; second += 1) {
+    nowValue = T0 + second * 1_000;
+    deliverPeer(harness.backend, deviceIdB);
+  }
+  await settle();
+  expect(recordSpy).toHaveBeenCalledTimes(1);
+
+  // Past the threshold, lastSeenAt is worth persisting again.
+  nowValue = T0 + LAST_SEEN_PERSIST_THRESHOLD_MS + 1_000;
+  deliverPeer(harness.backend, deviceIdB);
+  await vi.waitFor(() => expect(recordSpy).toHaveBeenCalledTimes(2));
+
+  // A change to any other field persists immediately, threshold or not.
+  nowValue += 1_000;
+  deliverPeer(harness.backend, deviceIdB, { port: 47999 });
+  await vi.waitFor(() => expect(recordSpy).toHaveBeenCalledTimes(3));
+  await settle();
+  expect(recordSpy).toHaveBeenCalledTimes(3);
+});
+
+test("a failing registry persist reaches onError and later writes still land", async () => {
+  const dataDir = await newDataDir();
+  const registry = await KnownNodesRegistry.load(dataDir);
+  vi.spyOn(registry, "record").mockRejectedValueOnce(new Error("disk full"));
+
+  const harness = await startAggregator({ dataDir, registry });
+  deliverPeer(harness.backend, deviceIdB); // this persist fails
+  deliverPeer(harness.backend, deviceIdC, { port: 47201 }); // this one lands
+  await harness.aggregator.stop();
+
+  expect(harness.errors).toHaveLength(1);
+  expect((harness.errors[0] as Error).message).toBe("disk full");
+  const reloaded = await KnownNodesRegistry.load(dataDir);
+  expect(reloaded.list().map((n) => n.deviceId)).toEqual([deviceIdC]);
 });

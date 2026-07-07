@@ -44,13 +44,14 @@ afterEach(async () => {
  * unicast between instances (the send target is injectable); actual
  * multicast delivery is unreliable on loopback/CI and is never depended on.
  */
-async function startInstance(
+function newInstance(
   own: DiscoveryAnnouncement,
   options: {
     sendTarget?: { address: string; port: number };
     announceIntervalMs?: number;
+    onError?: (error: unknown) => void;
   } = {},
-): Promise<Instance> {
+): { discovery: UdpDiscovery; candidates: DiscoveryCandidate[] } {
   const candidates: DiscoveryCandidate[] = [];
   const discovery = new UdpDiscovery({
     announcement: own,
@@ -60,9 +61,22 @@ async function startInstance(
     announceIntervalMs: options.announceIntervalMs ?? 60_000,
     bindAddress: "127.0.0.1",
     sendTarget: options.sendTarget ?? { address: "127.0.0.1", port: 9 },
+    onError: options.onError,
   });
-  const { port } = await discovery.start();
   cleanups.push(() => discovery.stop());
+  return { discovery, candidates };
+}
+
+async function startInstance(
+  own: DiscoveryAnnouncement,
+  options: {
+    sendTarget?: { address: string; port: number };
+    announceIntervalMs?: number;
+    onError?: (error: unknown) => void;
+  } = {},
+): Promise<Instance> {
+  const { discovery, candidates } = newInstance(own, options);
+  const { port } = await discovery.start();
   return { discovery, candidates, port };
 }
 
@@ -251,4 +265,47 @@ test("stop closes the socket and halts re-announcing", async () => {
 test("cannot be started twice", async () => {
   const a = await startInstance(announcement(deviceIdA));
   await expect(a.discovery.start()).rejects.toThrow(/already started/);
+});
+
+test("stop during a pending start leaves no socket or timer behind", async () => {
+  const peer = await rawPeer();
+  const { discovery } = newInstance(announcement(deviceIdA), {
+    sendTarget: { address: "127.0.0.1", port: peer.port },
+    announceIntervalMs: 20,
+  });
+
+  // stop() races the bind that start() is awaiting.
+  const startPromise = discovery.start();
+  const stopPromise = discovery.stop();
+  const [{ port }] = await Promise.all([startPromise, stopPromise]);
+
+  // The socket is fully closed: the port rebinds without reuseAddr.
+  const probe = createSocket({ type: "udp4" });
+  probe.bind(port, "127.0.0.1");
+  await once(probe, "listening");
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  // Nothing was announced and no re-announce timer survived.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(peer.received).toEqual([]);
+
+  // The raced instance stays stopped for good.
+  await expect(discovery.start()).rejects.toThrow(/cannot be restarted/);
+});
+
+test("post-bind socket errors reach onError", async () => {
+  const errors: unknown[] = [];
+  const a = await startInstance(announcement(deviceIdA), {
+    onError: (error) => errors.push(error),
+  });
+
+  // There is no deterministic cross-platform way to force an async dgram
+  // error (the production case is Windows surfacing ECONNRESET for an
+  // unreachable send target), so emit on the real socket to exercise the
+  // real listener wiring.
+  const socket = (a.discovery as unknown as { socket: Socket }).socket;
+  socket.emit("error", new Error("boom"));
+
+  expect(errors).toHaveLength(1);
+  expect((errors[0] as Error).message).toBe("boom");
 });

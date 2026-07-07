@@ -117,6 +117,23 @@ test("NodeInfoSchema accepts a name of exactly 64 chars", () => {
   expect(NodeInfoSchema.parse({ ...validNodeInfo, name }).name).toBe(name);
 });
 
+test("NodeInfoSchema rejects names containing control characters", () => {
+  // Names arrive over unauthenticated discovery, get persisted, and end up
+  // in CLIs/UIs - C0 controls and DEL must never round-trip.
+  for (const codePoint of [0x00, 0x09, 0x0a, 0x1b, 0x1f, 0x7f]) {
+    const name = `bad${String.fromCodePoint(codePoint)}name`;
+    expect(NodeInfoSchema.safeParse({ ...validNodeInfo, name }).success).toBe(
+      false,
+    );
+  }
+});
+
+test("NodeInfoSchema accepts printable non-ASCII names", () => {
+  for (const name of ["tour Éiffel", "客厅の NAS", "tower (2)"]) {
+    expect(NodeInfoSchema.parse({ ...validNodeInfo, name }).name).toBe(name);
+  }
+});
+
 test("NodeInfoSchema requires semver version strings", () => {
   expect(
     NodeInfoSchema.safeParse({ ...validNodeInfo, daemonVersion: "1.0" })

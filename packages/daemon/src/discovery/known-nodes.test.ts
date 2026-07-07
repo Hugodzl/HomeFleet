@@ -2,7 +2,11 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
-import { type KnownNode, KnownNodesRegistry } from "./known-nodes.js";
+import {
+  type KnownNode,
+  KnownNodesRegistry,
+  MAX_KNOWN_NODES,
+} from "./known-nodes.js";
 
 const tempDirs: string[] = [];
 
@@ -162,4 +166,39 @@ test("concurrent unawaited records serialize into a consistent file", async () =
       [carol.deviceId, carol],
     ]),
   );
+});
+
+test("caps the registry at MAX_KNOWN_NODES, evicting the oldest sighting", async () => {
+  const dir = await newDataDir();
+  const registry = await KnownNodesRegistry.load(dir);
+  const overflow = 8;
+  const total = MAX_KNOWN_NODES + overflow;
+
+  // A flood of schema-valid entries with distinct (spoofable) deviceIds
+  // must not grow the registry without bound.
+  await Promise.all(
+    Array.from({ length: total }, (_, i) =>
+      registry.record({
+        deviceId: i.toString(16).padStart(64, "0"),
+        name: "flood",
+        host: "192.168.1.30",
+        port: 47113,
+        lastSeenAt: new Date(1_751_800_000_000 + i * 1_000).toISOString(),
+        source: "udp",
+      }),
+    ),
+  );
+
+  const list = registry.list();
+  expect(list).toHaveLength(MAX_KNOWN_NODES);
+  const ids = new Set(list.map((node) => node.deviceId));
+  // The `overflow` oldest sightings were evicted; the newest survive.
+  for (let i = 0; i < overflow; i += 1) {
+    expect(ids.has(i.toString(16).padStart(64, "0"))).toBe(false);
+  }
+  expect(ids.has((total - 1).toString(16).padStart(64, "0"))).toBe(true);
+
+  // The cap survives a reload.
+  const reloaded = await KnownNodesRegistry.load(dir);
+  expect(reloaded.list()).toHaveLength(MAX_KNOWN_NODES);
 });

@@ -19,6 +19,7 @@ export { resolveDataDir } from "./config/paths.js";
 export {
   DiscoveryAggregator,
   type DiscoveryAggregatorOptions,
+  LAST_SEEN_PERSIST_THRESHOLD_MS,
 } from "./discovery/aggregator.js";
 export type {
   DiscoveryCandidate,
@@ -28,6 +29,7 @@ export {
   type KnownNode,
   KnownNodeSchema,
   KnownNodesRegistry,
+  MAX_KNOWN_NODES,
 } from "./discovery/known-nodes.js";
 export type {
   MdnsBackend,

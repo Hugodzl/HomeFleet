@@ -15,15 +15,23 @@
  */
 import type { DiscoveryAnnouncement } from "@homefleet/protocol";
 import type { DiscoveryConfig } from "../config/config.js";
+import { createBonjourBackend } from "./bonjour-backend.js";
 import type { DiscoveryCandidate } from "./candidate.js";
-import type { KnownNode, KnownNodesRegistry } from "./known-nodes.js";
 import {
-  createBonjourBackend,
-  type MdnsBackend,
-  MdnsDiscovery,
-} from "./mdns.js";
+  type KnownNode,
+  type KnownNodesRegistry,
+  MAX_KNOWN_NODES,
+} from "./known-nodes.js";
+import { type MdnsBackend, MdnsDiscovery } from "./mdns.js";
 import { staticNodeCandidates } from "./static.js";
 import { UdpDiscovery, type UdpSendTarget } from "./udp.js";
+
+/**
+ * A re-sighting whose only change is `lastSeenAt` moving by less than this
+ * is not persisted: repeated announces from a stable node must not thrash
+ * the disk with full-file rewrites (each write is O(registry size)).
+ */
+export const LAST_SEEN_PERSIST_THRESHOLD_MS = 60_000;
 
 export interface DiscoveryAggregatorOptions {
   config: DiscoveryConfig;
@@ -57,19 +65,38 @@ export interface DiscoveryAggregatorOptions {
   udpSendTarget?: UdpSendTarget;
 }
 
-/** Converts a persisted registry entry back into a startup candidate. */
-function knownNodeToCandidate(node: KnownNode): DiscoveryCandidate {
+/**
+ * Converts a persisted registry entry back into a startup candidate. The
+ * stored timestamp is clamped to `now`: after a wall-clock rollback between
+ * runs, an unclamped file entry would outrank every live sighting until the
+ * clock caught up.
+ */
+function knownNodeToCandidate(
+  node: KnownNode,
+  now: number,
+): DiscoveryCandidate {
   const candidate: DiscoveryCandidate = {
     deviceId: node.deviceId,
     host: node.host,
     port: node.port,
     source: node.source,
-    lastSeenAt: Date.parse(node.lastSeenAt),
+    lastSeenAt: Math.min(Date.parse(node.lastSeenAt), now),
   };
   if (node.name !== undefined) {
     candidate.name = node.name;
   }
   return candidate;
+}
+
+/** Whether two registry entries differ only in `lastSeenAt`, if at all. */
+function sameExceptLastSeen(a: KnownNode, b: KnownNode): boolean {
+  return (
+    a.deviceId === b.deviceId &&
+    a.name === b.name &&
+    a.host === b.host &&
+    a.port === b.port &&
+    a.source === b.source
+  );
 }
 
 export class DiscoveryAggregator {
@@ -84,6 +111,13 @@ export class DiscoveryAggregator {
 
   /** Keyed by deviceId when known, else by `host:port`. */
   private readonly entries = new Map<string, DiscoveryCandidate>();
+  /**
+   * The last registry entry queued per deviceId, for write bounding: a
+   * re-sighting equal to it (modulo a small `lastSeenAt` drift) queues no
+   * new persist. Seeded from the registry at start; pruned on eviction so
+   * it stays bounded by the same cap as `entries`.
+   */
+  private readonly lastQueued = new Map<string, KnownNode>();
   private mdns: MdnsDiscovery | null = null;
   private udp: UdpDiscovery | null = null;
   private udpPort: number | null = null;
@@ -122,9 +156,12 @@ export class DiscoveryAggregator {
     this.state = "started";
 
     // 1. Registry-backed candidates: reachable before rediscovery. Not
-    //    persisted back — they came from the file.
+    //    persisted back — they came from the file (seeding `lastQueued`
+    //    also stops the first re-sighting of an unchanged node from
+    //    rewriting the file it was just read from).
     for (const node of this.knownNodes.list()) {
-      this.ingest(knownNodeToCandidate(node), { persist: false });
+      this.lastQueued.set(node.deviceId, node);
+      this.ingest(knownNodeToCandidate(node, this.now()), { persist: false });
     }
 
     // 2. Static config entries.
@@ -152,7 +189,7 @@ export class DiscoveryAggregator {
       this.mdns.start();
     }
     if (this.config.udpEnabled) {
-      this.udp = new UdpDiscovery({
+      const udp = new UdpDiscovery({
         announcement: this.announcement,
         onCandidate: (candidate) => this.ingest(candidate, { persist: true }),
         udpPort: this.config.udpPort,
@@ -160,9 +197,19 @@ export class DiscoveryAggregator {
         announceIntervalMs: this.config.announceIntervalMs,
         bindAddress: this.config.bindAddress,
         sendTarget: this.udpSendTarget,
+        onError: this.onError,
         now: this.now,
       });
-      const { port } = await this.udp.start();
+      this.udp = udp;
+      const { port } = await udp.start();
+      if (this.state !== "started") {
+        // stop() ran while the UDP bind was pending. UdpDiscovery's own
+        // stopped flag already made the resuming start() close its socket;
+        // this belt-and-braces stop also covers any future channel whose
+        // start is not race-aware.
+        await udp.stop();
+        return;
+      }
       this.udpPort = port;
     }
   }
@@ -202,9 +249,18 @@ export class DiscoveryAggregator {
     let existing: DiscoveryCandidate | undefined;
     if (candidate.deviceId !== undefined) {
       key = candidate.deviceId;
+      existing = this.entries.get(key);
+      if (
+        existing !== undefined &&
+        candidate.lastSeenAt < existing.lastSeenAt
+      ) {
+        // Stale: we already hold a fresher sighting. Checked before the
+        // absorption below — a stale identified sighting must not drop a
+        // fresh anonymous entry for the same endpoint.
+        return;
+      }
       // deviceId beats host:port: absorb the anonymous entry, if any.
       this.entries.delete(endpointKey);
-      existing = this.entries.get(key);
     } else {
       // An anonymous sighting never shadows an identified entry for the
       // same endpoint — the identified one strictly carries more.
@@ -219,11 +275,13 @@ export class DiscoveryAggregator {
       }
       key = endpointKey;
       existing = this.entries.get(key);
-    }
-
-    if (existing !== undefined && candidate.lastSeenAt < existing.lastSeenAt) {
-      // Stale: we already hold a fresher sighting.
-      return;
+      if (
+        existing !== undefined &&
+        candidate.lastSeenAt < existing.lastSeenAt
+      ) {
+        // Stale: we already hold a fresher sighting.
+        return;
+      }
     }
 
     // Latest sighting wins, but a field the new sighting lacks (e.g. no
@@ -244,10 +302,34 @@ export class DiscoveryAggregator {
     }
 
     this.entries.set(key, merged);
+    while (this.entries.size > MAX_KNOWN_NODES) {
+      // Spoofed-deviceId flood guard, sharing the registry's cap so the
+      // two layers agree on what "too many" means.
+      this.evictOldest();
+    }
     this.onCandidate?.({ ...merged });
 
     if (options.persist && merged.deviceId !== undefined) {
       this.queueRecord(merged.deviceId, merged);
+    }
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of this.entries) {
+      if (entry.lastSeenAt < oldestAt) {
+        oldestAt = entry.lastSeenAt;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey !== null) {
+      const evicted = this.entries.get(oldestKey);
+      this.entries.delete(oldestKey);
+      if (evicted?.deviceId !== undefined) {
+        // Keep the write-bounding map bounded by the same cap.
+        this.lastQueued.delete(evicted.deviceId);
+      }
     }
   }
 
@@ -262,6 +344,19 @@ export class DiscoveryAggregator {
     if (candidate.name !== undefined) {
       entry.name = candidate.name;
     }
+    // Write bounding: an entry equal to the last one queued for this
+    // device — except for a lastSeenAt drift below the threshold — would
+    // rewrite the file to say nothing new. Skip it.
+    const previous = this.lastQueued.get(deviceId);
+    if (
+      previous !== undefined &&
+      sameExceptLastSeen(previous, entry) &&
+      Math.abs(Date.parse(entry.lastSeenAt) - Date.parse(previous.lastSeenAt)) <
+        LAST_SEEN_PERSIST_THRESHOLD_MS
+    ) {
+      return;
+    }
+    this.lastQueued.set(deviceId, entry);
     this.persistChain = this.persistChain
       .then(() => this.knownNodes.record(entry))
       .catch((error) => {

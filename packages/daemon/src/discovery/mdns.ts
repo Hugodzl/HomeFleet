@@ -19,7 +19,6 @@ import {
   type DiscoveryAnnouncement,
   DiscoveryAnnouncementSchema,
 } from "@homefleet/protocol";
-import { Bonjour, type ServiceConfig } from "bonjour-service";
 import type { DiscoveryCandidate } from "./candidate.js";
 
 /**
@@ -66,87 +65,13 @@ export interface MdnsBrowser {
 
 /**
  * The slice of bonjour-service the daemon uses. Tests inject a fake;
- * production uses {@link createBonjourBackend}.
+ * production uses `createBonjourBackend` (discovery/bonjour-backend.ts).
  */
 export interface MdnsBackend {
   publish(request: MdnsPublishRequest): MdnsPublication;
   browse(type: string, onUp: (service: MdnsFoundService) => void): MdnsBrowser;
   /** Tears down the backend's sockets. */
   destroy(): Promise<void>;
-}
-
-/**
- * The real bonjour-service backend.
- *
- * @param options.bindAddress Interface-selection override (config
- *   `discovery.bindAddress`); passed to bonjour-service's underlying
- *   multicast-dns `interface` option. VPN/virtual adapters grabbing
- *   multicast traffic are the known Windows failure mode.
- * @param options.onError Receives async mDNS socket errors. Discovery is
- *   best-effort — a dead mDNS channel must not crash the daemon (the UDP
- *   fallback and static entries still work) — so errors are reported, not
- *   thrown.
- */
-export function createBonjourBackend(
-  options: { bindAddress?: string; onError?: (error: unknown) => void } = {},
-): MdnsBackend {
-  // bonjour-service types its constructor options as Partial<ServiceConfig>,
-  // but they are actually forwarded to multicast-dns, whose `interface`
-  // option selects the bind interface — hence the cast.
-  const multicastDnsOptions =
-    options.bindAddress !== undefined
-      ? ({
-          interface: options.bindAddress,
-        } as unknown as Partial<ServiceConfig>)
-      : undefined;
-  const bonjour = new Bonjour(multicastDnsOptions, (error: unknown) => {
-    options.onError?.(error);
-  });
-  return {
-    publish(request: MdnsPublishRequest): MdnsPublication {
-      const service = bonjour.publish({
-        name: request.name,
-        type: request.type,
-        port: request.port,
-        txt: request.txt,
-      });
-      // Without a listener, a Service 'error' event would crash the process.
-      service.on("error", (error: unknown) => {
-        options.onError?.(error);
-      });
-      return {
-        stop: () =>
-          new Promise<void>((resolve) => {
-            service.stop?.(() => resolve());
-          }),
-      };
-    },
-    browse(
-      type: string,
-      onUp: (service: MdnsFoundService) => void,
-    ): MdnsBrowser {
-      const browser = bonjour.find({ type }, (service) => {
-        const addresses =
-          service.addresses !== undefined && service.addresses.length > 0
-            ? service.addresses
-            : service.referer !== undefined
-              ? [service.referer.address]
-              : [];
-        onUp({
-          type,
-          name: service.name,
-          port: service.port,
-          txt: (service.txt ?? {}) as Record<string, unknown>,
-          addresses,
-        });
-      });
-      return { stop: () => browser.stop() };
-    },
-    destroy: () =>
-      new Promise<void>((resolve) => {
-        bonjour.destroy(() => resolve());
-      }),
-  };
 }
 
 /**
@@ -331,13 +256,16 @@ export class MdnsDiscovery {
   }
 
   /**
-   * Collision tie-break: the node with the lexicographically larger
-   * deviceId renames. Against a peer whose deviceId did not decode we
-   * cannot tie-break, so we move unilaterally — safe, because a peer not
-   * running this logic never renames in response.
+   * Collision tie-break: only a service that decodes to a DIFFERENT
+   * deviceId is a rename-worthy collision, and of the two colliding nodes
+   * only the one with the lexicographically larger deviceId renames — so
+   * exactly one side moves. A same-name service whose TXT does not decode
+   * is ignored: it may be a mangled echo of our own advertisement (renaming
+   * would chase ourselves) or a garbage-TXT squatter (which never renames
+   * in response, so yielding to it buys nothing).
    */
   private losesTieBreak(peer: DiscoveryAnnouncement | null): boolean {
-    return peer === null || peer.deviceId < this.announcement.deviceId;
+    return peer !== null && peer.deviceId < this.announcement.deviceId;
   }
 
   private rename(): void {

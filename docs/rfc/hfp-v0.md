@@ -102,7 +102,7 @@ What a node advertises about itself during `hello` and pairing.
 | Field               | Type                                    | Notes                                          |
 | ------------------- | --------------------------------------- | ---------------------------------------------- |
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
-| `name`              | string                                  | Human-readable, 1–64 chars                     |
+| `name`              | string                                  | Human-readable, 1–64 chars, no control characters (C0 or DEL) |
 | `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
 | `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
@@ -385,12 +385,17 @@ fingerprint pin. Invalid, oversized, or otherwise unparseable announcements
 MUST be dropped silently — the discovery channels receive untrusted bytes
 and never answer garbage.
 
+UDP source addresses are spoofable, so a forged `announce` can direct one
+unicast `response` at a victim — a roughly 1:1 reflection vector with
+negligible amplification. This is accepted for v0 (the same trade-off
+LocalSend ships); response rate-limiting is a possible future hardening.
+
 ### `DiscoveryAnnouncement`
 
 | Field             | Type    | Notes                                                        |
 | ----------------- | ------- | ------------------------------------------------------------ |
 | `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
-| `name`            | string  | Human-readable, 1–64 chars (same constraints as `NodeInfo.name`) |
+| `name`            | string  | Human-readable, 1–64 chars, no control characters (same constraints as `NodeInfo.name`) |
 | `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
 | `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document            |
 

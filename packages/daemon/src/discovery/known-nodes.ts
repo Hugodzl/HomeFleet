@@ -17,6 +17,14 @@ import path from "node:path";
 import { DeviceIdSchema, NodeNameSchema } from "@homefleet/protocol";
 import { z } from "zod";
 
+/**
+ * Registry size cap. deviceIds in announcements are unauthenticated and
+ * free to mint, so without a cap a LAN attacker could grow this file (and
+ * the aggregator's candidate map, which shares this constant) without
+ * bound. On overflow the entry with the oldest `lastSeenAt` is evicted.
+ */
+export const MAX_KNOWN_NODES = 512;
+
 export const KnownNodeSchema = z.object({
   deviceId: DeviceIdSchema,
   /** Absent for nodes only ever seen via static config (no name there). */
@@ -107,12 +115,31 @@ export class KnownNodesRegistry {
 
   /**
    * Records (or replaces, keyed by `deviceId`) a sighting and persists.
-   * Rejects entries that do not validate.
+   * Rejects entries that do not validate. Past {@link MAX_KNOWN_NODES}
+   * entries, the oldest sighting is evicted (spoofed-deviceId flood guard).
    */
   async record(entry: KnownNode): Promise<void> {
     const validated = KnownNodeSchema.parse(entry);
     this.entries.set(validated.deviceId, validated);
+    while (this.entries.size > MAX_KNOWN_NODES) {
+      this.evictOldest();
+    }
     await this.persist();
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [key, node] of this.entries) {
+      const at = Date.parse(node.lastSeenAt);
+      if (at < oldestAt) {
+        oldestAt = at;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey !== null) {
+      this.entries.delete(oldestKey);
+    }
   }
 
   /**

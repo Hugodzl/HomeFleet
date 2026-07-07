@@ -18,11 +18,21 @@ export const SemverSchema = z
   .string()
   .regex(/^\d+\.\d+\.\d+$/, "must be a semver string (X.Y.Z)");
 
+/** No C0 control characters (U+0000-U+001F) and no DEL (U+007F). */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the range is deliberate - this pattern REJECTS control characters in names.
+const CONTROL_CHAR_FREE = /^[^\u0000-\u001f\u007f]*$/;
+
 /**
- * Human-readable node name, 1-64 chars. Shared by `NodeInfo` and
- * `DiscoveryAnnouncement` so the two cannot drift.
+ * Human-readable node name, 1-64 chars, no control characters (C0 or DEL).
+ * Names arrive over unauthenticated discovery, get persisted, and end up in
+ * CLIs/UIs — a newline or ANSI escape must never round-trip. Shared by
+ * `NodeInfo` and `DiscoveryAnnouncement` so the two cannot drift.
  */
-export const NodeNameSchema = z.string().min(1).max(64);
+export const NodeNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(CONTROL_CHAR_FREE, "must not contain control characters");
 
 export const GpuInfoSchema = z.object({
   name: z.string(),

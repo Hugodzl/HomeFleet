@@ -190,6 +190,35 @@ test("advertises a truncated instance name for a long node name", async () => {
   await a.discovery.stop();
 });
 
+test("a squatter with undecodable TXT under our name causes no rename", async () => {
+  const backend = new FakeMdnsBackend();
+  const a = startDiscovery(backend, announcement(deviceIdA));
+
+  // Same instance name, but the TXT record does not decode: it could be a
+  // mangled echo of our own advertisement, so renaming would risk chasing
+  // ourselves. Ignore it — only a decodable, different deviceId is a
+  // rename-worthy collision.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: "not-a-device-id", pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: {},
+    addresses: ["192.168.1.30"],
+  });
+
+  expect(backend.publications).toHaveLength(1);
+  expect(backend.publications[0]?.request.name).toBe("tower");
+  expect(a.candidates).toEqual([]);
+  await a.discovery.stop();
+});
+
 test("renames on a collision when the peer wins the tie-break", async () => {
   const backend = new FakeMdnsBackend();
   // Both nodes are named "tower". Deterministic tie-break: the node with
