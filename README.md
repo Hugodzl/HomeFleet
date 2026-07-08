@@ -4,7 +4,14 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — powered entirely by **local models**, entirely on **your LAN**, with no cloud in the loop.
 
-> **Status: pre-alpha.** Under active development toward v0.1. Nothing here is ready to use yet — watch the repo if the idea speaks to you.
+> **Status: pre-alpha.** The product spine is complete and tested on one
+> machine: identity, mTLS transport, LAN discovery, executors, job dispatch,
+> the MCP front door, workspace (git bundle) sync, the single-process daemon
+> assembly, and the `homefleet` operator CLI all work end to end. What's left
+> before v0.1: bringing up the reference two-machine rig for real (see the
+> [demo](#two-machine-demo) below — the mechanics are written, the hands-on
+> rig bring-up isn't done yet) and publishing packages. The [Quickstart](#quickstart)
+> below runs today, on a single machine.
 
 ## Why
 
@@ -42,6 +49,140 @@ One daemon per machine. On your machine it faces your agent as an MCP server; on
 
 Explicit non-goals for v0.1: code-*writing* delegation, GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
 
+## Quickstart
+
+Single machine, dev setup. This is enough to build the daemon, run it, and
+point an MCP client at it — pairing a second real machine is the
+[two-machine demo](#two-machine-demo) below.
+
+```bash
+git clone <this repo>
+cd LocalAgentCoordinator
+pnpm install
+pnpm build        # tsup bundles packages/daemon's three bins to dist/bin/*.js
+```
+
+`pnpm build` is required — the bins are plain, bare-`node`-runnable ESM files;
+there is no `tsx`/dev-mode path for running them anymore. Invoke them with
+`node`:
+
+```bash
+node packages/daemon/dist/bin/homefleet.js --help
+```
+
+(A bare `homefleet`/`homefleetd` shell command is also possible via `pnpm
+link --global`, with a caveat — see
+[`packages/daemon/README.md`](packages/daemon/README.md#bins). The `node ...`
+form above always works with no setup, so the rest of this guide uses it.)
+
+Next, scaffold this machine — prints this node's identity and the commands
+*you* run yourself in an elevated PowerShell (the daemon never elevates
+itself):
+
+```bash
+node packages/daemon/dist/bin/homefleet.js setup
+```
+
+Run the printed `New-NetFirewallRule` commands (HFP TCP + discovery UDP,
+scoped to the Private network profile) in an elevated PowerShell, and check
+the printed network-profile warning — the rules only take effect on a
+Private-profile adapter.
+
+Before starting the daemon, write a `config.json` in its data directory (by
+default `%LOCALAPPDATA%\homefleet` on Windows; override with
+`HOMEFLEET_DATA_DIR`). A fresh install with no config file runs no executors
+and syncs no repos — everything below is opt-in. A worker offering a local
+model plus a command allowlist, for one repo:
+
+```json
+{
+  "executors": {
+    "agent": {
+      "endpoint": {
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "model": "qwen3.5-9b",
+        "contextWindow": 32768
+      }
+    },
+    "command": { "allowlist": { "pnpm": {} } }
+  },
+  "workspace": { "allowedRepoIds": ["homefleet"] }
+}
+```
+
+A delegator mapping a local repoId to its checkout, so `delegate_task` can
+sync it to a worker:
+
+```json
+{
+  "repos": [{ "repoId": "homefleet", "path": "D:\\Git\\LocalAgentCoordinator" }]
+}
+```
+
+Every key, type, and default is in the
+[configuration reference](docs/reference/configuration.md) — cross-check
+before writing a real config; parsing is strict (an unknown key throws rather
+than being silently ignored).
+
+Now start the daemon (foreground; stop with Ctrl-C):
+
+```bash
+node packages/daemon/dist/bin/homefleetd.js
+```
+
+It prints its device ID, bound ports, and data directory to stderr once it's
+up. Finally, point an MCP-capable agent at it — for Claude Code:
+
+```bash
+claude mcp add --transport http homefleet http://127.0.0.1:56372/mcp
+```
+
+See [`packages/daemon/README.md`](packages/daemon/README.md#pointing-claude-code-at-the-daemon)
+for the exact `.mcp.json` form and the stdio-shim alternative.
+
+## Two-machine demo
+
+This is the M8 acceptance path: two physical machines, each running
+`homefleetd`, paired, delegating a real job to a real local model. Follow the
+[Quickstart](#quickstart) above through `pnpm build` **on both machines**
+first, then:
+
+1. On **each** machine, run `homefleet setup`, run the printed firewall
+   commands in an elevated PowerShell, and start `homefleetd`. Give the
+   worker machine a `config.json` with an `agent` and/or `command` executor
+   and a non-empty `workspace.allowedRepoIds`; give the delegating machine a
+   `repos` mapping naming the same repoId (see the Quickstart's examples and
+   the [configuration reference](docs/reference/configuration.md)).
+2. **Pair them.** On machine B (the worker), open a pairing window:
+   ```bash
+   node packages/daemon/dist/bin/homefleet.js pair begin
+   ```
+   This prints a short code. On machine A (the delegator), connect to B using
+   B's LAN address, B's HFP port (`56370` by default), and that code:
+   ```bash
+   node packages/daemon/dist/bin/homefleet.js pair connect <B-host> <B-hfp-port> <code> [--expect <B-device-id>]
+   ```
+3. **Verify.** On either machine:
+   ```bash
+   node packages/daemon/dist/bin/homefleet.js nodes    # the peer, with live capabilities
+   node packages/daemon/dist/bin/homefleet.js status   # this node's own live status
+   ```
+4. **Point a Claude Code session's MCP at machine A's local daemon** (see the
+   Quickstart's `claude mcp add` command — always the *local* daemon; MCP
+   never crosses the LAN).
+5. **Delegate.** In that session, `delegate_task` a recon prompt naming
+   machine A's configured `repoId` and machine B's device ID (from
+   `list_nodes`/`homefleet nodes`) — the repo is bundled and synced to B
+   automatically before the job runs on B's local model. Poll with
+   `job_status`/`job_result`; `cancel_job` to abort mid-run.
+
+This needs two machines each serving a local OpenAI-compatible endpoint
+(llama.cpp `llama-server`, Ollama, LM Studio, ...) — the design doc's
+[reference rig](docs/specs/2026-07-06-homefleet-design.md#reference-rig)
+describes the two-machine setup this project develops against (a Vulkan
+`llama-server` box and a CUDA Ollama box) if you want a concrete starting
+point.
+
 ## Repository layout
 
 | Path | What |
@@ -52,12 +193,14 @@ Explicit non-goals for v0.1: code-*writing* delegation, GUI, cloud relay. See th
 | `docs/rfc/` | Versioned RFC-style protocol spec |
 | `docs/adr/` | Architecture Decision Records |
 | `docs/specs/` | Design documents |
+| `docs/reference/` | Operator reference (e.g. [`configuration.md`](docs/reference/configuration.md)) |
 | `devlog/` | Findings, benchmarks, lessons learned along the way |
 
 ## Development
 
 ```bash
 pnpm install
+pnpm build       # tsup — required before running any packages/daemon bin
 pnpm test        # vitest
 pnpm typecheck   # tsc across packages
 pnpm lint        # biome
