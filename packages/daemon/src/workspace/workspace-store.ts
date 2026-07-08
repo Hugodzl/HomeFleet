@@ -45,6 +45,7 @@ import {
   deleteRef,
   describeGitFailure,
   fetchBundleHead,
+  GitError,
   gc,
   initBareRepo,
   listBundleHeads,
@@ -239,7 +240,21 @@ export class WorkspaceStore {
     }
     const hash = repoHash(repoId);
     await this.withRepoLock(hash, async () => {
-      await this.ensureRepo(hash);
+      // Normalize the one raw throw on this path: initBareRepo throws GitError
+      // (e.g. when a shutdown aborts a first-ever sync), but applyBundle's
+      // contract is "throws WorkspaceError on any failure".
+      try {
+        await this.ensureRepo(hash);
+      } catch (error) {
+        if (error instanceof GitError) {
+          throw new WorkspaceError(
+            "GIT_FAILED",
+            `could not initialize cache: ${error.message}`,
+            { repoId },
+          );
+        }
+        throw error;
+      }
       const worker = this.worker(hash);
 
       if (!(await verifyBundle(worker, bundlePath))) {
@@ -573,6 +588,14 @@ export class WorkspaceStore {
 
   /** Evicts least-recently-used checkouts until within the retention cap. */
   private async evictToCapacity(): Promise<void> {
+    // Once stopped, run no worktree removal/prune: resolve() calls this in a
+    // microtask AFTER its repo lock resolved, so an eviction here could register
+    // a new lock chain past stop()'s Promise.allSettled snapshot and escape the
+    // shutdown await. Short-circuiting keeps that `git worktree` op class from
+    // ever starting post-stop (the EBUSY-avoidance target).
+    if (this.stopped) {
+      return;
+    }
     while (this.checkouts.size > this.maxCachedCheckouts) {
       // Pick the LRU victim among UNPINNED checkouts only: a pinned checkout
       // (refcount > 0) is being read by a running job and must never be

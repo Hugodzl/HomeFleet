@@ -572,6 +572,29 @@ test("stop() cancels an in-flight worker git op so it settles well before the gi
   expect(Date.now() - started).toBeLessThan(15_000);
 }, 30_000);
 
+test("aborting a first-ever sync surfaces a WorkspaceError, not a raw GitError", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-b"] });
+
+  // Abort BEFORE any sync, so the repo has never been created: applyBundle's
+  // first git op is ensureRepo -> initBareRepo, which throws a raw GitError once
+  // its signal is already aborted. Abort the controller directly (leaving the
+  // `stopped` flag false) so the applyBundle stopped-guard is passed and the
+  // ensureRepo normalization path is exercised deterministically.
+  const internals = store as unknown as { abort: AbortController };
+  internals.abort.abort();
+
+  const rejection = await store
+    .applyBundle("repo-b", await fullBundle(src, head), head)
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+  expect(rejection).toBeInstanceOf(WorkspaceError);
+  expect(rejection).toMatchObject({ code: "GIT_FAILED" });
+}, 30_000);
+
 test("an in-use checkout survives a gc triggered by a later sync", async () => {
   const store = await makeStore({
     allowedRepoIds: ["repo-a"],
