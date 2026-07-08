@@ -26,6 +26,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
+import { DAEMON_VERSION } from "../daemon.js";
 import { KnownNodesRegistry } from "../discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
 import { DelegationRegistry } from "../mcp/delegation-registry.js";
@@ -65,7 +66,7 @@ export async function buildStdioMcpServer(dataDir: string): Promise<{
     ourNodeInfo: createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
-      daemonVersion: "0.1.0",
+      daemonVersion: DAEMON_VERSION,
     }),
   });
   const server = createMcpServer({

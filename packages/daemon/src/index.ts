@@ -46,6 +46,7 @@ export {
   WorkspaceConfigSchema,
 } from "./config/config.js";
 export { resolveDataDir } from "./config/paths.js";
+export { DAEMON_VERSION, Daemon, type DaemonOptions } from "./daemon.js";
 export {
   DiscoveryAggregator,
   type DiscoveryAggregatorOptions,
