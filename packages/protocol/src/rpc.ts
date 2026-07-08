@@ -12,6 +12,16 @@ import {
 } from "./job.js";
 import { NodeInfoSchema } from "./node.js";
 
+/**
+ * Default TCP port for the HFP node service (the mTLS HTTPS endpoint peers
+ * connect to). Part of the HomeFleet 5637x port family — it neighbors the
+ * UDP discovery port 56371 (`DISCOVERY_UDP_PORT` in discovery.js); the
+ * daemon's local MCP (56372) and control (56373) defaults round it out.
+ * A stable well-known default keeps discovery hints and static-node config
+ * simple; deployments can still override it per daemon.
+ */
+export const HFP_DEFAULT_PORT = 56370;
+
 /** `POST /hfp/v0/hello` */
 export const HelloRequestSchema = z.object({
   nodeInfo: NodeInfoSchema,

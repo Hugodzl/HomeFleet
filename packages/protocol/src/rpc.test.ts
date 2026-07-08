@@ -5,6 +5,7 @@ import {
   DelegateResponseSchema,
   HelloRequestSchema,
   HelloResponseSchema,
+  HFP_DEFAULT_PORT,
   JobSnapshotSchema,
 } from "./rpc.js";
 import {
@@ -104,4 +105,8 @@ test("JobSnapshotSchema rejects result.jobId differing from snapshot jobId", () 
 test("CancelResponseSchema round-trips", () => {
   const response = { jobId: validJobId, status: "canceled" };
   expect(CancelResponseSchema.parse(response)).toEqual(response);
+});
+
+test("HFP_DEFAULT_PORT sits in the 5637x family next to discovery", () => {
+  expect(HFP_DEFAULT_PORT).toBe(56370);
 });

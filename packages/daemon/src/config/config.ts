@@ -8,14 +8,21 @@
  * they bind), and silently substituting defaults could re-enable a channel
  * the user deliberately disabled.
  *
- * v0 shape: discovery only. Later milestones extend this object.
+ * Sections: `discovery` (M3), `workspace` (M7, worker side), and the M9
+ * daemon-assembly set — `node`, `hfp`, `mcp`, `control`, `executors`,
+ * `models`, `jobs`, `repos`.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
 import {
   DeviceIdSchema,
   DISCOVERY_MULTICAST_GROUP,
   DISCOVERY_UDP_PORT,
+  HFP_DEFAULT_PORT,
+  ModelInfoSchema,
+  NodeNameSchema,
+  RepoIdSchema,
 } from "@homefleet/protocol";
 import { z } from "zod";
 
@@ -103,6 +110,157 @@ export const WorkspaceConfigSchema = z.object({
 });
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
 
+/**
+ * Default port for the daemon's local MCP HTTP endpoint. Part of the
+ * HomeFleet 5637x port family (HFP 56370, UDP discovery 56371, MCP 56372,
+ * control 56373 — see `HFP_DEFAULT_PORT` / `DISCOVERY_UDP_PORT` in
+ * @homefleet/protocol): a stable well-known localhost port so MCP clients
+ * (agent configs) are set up once per machine, in a range unlikely to
+ * collide with common services.
+ */
+export const DEFAULT_MCP_PORT = 56372;
+
+/** Default port for the loopback daemon control API (5637x family, above). */
+export const DEFAULT_CONTROL_PORT = 56373;
+
+/**
+ * Node identity. `name` is OPTIONAL with no default on purpose: when omitted
+ * the daemon assembly falls back to `os.hostname()` at startup. That
+ * fallback lives in the assembly, NOT here — config parsing stays pure (no
+ * os/fs calls), so parsing the same file always yields the same object.
+ */
+export const NodeConfigSchema = z.object({
+  /** Human-readable node name advertised in discovery and NodeInfo. */
+  name: NodeNameSchema.optional(),
+});
+export type NodeConfig = z.infer<typeof NodeConfigSchema>;
+
+/** Bind address for the HFP node service (the mTLS HTTPS endpoint peers hit). */
+export const HfpConfigSchema = z.object({
+  /** LAN-facing by design — peers must be able to reach it. */
+  host: z.string().min(1).default("0.0.0.0"),
+  /** `0` binds an ephemeral port (tests, multiple daemons on one machine). */
+  port: z.int().min(0).max(65535).default(HFP_DEFAULT_PORT),
+});
+export type HfpConfig = z.infer<typeof HfpConfigSchema>;
+
+/**
+ * Bind address for the MCP front local agents connect to. Loopback by
+ * default AND by enforcement: the MCP HTTP transport refuses to bind a
+ * non-loopback host outright (it carries no auth), so `host` here selects
+ * among loopback aliases (`127.0.0.1`, `::1`, `localhost`) — it is not a
+ * way to expose MCP on the LAN. The default port is a stable well-known
+ * value so MCP client configs are written once.
+ */
+export const McpConfigSchema = z.object({
+  host: z.string().min(1).default("127.0.0.1"),
+  port: z.int().min(0).max(65535).default(DEFAULT_MCP_PORT),
+});
+export type McpConfig = z.infer<typeof McpConfigSchema>;
+
+/**
+ * Bind address for the daemon control API the `homefleet` CLI talks to.
+ * Loopback-only by design: it is a local admin surface; remote
+ * administration goes through HFP (mTLS + pairing), never this port.
+ */
+export const ControlConfigSchema = z.object({
+  host: z.string().min(1).default("127.0.0.1"),
+  port: z.int().min(0).max(65535).default(DEFAULT_CONTROL_PORT),
+});
+export type ControlConfig = z.infer<typeof ControlConfigSchema>;
+
+/**
+ * Mirrors `CommandAllowlistEntry` from `@homefleet/executors` (that package
+ * exports only the TS interface, not a zod schema, so config validates its
+ * own copy — keep the two shapes in sync).
+ */
+export const CommandAllowlistEntryConfigSchema = z.object({
+  /**
+   * Executable path or name to spawn for this logical command; defaults to
+   * the logical name itself (see the executors package for the win32
+   * `.cmd` caveat).
+   */
+  executable: z.string().min(1).optional(),
+});
+export type CommandAllowlistEntryConfig = z.infer<
+  typeof CommandAllowlistEntryConfigSchema
+>;
+
+/** Logical command name -> how it runs. Enforcement is an exact-name match. */
+const CommandAllowlistConfigSchema = z.record(
+  z.string().min(1),
+  CommandAllowlistEntryConfigSchema,
+);
+
+export const CommandExecutorConfigSchema = z.object({
+  /** Empty allowlist = the executor is offered but no command may run. */
+  allowlist: CommandAllowlistConfigSchema.default({}),
+});
+export type CommandExecutorConfig = z.infer<typeof CommandExecutorConfigSchema>;
+
+/** Mirrors `AgentEndpointOptions` in @homefleet/executors. */
+export const AgentEndpointConfigSchema = z.object({
+  /** OpenAI-compatible base URL; `/chat/completions` is appended. */
+  baseUrl: z.url(),
+  /** Sent as a Bearer token when present. */
+  apiKey: z.string().min(1).optional(),
+  /** Default model ID; a job's `params.model` overrides it (same endpoint). */
+  model: z.string().min(1),
+  /**
+   * Context window served by the endpoint, in tokens. The floor mirrors
+   * `MIN_AGENT_CONTEXT_WINDOW` in @homefleet/executors: model servers
+   * commonly default to ~4k contexts, which silently break agentic tool use
+   * (truncated histories, dropped tool schemas) — refuse at config time
+   * instead of failing confusingly mid-job.
+   */
+  contextWindow: z.int().min(MIN_AGENT_CONTEXT_WINDOW),
+});
+export type AgentEndpointConfig = z.infer<typeof AgentEndpointConfigSchema>;
+
+export const AgentExecutorConfigSchema = z.object({
+  endpoint: AgentEndpointConfigSchema,
+  /** Allowlist for the agent's run_command tool; absent disables the tool. */
+  commandAllowlist: CommandAllowlistConfigSchema.optional(),
+});
+export type AgentExecutorConfig = z.infer<typeof AgentExecutorConfigSchema>;
+
+/**
+ * Which executors this node offers. Both sub-keys OPTIONAL and absent by
+ * default — fail closed: a fresh install runs NO executors (accepts no
+ * jobs) until one is explicitly configured, the same posture as the
+ * workspace allowlist.
+ */
+export const ExecutorsConfigSchema = z.object({
+  command: CommandExecutorConfigSchema.optional(),
+  agent: AgentExecutorConfigSchema.optional(),
+});
+export type ExecutorsConfig = z.infer<typeof ExecutorsConfigSchema>;
+
+/**
+ * JobManager limit overrides. All optional: absent means the JobManager's
+ * own `DEFAULT_MAX_*` values apply — those numbers are deliberately NOT
+ * duplicated here, so the JobManager stays their single owner.
+ */
+export const JobsConfigSchema = z.object({
+  maxConcurrentJobs: z.int().min(1).optional(),
+  maxQueuedJobs: z.int().min(1).optional(),
+  maxRetainedJobs: z.int().min(1).optional(),
+});
+export type JobsConfig = z.infer<typeof JobsConfigSchema>;
+
+/**
+ * Delegating-side repo mapping: a repo this daemon may bundle and sync to a
+ * worker when `delegate_task` names its `repoId`. Fail closed: a repoId not
+ * listed here cannot be synced FROM this machine (the worker side has its
+ * own independent allowlist, `workspace.allowedRepoIds`).
+ */
+export const RepoMappingSchema = z.object({
+  repoId: RepoIdSchema,
+  /** Local path of the git working copy to bundle from. */
+  path: z.string().min(1),
+});
+export type RepoMapping = z.infer<typeof RepoMappingSchema>;
+
 export const DaemonConfigSchema = z.object({
   // prefault: a config file without a `discovery` key gets the sub-object's
   // field-level defaults applied, same as an empty file.
@@ -110,6 +268,16 @@ export const DaemonConfigSchema = z.object({
   // Same treatment for `workspace`: absent -> the fail-closed defaults (empty
   // allowlist, so the worker accepts no repos until one is configured).
   workspace: WorkspaceConfigSchema.prefault({}),
+  // M9 sections, same prefault treatment (absent key = section defaults).
+  node: NodeConfigSchema.prefault({}),
+  hfp: HfpConfigSchema.prefault({}),
+  mcp: McpConfigSchema.prefault({}),
+  control: ControlConfigSchema.prefault({}),
+  executors: ExecutorsConfigSchema.prefault({}),
+  /** Models this node advertises in NodeInfo (protocol `ModelInfoSchema`). */
+  models: z.array(ModelInfoSchema).default([]),
+  jobs: JobsConfigSchema.prefault({}),
+  repos: z.array(RepoMappingSchema).default([]),
 });
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 

@@ -1,14 +1,18 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
 import {
   DISCOVERY_MULTICAST_GROUP,
   DISCOVERY_UDP_PORT,
+  HFP_DEFAULT_PORT,
 } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
 import {
+  DEFAULT_CONTROL_PORT,
   DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MAX_CACHED_CHECKOUTS,
+  DEFAULT_MCP_PORT,
   DEFAULT_WORKSPACE_GC_AFTER_FETCHES,
   DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
   loadDaemonConfig,
@@ -48,10 +52,27 @@ test("a missing config file yields all defaults", async () => {
       gcAfterFetches: DEFAULT_WORKSPACE_GC_AFTER_FETCHES,
       gitTimeoutMs: DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
     },
+    node: {},
+    hfp: { host: "0.0.0.0", port: HFP_DEFAULT_PORT },
+    mcp: { host: "127.0.0.1", port: DEFAULT_MCP_PORT },
+    control: { host: "127.0.0.1", port: DEFAULT_CONTROL_PORT },
+    executors: {},
+    models: [],
+    jobs: {},
+    repos: [],
   });
   expect(config.discovery.bindAddress).toBeUndefined();
   // Empty allowlist by default => the worker accepts no repos (fail closed).
   expect(config.workspace.cacheDir).toBeUndefined();
+  // No name by default: the assembly falls back to os.hostname() at startup.
+  expect(config.node.name).toBeUndefined();
+  // No executors by default: a fresh install offers nothing (fail closed).
+  expect(config.executors.command).toBeUndefined();
+  expect(config.executors.agent).toBeUndefined();
+  // No job limits by default: the JobManager's own defaults apply.
+  expect(config.jobs.maxConcurrentJobs).toBeUndefined();
+  expect(config.jobs.maxQueuedJobs).toBeUndefined();
+  expect(config.jobs.maxRetainedJobs).toBeUndefined();
 });
 
 test("workspace config: empty allowlist is the fail-closed default", async () => {
@@ -161,6 +182,137 @@ test("an invalid static node deviceId throws", async () => {
     }),
   );
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a full valid config round-trips every M9 section", async () => {
+  const dir = await newDataDir();
+  const full = {
+    node: { name: "office-tower" },
+    hfp: { host: "192.168.1.5", port: 47000 },
+    mcp: { host: "localhost", port: 47001 },
+    control: { host: "127.0.0.1", port: 47002 },
+    executors: {
+      command: {
+        allowlist: {
+          pnpm: { executable: "pnpm.cmd" },
+          git: {},
+        },
+      },
+      agent: {
+        endpoint: {
+          baseUrl: "http://192.168.1.9:1234/v1",
+          apiKey: "sk-local",
+          model: "qwen3-coder",
+          contextWindow: 65536,
+        },
+        commandAllowlist: { pnpm: { executable: "pnpm.cmd" } },
+      },
+    },
+    models: [{ id: "qwen3-coder", contextWindow: 65536 }, { id: "llama3" }],
+    jobs: { maxConcurrentJobs: 2, maxQueuedJobs: 8, maxRetainedJobs: 100 },
+    repos: [{ repoId: "homefleet", path: "D:/Git/LocalAgentCoordinator" }],
+  };
+  await writeConfig(dir, JSON.stringify(full));
+  const config = await loadDaemonConfig(dir);
+  expect(config).toMatchObject(full);
+});
+
+test("partial hfp/mcp/control configs merge with defaults", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      hfp: { port: 0 },
+      mcp: { port: 47010 },
+      control: {},
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  // Port 0 = ephemeral (tests / multiple daemons on one machine).
+  expect(config.hfp).toEqual({ host: "0.0.0.0", port: 0 });
+  expect(config.mcp).toEqual({ host: "127.0.0.1", port: 47010 });
+  expect(config.control).toEqual({
+    host: "127.0.0.1",
+    port: DEFAULT_CONTROL_PORT,
+  });
+});
+
+test("an out-of-range hfp port throws (fail closed)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ hfp: { port: 65536 } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a node name with control characters throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ node: { name: "evil\u001bname" } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a command executor with only an empty allowlist parses (allows nothing)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ executors: { command: {} } }));
+  const config = await loadDaemonConfig(dir);
+  expect(config.executors.command).toEqual({ allowlist: {} });
+  expect(config.executors.agent).toBeUndefined();
+});
+
+test("an agent endpoint contextWindow below the floor throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://localhost:1234/v1",
+            model: "m",
+            contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
+          },
+        },
+      },
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("an agent executor without an endpoint throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ executors: { agent: {} } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a model entry with a non-positive contextWindow throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({ models: [{ id: "m", contextWindow: 0 }] }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a repo mapping with an empty path throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({ repos: [{ repoId: "homefleet", path: "" }] }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("job limits below 1 throw", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ jobs: { maxConcurrentJobs: 0 } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("partial jobs config leaves the other limits to the JobManager", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ jobs: { maxConcurrentJobs: 2 } }));
+  const config = await loadDaemonConfig(dir);
+  expect(config.jobs.maxConcurrentJobs).toBe(2);
+  expect(config.jobs.maxQueuedJobs).toBeUndefined();
+  expect(config.jobs.maxRetainedJobs).toBeUndefined();
 });
 
 test("a non-ENOENT read failure throws instead of yielding defaults", async () => {
