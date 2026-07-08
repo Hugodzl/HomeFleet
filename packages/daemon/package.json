@@ -11,11 +11,12 @@
     }
   },
   "bin": {
-    "homefleet": "./src/bin/homefleet.ts",
-    "homefleet-mcp-stdio": "./src/bin/homefleet-mcp-stdio.ts",
-    "homefleetd": "./src/bin/homefleetd.ts"
+    "homefleet": "./dist/bin/homefleet.js",
+    "homefleet-mcp-stdio": "./dist/bin/homefleet-mcp-stdio.js",
+    "homefleetd": "./dist/bin/homefleetd.js"
   },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
