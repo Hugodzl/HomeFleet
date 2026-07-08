@@ -6,7 +6,12 @@ import {
 } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
-import { loadDaemonConfig } from "./config.js";
+import {
+  DEFAULT_MAX_BUNDLE_BYTES,
+  DEFAULT_MAX_CACHED_CHECKOUTS,
+  DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
+  loadDaemonConfig,
+} from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -35,8 +40,51 @@ test("a missing config file yields all defaults", async () => {
       announceIntervalMs: 60_000,
       staticNodes: [],
     },
+    workspace: {
+      allowedRepoIds: [],
+      maxBundleBytes: DEFAULT_MAX_BUNDLE_BYTES,
+      maxCachedCheckouts: DEFAULT_MAX_CACHED_CHECKOUTS,
+      gitTimeoutMs: DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
+    },
   });
   expect(config.discovery.bindAddress).toBeUndefined();
+  // Empty allowlist by default => the worker accepts no repos (fail closed).
+  expect(config.workspace.cacheDir).toBeUndefined();
+});
+
+test("workspace config: empty allowlist is the fail-closed default", async () => {
+  const config = await loadDaemonConfig(await newDataDir());
+  expect(config.workspace.allowedRepoIds).toEqual([]);
+});
+
+test("workspace config merges partial overrides with defaults", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      workspace: {
+        allowedRepoIds: ["homefleet", "my-repo"],
+        maxCachedCheckouts: 4,
+        cacheDir: "/srv/homefleet/ws",
+      },
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.workspace.allowedRepoIds).toEqual(["homefleet", "my-repo"]);
+  expect(config.workspace.maxCachedCheckouts).toBe(4);
+  expect(config.workspace.cacheDir).toBe("/srv/homefleet/ws");
+  // Untouched fields keep their defaults.
+  expect(config.workspace.maxBundleBytes).toBe(DEFAULT_MAX_BUNDLE_BYTES);
+  expect(config.workspace.gitTimeoutMs).toBe(DEFAULT_WORKSPACE_GIT_TIMEOUT_MS);
+});
+
+test("a schema-invalid workspace config throws (fail closed)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({ workspace: { maxBundleBytes: "huge" } }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
 test("an empty JSON object yields all defaults", async () => {

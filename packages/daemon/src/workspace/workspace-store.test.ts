@@ -1,0 +1,313 @@
+/**
+ * Unit tests for the worker-side workspace store (M7). Real git, real repos,
+ * real bundles created via the git core; no faking. Covers the allowlist
+ * (fail-closed), repoId path-traversal neutralization, full+incremental sync,
+ * malformed / undelivered-commit rejection, per-repo serialization, and the
+ * checkout retention cap.
+ */
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { afterEach, expect, test } from "vitest";
+import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
+import { createBundle, ok, resolveHeadCommit, runGit } from "./git.js";
+import {
+  repoHash,
+  WorkspaceError,
+  WorkspaceStore,
+  type WorkspaceStoreOptions,
+} from "./workspace-store.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+});
+
+async function tempDir(prefix: string): Promise<string> {
+  const dir = await makeTempDataDir(prefix);
+  cleanups.push(() => removeTempDataDir(dir));
+  return dir;
+}
+
+interface Src {
+  repoPath: string;
+  commit(message: string): Promise<string>;
+}
+
+async function makeSrc(): Promise<Src> {
+  const repoPath = await tempDir("homefleet-src-");
+  const run = async (args: string[]): Promise<void> => {
+    const r = await runGit(args, { cwd: repoPath, timeoutMs: 30_000 });
+    if (!ok(r)) {
+      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    }
+  };
+  await run(["init", "--quiet"]);
+  await run(["config", "user.email", "t@example.com"]);
+  await run(["config", "user.name", "Test"]);
+  await run(["config", "commit.gpgsign", "false"]);
+  let n = 0;
+  return {
+    repoPath,
+    async commit(message: string): Promise<string> {
+      await writeFile(path.join(repoPath, "file.txt"), `content ${n}\n`, {
+        flag: n === 0 ? "w" : "a",
+      });
+      n += 1;
+      await run(["add", "-A"]);
+      await run(["commit", "--quiet", "-m", message]);
+      return resolveHeadCommit(repoPath, 30_000);
+    },
+  };
+}
+
+async function makeStore(
+  overrides: Partial<WorkspaceStoreOptions> = {},
+): Promise<WorkspaceStore> {
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const store = new WorkspaceStore({
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 32,
+    gitTimeoutMs: 30_000,
+    ...overrides,
+  });
+  await store.init();
+  return store;
+}
+
+/** Full bundle of the repo's current HEAD to a fresh temp path. */
+async function fullBundle(src: Src, headCommit: string): Promise<string> {
+  const dir = await tempDir("homefleet-bundle-");
+  const bundlePath = path.join(dir, "full.bundle");
+  await createBundle({ repoPath: src.repoPath, bundlePath, headCommit });
+  return bundlePath;
+}
+
+test("empty allowlist accepts nothing (fail closed)", async () => {
+  const store = await makeStore({ allowedRepoIds: [] });
+  expect(store.isAllowed("repo-a")).toBe(false);
+  await expect(store.haveTip("repo-a")).rejects.toMatchObject({
+    code: "REPO_NOT_ALLOWED",
+  });
+});
+
+test("non-allowlisted repo is rejected and nothing is written to the cache", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+
+  await expect(store.haveTip("evil")).rejects.toBeInstanceOf(WorkspaceError);
+  await expect(
+    store.applyBundle(
+      "evil",
+      path.join(cacheDir, "nope.bundle"),
+      "a".repeat(40),
+    ),
+  ).rejects.toMatchObject({ code: "REPO_NOT_ALLOWED" });
+
+  // Only the init-created `.no-hooks` dir exists; no per-repo dir was created.
+  const entries = await readdir(cacheDir);
+  expect(entries).toEqual([".no-hooks"]);
+});
+
+test("haveTip is null before first sync, the head after", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  expect(await store.haveTip("repo-a")).toBeNull();
+
+  await store.applyBundle("repo-a", await fullBundle(src, head), head);
+  expect(await store.haveTip("repo-a")).toBe(head);
+}, 30_000);
+
+test("full then incremental sync; the resolver materializes the right content", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+
+  // Full sync to c1, resolve, read the committed file.
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const dir1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  expect(await readFile(path.join(dir1, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+
+  // Add a commit; incremental sync; resolve at the new head sees new content.
+  const c2 = await src.commit("c2");
+  const incrDir = await tempDir("homefleet-bundle-");
+  const incrPath = path.join(incrDir, "incr.bundle");
+  await createBundle({
+    repoPath: src.repoPath,
+    bundlePath: incrPath,
+    headCommit: c2,
+    have: c1,
+  });
+  await store.applyBundle("repo-a", incrPath, c2);
+  expect(await store.haveTip("repo-a")).toBe(c2);
+
+  const dir2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  expect(await readFile(path.join(dir2, "file.txt"), "utf8")).toBe(
+    "content 0\ncontent 1\n",
+  );
+}, 30_000);
+
+test("resolve before any sync fails NOT_SYNCED", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await expect(
+    store.resolve({ repoId: "repo-a", headCommit: "a".repeat(40) }),
+  ).rejects.toMatchObject({ code: "NOT_SYNCED" });
+});
+
+test("a malformed bundle is rejected and the tip is untouched", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const garbageDir = await tempDir("homefleet-garbage-");
+  const garbage = path.join(garbageDir, "garbage.bundle");
+  await writeFile(garbage, "not a bundle at all\n");
+  await expect(
+    store.applyBundle("repo-a", garbage, "b".repeat(40)),
+  ).rejects.toMatchObject({ code: "BUNDLE_INVALID" });
+
+  // The previously synced tip is intact.
+  expect(await store.haveTip("repo-a")).toBe(c1);
+}, 30_000);
+
+test("a bundle that does not deliver the claimed headCommit is rejected (never checked out)", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+
+  // A valid full bundle of c1, but we lie and claim it delivers a different sha.
+  const bundlePath = await fullBundle(src, c1);
+  const lie = "0".repeat(40);
+  await expect(
+    store.applyBundle("repo-a", bundlePath, lie),
+  ).rejects.toMatchObject({ code: "COMMIT_NOT_DELIVERED" });
+
+  // Nothing was synced: no tip, and resolving the lied commit is NOT_SYNCED.
+  expect(await store.haveTip("repo-a")).toBeNull();
+  await expect(
+    store.resolve({ repoId: "repo-a", headCommit: lie }),
+  ).rejects.toMatchObject({ code: "NOT_SYNCED" });
+}, 30_000);
+
+test("repoId path-traversal attempts are neutralized by hashing", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const traversals = ["../../x", "..\\..\\x", "/etc/passwd", "C:\\Windows\\x"];
+  const store = await makeStore({ allowedRepoIds: traversals });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  const parentOfCache = path.dirname(cacheDir);
+
+  for (const repoId of traversals) {
+    await store.applyBundle(repoId, await fullBundle(src, head), head);
+    const dir = await store.resolve({ repoId, headCommit: head });
+    // The materialized dir is inside the cache root, under the hashed name.
+    const resolved = path.resolve(dir);
+    expect(resolved.startsWith(path.resolve(cacheDir) + path.sep)).toBe(true);
+    expect(resolved).toContain(repoHash(repoId));
+  }
+
+  // Every top-level cache entry is either `.no-hooks` or a 64-hex hash dir —
+  // no traversal produced a path segment outside the cache root.
+  const entries = await readdir(cacheDir);
+  for (const entry of entries) {
+    expect(entry === ".no-hooks" || /^[0-9a-f]{64}$/.test(entry)).toBe(true);
+  }
+  // And no stray "x" leaked next to the cache root.
+  await expect(stat(path.join(parentOfCache, "x"))).rejects.toThrow();
+}, 60_000);
+
+test("per-repo operations serialize: concurrent syncs + a resolve do not corrupt the repo", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const bundle = await fullBundle(src, c1);
+
+  // Fire two applyBundle and a resolve for the SAME repo concurrently. The
+  // per-repo lock serializes them; none may corrupt the repo. (resolve may
+  // land before the sync -> NOT_SYNCED, which is a clean typed error.)
+  const results = await Promise.allSettled([
+    store.applyBundle("repo-a", bundle, c1),
+    store.applyBundle("repo-a", bundle, c1),
+    store.resolve({ repoId: "repo-a", headCommit: c1 }),
+  ]);
+  // Both syncs must succeed (idempotent re-apply of the same head).
+  expect(results[0].status).toBe("fulfilled");
+  expect(results[1].status).toBe("fulfilled");
+
+  // Final state is consistent and the checkout is valid.
+  expect(await store.haveTip("repo-a")).toBe(c1);
+  const dir = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+}, 30_000);
+
+test("checkout retention cap evicts the least-recently-used checkout", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const c3 = await src.commit("c3");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 2,
+  });
+  // A full bundle of c3 contains c1, c2, c3.
+  await store.applyBundle("repo-a", await fullBundle(src, c3), c3);
+
+  const d1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const d2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  const d3 = await store.resolve({ repoId: "repo-a", headCommit: c3 });
+
+  // Cap is 2: the oldest (c1) checkout was evicted; c2 and c3 remain on disk.
+  await expect(stat(path.join(d1, ".git"))).rejects.toThrow();
+  expect((await stat(path.join(d2, ".git"))).isFile()).toBe(true);
+  expect((await stat(path.join(d3, ".git"))).isFile()).toBe(true);
+}, 45_000);
+
+test("checkout cap survives across store instances (init re-registers on-disk checkouts)", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const c3 = await src.commit("c3");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 3,
+    gitTimeoutMs: 30_000,
+  };
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c3), c3);
+  await store1.resolve({ repoId: "repo-a", headCommit: c1 });
+  await store1.resolve({ repoId: "repo-a", headCommit: c2 });
+  await store1.resolve({ repoId: "repo-a", headCommit: c3 });
+
+  // A new store over the same cacheDir with a tighter cap must evict on init.
+  const store2 = new WorkspaceStore({ ...opts, maxCachedCheckouts: 1 });
+  await store2.init();
+  const remaining = await readdir(
+    path.join(cacheDir, repoHash("repo-a"), "checkouts"),
+  );
+  expect(remaining).toHaveLength(1);
+}, 45_000);
+
+test("resolver injects into the WorkspaceResolver contract", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, head), head);
+  const resolver = store.createResolver();
+  const dir = await resolver({ repoId: "repo-a", headCommit: head }, "owner-x");
+  expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+}, 30_000);

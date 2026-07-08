@@ -9,11 +9,16 @@
 export {
   type DaemonConfig,
   DaemonConfigSchema,
+  DEFAULT_MAX_BUNDLE_BYTES,
+  DEFAULT_MAX_CACHED_CHECKOUTS,
+  DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
   type DiscoveryConfig,
   DiscoveryConfigSchema,
   loadDaemonConfig,
   type StaticNode,
   StaticNodeSchema,
+  type WorkspaceConfig,
+  WorkspaceConfigSchema,
 } from "./config/config.js";
 export { resolveDataDir } from "./config/paths.js";
 export {
@@ -141,3 +146,19 @@ export {
   TrustedDeviceSchema,
   TrustStore,
 } from "./trust/trust-store.js";
+export {
+  COMMIT_HASH_RE,
+  type CreateBundleOptions,
+  createBundle,
+  DEFAULT_GIT_TIMEOUT_MS,
+  GitError,
+  isAncestor,
+  resolveHeadCommit,
+} from "./workspace/git.js";
+export {
+  repoHash,
+  WorkspaceError,
+  type WorkspaceErrorCode,
+  WorkspaceStore,
+  type WorkspaceStoreOptions,
+} from "./workspace/workspace-store.js";
