@@ -130,6 +130,13 @@ export {
   registerHomeFleetTools,
 } from "./mcp/tools.js";
 export {
+  createNodeInfoProvider,
+  currentPlatform,
+  type JobLoadSource,
+  type NodeInfoConfig,
+  type NodeInfoProviderOptions,
+} from "./node/node-info.js";
+export {
   DEFAULT_PAIRING_TTL_MS,
   generatePairingCode,
   MAX_PAIRING_FAILURES,

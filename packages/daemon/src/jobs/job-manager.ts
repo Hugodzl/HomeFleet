@@ -165,6 +165,24 @@ export class JobManager {
   }
 
   /**
+   * Number of jobs currently running. Feeds `NodeInfo.activeJobs` so peers
+   * see this worker's live load in the `hello` handshake.
+   */
+  activeJobCount(): number {
+    return this.running.size;
+  }
+
+  /**
+   * The effective concurrency limit (constructor option or
+   * {@link DEFAULT_MAX_CONCURRENT_JOBS}). Exposed so the NodeInfo assembly
+   * advertises the number this manager actually enforces instead of
+   * re-deriving it from config defaults.
+   */
+  get maxConcurrent(): number {
+    return this.maxConcurrentJobs;
+  }
+
+  /**
    * Accepts a job for `owner`. Rejects (typed) an unsupported job type or a
    * full worker; otherwise mints a job id, records the job `queued`, and
    * starts it if a slot is free.

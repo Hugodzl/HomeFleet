@@ -16,6 +16,7 @@ import type {
 import { afterEach, expect, test } from "vitest";
 import { JobDispatchError } from "./job.js";
 import {
+  DEFAULT_MAX_CONCURRENT_JOBS,
   JobManager,
   type JobManagerOptions,
   type WorkspaceResolver,
@@ -301,6 +302,24 @@ test("subscriberCount is owner-checked and does not leak another peer's job", as
   expect(() => manager.subscriberCount(jobId, OTHER_OWNER)).toThrow(
     JobDispatchError,
   );
+});
+
+test("activeJobCount and maxConcurrent expose live load for NodeInfo", async () => {
+  expect(makeManager().maxConcurrent).toBe(DEFAULT_MAX_CONCURRENT_JOBS);
+
+  const manager = makeManager({
+    executors: [new AbortAwareExecutor()],
+    maxConcurrentJobs: 3,
+  });
+  expect(manager.maxConcurrent).toBe(3);
+  expect(manager.activeJobCount()).toBe(0);
+
+  const { jobId } = manager.submit(commandParams(), OWNER);
+  await waitUntil(() => manager.activeJobCount() === 1);
+
+  // cancel awaits the executor's terminal unwind, so the slot is freed.
+  await manager.cancel(jobId, OWNER);
+  expect(manager.activeJobCount()).toBe(0);
 });
 
 test("the resolver release handle fires when a job reaches a terminal state", async () => {
