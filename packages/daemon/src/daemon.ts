@@ -30,15 +30,13 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
+import { DAEMON_VERSION } from "./version.js";
 import { registerWorkspaceRoutes } from "./workspace/routes.js";
 import { WorkspaceStore } from "./workspace/workspace-store.js";
 
-/**
- * The daemon's own version, advertised as NodeInfo `daemonVersion` and in
- * discovery. Single owner: everything (including the stdio shim) imports it
- * from here.
- */
-export const DAEMON_VERSION = "0.1.0";
+// Re-exported so existing consumers of the daemon assembly (this module's
+// public surface) keep working; the string itself is owned by ./version.js.
+export { DAEMON_VERSION };
 
 export interface DaemonOptions {
   /** The data directory (identity, trust, config, workspaces live here). */
@@ -46,8 +44,18 @@ export interface DaemonOptions {
   /** The loaded (validated) daemon config. */
   config: DaemonConfig;
   /**
-   * Receives background failures that must not crash the daemon (discovery
-   * socket errors, workspace-store diagnostics). Defaults to a no-op.
+   * Receives background failures that must not crash the daemon: the
+   * DiscoveryAggregator's background errors, and failures thrown by
+   * individual {@link Daemon.stop} teardown steps (so one component's
+   * shutdown error doesn't prevent the daemon from reporting it while still
+   * tearing down the rest). Defaults to a no-op.
+   *
+   * Known v0 limitation: NodeServer and the MCP front's post-listen async
+   * socket errors are NOT routed here — those servers swallow their own
+   * post-listen errors and take no onError param yet. The WorkspaceStore is
+   * also not wired to this sink: it's built without its `logger`, and its
+   * diagnostics are informational strings rather than errors, so routing
+   * them here would be a category mismatch.
    */
   onError?: (error: unknown) => void;
 }
@@ -268,8 +276,18 @@ export class Daemon {
     }
     this.state = "stopped";
     this.runtime = null;
+    // Shielded, like start()'s unwind: a teardown step throwing must not skip
+    // the remaining (earlier-started) steps — e.g. jobManager.stop() and
+    // workspaceStore.stop() abort running jobs and in-flight git child
+    // processes, so dropping them on the floor leaks handles. Every
+    // component must get its stop, so failures are routed to onError instead
+    // of aborting the loop.
     for (const step of this.teardown.splice(0).reverse()) {
-      await step();
+      try {
+        await step();
+      } catch (error) {
+        this.onError(error);
+      }
     }
   }
 

@@ -26,7 +26,6 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
-import { DAEMON_VERSION } from "../daemon.js";
 import { KnownNodesRegistry } from "../discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
 import { DelegationRegistry } from "../mcp/delegation-registry.js";
@@ -38,6 +37,7 @@ import { createMcpServer } from "../mcp/server.js";
 import { createNodeInfoProvider } from "../node/node-info.js";
 import { HfpClient } from "../transport/client.js";
 import { TrustStore } from "../trust/trust-store.js";
+import { DAEMON_VERSION } from "../version.js";
 
 /**
  * Assembles the MCP server the stdio shim serves, from on-disk daemon state in
