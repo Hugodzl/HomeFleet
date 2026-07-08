@@ -59,9 +59,8 @@ export interface CliDeps {
   nodeExecPath?: string;
   /**
    * Absolute path to the daemon entry point `setup`'s autostart command
-   * should launch. Defaults to a path resolved relative to this module (see
-   * `defaultDaemonEntryPath`); overridable for tests and once the daemon is
-   * built/packaged with a different entry path.
+   * should launch. Defaults to the built `homefleetd.js` sibling (see
+   * `defaultDaemonEntryPath`); overridable for tests or a non-standard layout.
    */
   daemonEntryPath?: string;
 }
@@ -93,14 +92,16 @@ Usage:
 `;
 
 /**
- * Default daemon entry path: resolved relative to this module rather than
- * hardcoded, so it tracks the real source layout. NOTE: this points at the
- * TS source entry (../bin/homefleetd.ts) run today via `tsx`; it is expected
- * to be re-pointed once the daemon has a packaged/built entry point — see the
- * note this module prints alongside the generated autostart command.
+ * Default daemon entry path for the generated autostart command: the BUILT
+ * `homefleetd.js`, resolved as a sibling of the running module rather than
+ * hardcoded. In the packaged CLI (dist/bin/homefleet.js) this resolves to
+ * dist/bin/homefleetd.js — the bare-node-runnable entry a Task Scheduler task
+ * must launch (the daemon no longer runs from .ts under tsx; see Unit 10's
+ * build step). Overridable via CliDeps.daemonEntryPath — for tests, or when
+ * invoking the CLI from source, where a sibling `homefleetd.js` does not exist.
  */
 function defaultDaemonEntryPath(): string {
-  return fileURLToPath(new URL("../bin/homefleetd.ts", import.meta.url));
+  return fileURLToPath(new URL("./homefleetd.js", import.meta.url));
 }
 
 /**
@@ -173,9 +174,9 @@ async function runSetup(deps: CliDeps): Promise<number> {
     `  ${generateAutostartCreateCommand({ nodeExecPath, daemonEntryPath })}`,
   );
   deps.stdout(
-    "(This command's path is provisional — it is finalized once the daemon " +
-      "is built/packaged in a later step; re-run setup after packaging to " +
-      "regenerate it.)",
+    "(The path above is the built daemon entry — run `pnpm build` first so it " +
+      "exists. If you invoke the CLI from source rather than the packaged bin, " +
+      "pass the real homefleetd.js path.)",
   );
   return 0;
 }

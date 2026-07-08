@@ -183,6 +183,19 @@ describe("setup", () => {
     expect(output).toContain("homefleetd.ts");
   });
 
+  test("autostart command defaults to the built homefleetd.js entry (not .ts)", async () => {
+    // With no injected daemonEntryPath, setup must reference the BUILT daemon
+    // entry — the bare-node-runnable homefleetd.js, never the .ts source (which
+    // would produce an autostart task that cannot run under plain `node`).
+    const { deps, stdoutLines } = makeHarness();
+    deps.daemonEntryPath = undefined;
+    const code = await runCli(["setup"], deps);
+    expect(code).toBe(0);
+    const output = stdoutLines.join("\n");
+    expect(output).toContain("homefleetd.js");
+    expect(output).not.toContain("homefleetd.ts");
+  });
+
   test("works with no dataDir/network side effects even without a configured node name", async () => {
     const { deps, stdoutLines } = makeHarness({
       config: fakeConfig({ node: {} }),
