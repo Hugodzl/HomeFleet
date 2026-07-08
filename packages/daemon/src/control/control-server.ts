@@ -57,6 +57,23 @@
  * process already running as the same OS user could reach this port
  * regardless of what token scheme we invented, so v0 does not pretend
  * otherwise — see ../mcp/http-transport.js for the identical stance.
+ *
+ * EXPLICIT SIGN-OFF for the trust-store-WRITE routes specifically (not
+ * inherited by assumption from the MCP front's mostly-read rationale):
+ * `pair/begin` opens a pairing window and `pair/connect` can make THIS
+ * daemon perform an outbound TLS handshake against a caller-named
+ * `host:port` and, on acceptance, write a new device into the LIVE
+ * `TrustStore` (see `pairWithPeer` in ../daemon.js). `CONTROL_HEADER`'s
+ * value is a compile-time constant, not a per-boot secret, so it stops a
+ * browser (see above) but NOT a same-OS-user co-resident process, which can
+ * read the constant from source and drive these routes itself. Accepted as
+ * a deliberate v0 tradeoff: "same OS user" is the trust boundary for this
+ * live-write surface too, same as every other local, same-user-trusted
+ * front in this daemon (MCP, HFP loopback admin). If that boundary is ever
+ * judged insufficient for this specific write path, the fix is a per-daemon
+ * -instance random token (e.g. a 0600 file only the same user can read) in
+ * place of the static header value — not a rewrite of the network/browser
+ * defenses above, which hold independently.
  */
 import {
   createServer,
@@ -329,6 +346,13 @@ export async function startControlServer(
     // Fail CLOSED: never serve a request against an empty allow-list. By
     // construction the list is populated before `listen` resolves; this is
     // the defensive backstop (see the module header).
+    //
+    // Deliberately untested by black-box HTTP tests: `allowedHosts` is
+    // always non-empty by the time `startControlServer`'s promise resolves
+    // (the only way a test can obtain a port to request against), so this
+    // branch is structurally unreachable from the public entry point. Left
+    // as a documented, intentionally-untested defensive branch rather than
+    // contorting the module's internals to make it reachable from a test.
     if (allowedHosts.length === 0) {
       respondError(res, 503, "control server not ready");
       return;

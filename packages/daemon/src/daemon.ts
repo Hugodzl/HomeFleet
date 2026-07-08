@@ -103,10 +103,23 @@ interface DaemonRuntime {
  * propagates to the caller, which turns it into a clean 4xx/5xx HTTP
  * response (see control-server.ts); it must never reach here as a stack
  * trace.
+ *
+ * A LOCAL trust-store failure AFTER the peer has already accepted is a
+ * different animal from a peer/network failure: the peer's acceptance is an
+ * irreversible remote side effect (its own trust store already has us), so
+ * if `trustStore.add` then throws here, the two devices are left in a
+ * one-sided trust state (peer trusts us; we don't yet trust it back). That
+ * is thrown as a distinguishable error carrying `.status = 500` — not left
+ * to fall into `pairingErrorStatus`'s generic 502 "the peer/attempt failed"
+ * bucket — so a caller (and eventually the CLI/user) can tell "the peer
+ * never accepted" apart from "the peer accepted but our local bookkeeping
+ * failed", which calls for retrying THIS side, not a fresh pairing attempt.
+ * Only `hfpClient.pair` and `trustStore.add` are used, narrowed via `Pick`
+ * so tests can pass minimal fakes instead of real client/store instances.
  */
-async function pairWithPeer(options: {
-  hfpClient: HfpClient;
-  trustStore: TrustStore;
+export async function pairWithPeer(options: {
+  hfpClient: Pick<HfpClient, "pair">;
+  trustStore: Pick<TrustStore, "add">;
   nodeInfoProvider: () => NodeInfo;
   input: {
     host: string;
@@ -135,11 +148,24 @@ async function pairWithPeer(options: {
   if (!response.accepted || response.nodeInfo === undefined) {
     return { accepted: false };
   }
-  await trustStore.add({
-    deviceId: serverDeviceId,
-    name: response.nodeInfo.name,
-    addedAt: new Date().toISOString(),
-  });
+  try {
+    await trustStore.add({
+      deviceId: serverDeviceId,
+      name: response.nodeInfo.name,
+      addedAt: new Date().toISOString(),
+    });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "unknown error";
+    throw Object.assign(
+      new Error(
+        "peer accepted the pairing but the local trust store failed to " +
+          `persist it (the peer now trusts this node; this node does not ` +
+          `yet trust the peer back — retry pairing to fix this side): ${message}`,
+        { cause },
+      ),
+      { status: 500 },
+    );
+  }
   return {
     accepted: true,
     deviceId: serverDeviceId,
