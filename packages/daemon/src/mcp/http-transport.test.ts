@@ -14,6 +14,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterEach, expect, test } from "vitest";
 import { DelegationRegistry } from "./delegation-registry.js";
 import {
+  MAX_MCP_REQUEST_BYTES,
   type McpHttpServerOptions,
   type RunningMcpHttpServer,
   startMcpHttpServer,
@@ -84,6 +85,7 @@ function rawPost(
         port,
         method: "POST",
         path: "/mcp",
+        agent: false, // fresh socket per request (no keep-alive interference)
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
@@ -98,6 +100,52 @@ function rawPost(
     );
     req.on("error", reject);
     req.end(body);
+  });
+}
+
+/**
+ * POST an arbitrary body. When `chunked`, no content-length is sent (forcing
+ * chunked transfer-encoding) so the streaming byte guard — not the
+ * content-length fast path — is exercised. Resolves with the status code, or
+ * `"errored"` if the socket was torn down mid-send (also an acceptable
+ * rejection of an oversized body).
+ */
+function rawPostBody(
+  port: number,
+  body: Buffer,
+  options: { chunked?: boolean } = {},
+): Promise<number | "errored"> {
+  return new Promise((resolve) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: "/mcp",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          host: `127.0.0.1:${port}`,
+          ...(options.chunked ? {} : { "content-length": String(body.length) }),
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on("error", () => resolve("errored"));
+    if (options.chunked) {
+      // Write in slices with no content-length -> chunked encoding.
+      const slice = 256 * 1024;
+      for (let i = 0; i < body.length; i += slice) {
+        req.write(body.subarray(i, i + slice));
+      }
+      req.end();
+    } else {
+      req.end(body);
+    }
   });
 }
 
@@ -173,4 +221,45 @@ test("close() is clean and idempotent-safe across restarts", async () => {
   // A second server binds fine after the first closed (no leaked handle/port lock).
   const second = await start();
   expect(second.port).toBeGreaterThan(0);
+});
+
+test("allow-lists are populated (non-empty) once started (fail-closed by construction)", async () => {
+  const server = await start();
+  // An empty allow-list would fail OPEN (the SDK skips validation); a populated
+  // one is what makes the 403 rejections above meaningful.
+  expect(server.allowedHosts.length).toBeGreaterThan(0);
+  expect(server.allowedOrigins.length).toBeGreaterThan(0);
+  expect(server.allowedHosts).toContain(`127.0.0.1:${server.port}`);
+  expect(server.allowedOrigins).toContain(`http://127.0.0.1:${server.port}`);
+});
+
+test("rejects an oversized body via an honest large content-length (413), stays up", async () => {
+  const server = await start();
+  const oversized = Buffer.alloc(MAX_MCP_REQUEST_BYTES + 1024, 0x20); // spaces
+  const status = await rawPostBody(server.port, oversized);
+  expect(status).toBe(413);
+
+  // The daemon survived and still serves a normal request.
+  const ok = await rawPost(server.port, { host: `127.0.0.1:${server.port}` });
+  expect(ok).toBe(200);
+});
+
+test("rejects an oversized chunked body (no content-length can bypass the cap), stays up", async () => {
+  const server = await start();
+  const oversized = Buffer.alloc(MAX_MCP_REQUEST_BYTES + 512 * 1024, 0x20);
+  const result = await rawPostBody(server.port, oversized, { chunked: true });
+  // Either an explicit 413 or a torn socket is an acceptable rejection.
+  expect(result === 413 || result === "errored").toBe(true);
+
+  const ok = await rawPost(server.port, { host: `127.0.0.1:${server.port}` });
+  expect(ok).toBe(200);
+});
+
+test("rejects a malformed JSON body with 400, stays up", async () => {
+  const server = await start();
+  const status = await rawPostBody(server.port, Buffer.from("{ not json "));
+  expect(status).toBe(400);
+
+  const ok = await rawPost(server.port, { host: `127.0.0.1:${server.port}` });
+  expect(ok).toBe(200);
 });

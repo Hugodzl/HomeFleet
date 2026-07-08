@@ -67,6 +67,7 @@ export {
   MAX_TRACKED_DELEGATIONS,
 } from "./mcp/delegation-registry.js";
 export {
+  MAX_MCP_REQUEST_BYTES,
   type McpHttpServerOptions,
   type RunningMcpHttpServer,
   startMcpHttpServer,
