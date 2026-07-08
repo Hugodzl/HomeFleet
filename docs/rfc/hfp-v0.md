@@ -60,14 +60,16 @@ HFP is bound to HTTPS with mutual TLS:
 
 ### Endpoints
 
-| Method | Path                       | Request body      | Response body                  |
-| ------ | -------------------------- | ----------------- | ------------------------------ |
-| POST   | `/hfp/v0/hello`            | `HelloRequest`    | `HelloResponse`                |
-| POST   | `/hfp/v0/pair`             | `PairRequest`     | `PairResponse`                 |
-| POST   | `/hfp/v0/jobs`             | `DelegateRequest` | `DelegateResponse`             |
-| GET    | `/hfp/v0/jobs/{id}`        | —                 | `JobSnapshot`                  |
-| GET    | `/hfp/v0/jobs/{id}/events` | —                 | SSE stream of `JobEvent`       |
-| POST   | `/hfp/v0/jobs/{id}/cancel` | —                 | `CancelResponse`               |
+| Method | Path                       | Request body        | Response body                  |
+| ------ | -------------------------- | ------------------- | ------------------------------ |
+| POST   | `/hfp/v0/hello`            | `HelloRequest`      | `HelloResponse`                |
+| POST   | `/hfp/v0/pair`             | `PairRequest`       | `PairResponse`                 |
+| POST   | `/hfp/v0/jobs`             | `DelegateRequest`   | `DelegateResponse`             |
+| GET    | `/hfp/v0/jobs/{id}`        | —                   | `JobSnapshot`                  |
+| GET    | `/hfp/v0/jobs/{id}/events` | —                   | SSE stream of `JobEvent`       |
+| POST   | `/hfp/v0/jobs/{id}/cancel` | —                   | `CancelResponse`               |
+| POST   | `/hfp/v0/workspace/have`   | `HaveTipRequest`    | `HaveTipResponse`              |
+| POST   | `/hfp/v0/workspace/bundle` | git bundle (binary) | `BundleUploadResponse`         |
 
 `{id}` is the job ID (an RFC 4122 UUID, canonical lowercase) returned by
 `POST /hfp/v0/jobs`. On failure,
@@ -179,8 +181,10 @@ peer's device ID in their paired-device lists.
 
 `{ repoId: string, headCommit: string }` where `headCommit` is a 40-char
 lowercase hex commit hash. Delegation operates on committed state only
-(ADR-0005); how the worker obtains the workspace content is out of scope
-for HFP v0.
+(ADR-0005). How the worker obtains the workspace content is specified in
+[Workspace Sync](#workspace-sync) below: the delegator ships the repository as
+a git bundle before delegating, and the worker materializes `headCommit` from
+its cache.
 
 ### Job parameters — `JobParams`
 
@@ -374,6 +378,78 @@ one of:
 { "code": "WORKSPACE_UNAVAILABLE", "message": "repo not on allowlist", "details": { "repoId": "homefleet" } }
 ```
 
+## Workspace Sync
+
+Before delegating a job whose `WorkspaceRef` names a repository, the delegator
+transfers that repository's committed content to the worker as **git bundles**
+(ADR-0005): a full bundle the first time, an incremental bundle afterwards. The
+worker maintains a per-repo cache it unbundles into and materializes checkouts
+from. **Committed state only:** uncommitted/dirty working-tree changes are out
+of scope for v0 — a bundle carries commits, not the delegator's working tree.
+
+### Authorization and the repo allowlist
+
+Both workspace endpoints require a paired peer (the mTLS chokepoint) AND that
+the worker **allowlists** the `repoId`. The allowlist is local worker policy:
+being paired does not entitle a peer to sync arbitrary repositories. A worker
+with an empty allowlist accepts no repos (fail closed). A non-allowlisted
+`repoId` is rejected with `WORKSPACE_UNAVAILABLE` (HTTP 403) — not a silent
+"no tip" — so the delegator learns the repo is not accepted.
+
+The worker MUST NOT let `repoId` influence a filesystem path directly (a
+`repoId` such as `../../x` must not escape the cache root); implementations key
+the per-repo cache by a hash of the `repoId`.
+
+### Have-tip — `HaveTipRequest` / `HaveTipResponse`
+
+`HaveTipRequest` is `{ repoId: string }`. `HaveTipResponse` is
+`{ headCommit: string | null }`, where `headCommit` is the worker's current
+known commit for the repo (40-char lowercase hex) or `null` if the worker has
+never synced it. The delegator uses this to choose a full bundle (worker has
+nothing, or the reported commit is not an ancestor of the new head) or an
+incremental bundle (`reported..new-head`).
+
+```json
+{ "repoId": "homefleet" }
+```
+
+```json
+{ "headCommit": "0123456789abcdef0123456789abcdef01234567" }
+```
+
+### Bundle upload — binary body + `BundleUploadResponse`
+
+`POST /hfp/v0/workspace/bundle` uploads a git bundle. The bundle is **binary
+and potentially many megabytes**, so it is NOT encoded into a JSON field: the
+request body is the raw bundle bytes (`Content-Type: application/octet-stream`),
+and the two small parameters travel in request headers:
+
+| Header                    | Value                                                    |
+| ------------------------- | -------------------------------------------------------- |
+| `x-homefleet-repo-id`     | the `repoId`, URL-encoded (opaque; may contain `/`, `\`) |
+| `x-homefleet-head-commit` | the 40-char lowercase hex commit the bundle delivers     |
+
+The worker streams the body to disk under a size cap (`MAX_BUNDLE_BYTES`,
+configurable, default 512 MiB — distinct from and much larger than the 1 MiB
+JSON body limit). A body exceeding the cap is aborted with HTTP 413 and nothing
+is retained. The worker then `git bundle verify`s the file (rejecting a
+malformed bundle, or an incremental bundle whose prerequisites it lacks, with
+HTTP 400), confirms the bundle actually delivers the header's `headCommit`
+(rejecting otherwise — it never checks out a commit a bundle did not deliver),
+unbundles it into the per-repo cache, and advances its tip. Received content
+MUST NOT be able to execute repository hooks.
+
+On success the response is `BundleUploadResponse`, `{ ok: true, headCommit }`,
+echoing the commit the worker now has.
+
+```json
+{ "ok": true, "headCommit": "0123456789abcdef0123456789abcdef01234567" }
+```
+
+A subsequent job whose `WorkspaceRef.headCommit` equals a synced commit resolves
+to a materialized checkout of that commit; a job for a commit the worker has not
+been sent fails with `WORKSPACE_UNAVAILABLE`.
+
 ## Discovery
 
 Discovery is how daemons find connection candidates on the LAN before any
@@ -548,9 +624,10 @@ queued ---> running +-----------> failed
   jobs. Adding one means a new params schema, a new union variant, and a new
   `JobType` entry; each variant comes with its own result conventions and
   error codes as needed.
-- **Workspace transfer** (git bundles over HFP, ADR-0005) will add endpoints
-  and messages for negotiating and shipping bundles; `WorkspaceRef` is
-  already the anchor for that negotiation.
+- **Dirty-state transfer.** Workspace sync (see [Workspace Sync](#workspace-sync))
+  ships committed state only in v0; a post-MVP extension could carry
+  uncommitted changes as a patch applied over the materialized checkout
+  (ADR-0005).
 - **Multi-node fan-out** (delegating one logical task across several
   workers) is expected to compose out of existing primitives rather than new
   message types, but may add batch delegation.

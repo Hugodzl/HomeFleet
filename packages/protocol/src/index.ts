@@ -12,3 +12,4 @@ export * from "./node.js";
 export * from "./pairing.js";
 export * from "./rpc.js";
 export * from "./version.js";
+export * from "./workspace.js";

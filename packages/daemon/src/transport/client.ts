@@ -11,15 +11,21 @@
  * long-lived authenticated connections to outlive the revocation.
  */
 import { once } from "node:events";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import {
+  type BundleUploadResponse,
+  BundleUploadResponseSchema,
   type CancelResponse,
   CancelResponseSchema,
   type DelegateRequest,
   type DelegateResponse,
   DelegateResponseSchema,
+  type HaveTipRequest,
+  HaveTipResponseSchema,
   type HelloRequest,
   type HelloResponse,
   HelloResponseSchema,
@@ -61,6 +67,14 @@ export const MAX_SSE_TOTAL_BYTES = 16 * 1024 * 1024;
  * hanging the iterator forever. Overridable per call for tests.
  */
 export const STREAM_IDLE_TIMEOUT_MS = 45_000;
+
+/**
+ * Socket-inactivity timeout for the bundle-upload phase. Re-armed after the
+ * pinned connect so a large upload (and the worker's subsequent verify/fetch,
+ * which delays the response) is not killed mid-flight, while a stalled peer
+ * still trips it. Generous, since git work on the worker can take a while.
+ */
+export const BUNDLE_UPLOAD_IDLE_TIMEOUT_MS = 120_000;
 
 /**
  * Default per-request timeout. Covers connect + TLS handshake as well as
@@ -297,6 +311,122 @@ export class HfpClient {
       path: `/jobs/${encodeURIComponent(jobId)}/cancel`,
       responseSchema: CancelResponseSchema,
     });
+  }
+
+  /**
+   * `POST /hfp/v0/workspace/have` — ask the worker which commit it already has
+   * for `repoId`, so the delegator can build a full or incremental bundle.
+   * Returns the worker's tip, or `null` if it has never synced the repo. A
+   * repo the worker does not allowlist is an HFP error (WORKSPACE_UNAVAILABLE),
+   * surfaced as {@link HfpRequestError} — NOT a silent `null`.
+   */
+  async haveTip(target: HfpTarget, repoId: string): Promise<string | null> {
+    const body: HaveTipRequest = { repoId };
+    const response = await this.request({
+      ...target,
+      method: "POST",
+      path: "/workspace/have",
+      body,
+      responseSchema: HaveTipResponseSchema,
+    });
+    return response.headCommit;
+  }
+
+  /**
+   * `POST /hfp/v0/workspace/bundle` — upload a git bundle for `repoId` claiming
+   * to deliver `headCommit`. The bundle is BINARY and can be many MiB, so it is
+   * NOT base64'd into JSON: it streams as the raw `application/octet-stream`
+   * body over the verified socket, with `repoId`/`headCommit` in request
+   * headers. Reuses {@link connectPinned} (the fingerprint pin is not
+   * reimplemented); the socket is held for the upload and destroyed in the
+   * `finally` (the ownership-transfer contract). Non-2xx (e.g. 413 too-large,
+   * 403 not-allowlisted) throws {@link HfpRequestError}, mirroring `request`.
+   */
+  async uploadBundle(
+    target: HfpTarget,
+    repoId: string,
+    headCommit: string,
+    bundlePath: string,
+    options: { idleTimeoutMs?: number } = {},
+  ): Promise<BundleUploadResponse> {
+    const connectTimeoutMs = target.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const idleTimeoutMs =
+      options.idleTimeoutMs ?? BUNDLE_UPLOAD_IDLE_TIMEOUT_MS;
+    const size = (await stat(bundlePath)).size;
+    const { socket } = await this.connectPinned({
+      host: target.host,
+      port: target.port,
+      expectedDeviceId: target.expectedDeviceId,
+      timeoutMs: connectTimeoutMs,
+    });
+    try {
+      // Re-arm the inactivity timer for the (possibly long) upload + the
+      // worker's verify/fetch before it responds. connectPinned used the
+      // connect timeout; swap in the upload idle timeout so streaming and a
+      // slow server-side git op are not mistaken for a stall.
+      socket.removeAllListeners("timeout");
+      socket.setTimeout(idleTimeoutMs, () => {
+        socket.destroy(
+          new HfpTimeoutError(target.host, target.port, idleTimeoutMs),
+        );
+      });
+
+      const response = await new Promise<IncomingMessage>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            createConnection: () => socket,
+            method: "POST",
+            path: `${HFP_PATH_PREFIX}/workspace/bundle`,
+            headers: {
+              host: `${target.host}:${target.port}`,
+              "content-type": "application/octet-stream",
+              "content-length": String(size),
+              // repoId is opaque (may contain non-ASCII, `/`, `\`); URL-encode
+              // it so it is a safe single-line header value. headCommit is
+              // already 40-hex (header-safe).
+              "x-homefleet-repo-id": encodeURIComponent(repoId),
+              "x-homefleet-head-commit": headCommit,
+            },
+          },
+          resolve,
+        );
+        req.on("error", reject);
+        const file = createReadStream(bundlePath);
+        file.on("error", (error) => {
+          req.destroy(error);
+          reject(error);
+        });
+        file.pipe(req);
+      });
+      response.on("error", () => {});
+
+      const status = response.statusCode ?? 0;
+      const bodyText = await readCappedBody(response, MAX_BODY_BYTES);
+      if (status < 200 || status >= 300) {
+        throw buildRequestError(status, bodyText);
+      }
+      let json: unknown;
+      try {
+        json = JSON.parse(bodyText);
+      } catch {
+        throw new HfpRequestError(
+          status,
+          undefined,
+          "worker returned a 2xx bundle-upload response with a non-JSON body",
+        );
+      }
+      return BundleUploadResponseSchema.parse(json);
+    } catch (error) {
+      if (
+        !(error instanceof HfpTimeoutError) &&
+        socket.errored instanceof HfpTimeoutError
+      ) {
+        throw socket.errored;
+      }
+      throw error;
+    } finally {
+      socket.destroy();
+    }
   }
 
   /**

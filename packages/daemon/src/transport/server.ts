@@ -74,6 +74,32 @@ export interface StreamRouteOptions {
 }
 
 /**
+ * Context for an inbound binary-upload route (M7 bundle upload). Symmetric to
+ * {@link StreamRouteContext} but the payload flows the other way: the handler
+ * owns the raw request stream (`req`) — which it MUST consume or destroy — and
+ * writes the JSON response on `res`. Like a stream route, the auth gate has
+ * already run, so a `paired` upload route only ever reaches its handler for a
+ * paired peer. The request body is NOT buffered or JSON-parsed by the server:
+ * the handler streams it (e.g. to a size-capped temp file), so a many-MiB
+ * bundle never hits the 1 MiB JSON body limit or balloons memory.
+ */
+export interface UploadRouteContext {
+  peer: PeerInfo;
+  params: Record<string, string>;
+  req: IncomingMessage;
+  res: ServerResponse;
+}
+
+export type UploadRouteHandler = (
+  context: UploadRouteContext,
+) => void | Promise<void>;
+
+export interface UploadRouteOptions {
+  /** Defaults to `"paired"`. */
+  auth?: RouteAuth;
+}
+
+/**
  * `paired` routes reject peers that are not in the trust store (or present
  * no client certificate) with 401 UNAUTHORIZED before the handler runs.
  * `unpaired-ok` is reserved for `POST /hfp/v0/pair`.
@@ -107,7 +133,18 @@ interface StreamRegisteredRoute {
   invokeStream: StreamRouteHandler;
 }
 
-type RegisteredRoute = JsonRegisteredRoute | StreamRegisteredRoute;
+interface UploadRegisteredRoute {
+  kind: "upload";
+  method: string;
+  segments: string[];
+  auth: RouteAuth;
+  invokeUpload: UploadRouteHandler;
+}
+
+type RegisteredRoute =
+  | JsonRegisteredRoute
+  | StreamRegisteredRoute
+  | UploadRegisteredRoute;
 
 export interface NodeServerOptions {
   identity: Identity;
@@ -209,6 +246,30 @@ export class NodeServer {
       segments: fullPath.split("/"),
       auth: options.auth ?? "paired",
       invokeStream: handler,
+    });
+  }
+
+  /**
+   * Registers an inbound binary-upload route (M7 bundle upload). Same path/auth
+   * semantics as {@link route}, but the handler takes over the raw request AND
+   * response AFTER the identify-peer → paired chokepoint has run — so the auth
+   * gate is never bypassed — and the server does NOT read or JSON-parse the
+   * body. The handler is responsible for streaming (and size-capping) the
+   * request body and for writing the response.
+   */
+  routeUpload(
+    method: "GET" | "POST",
+    routePath: string,
+    options: UploadRouteOptions,
+    handler: UploadRouteHandler,
+  ): void {
+    const fullPath = `${HFP_PATH_PREFIX}${routePath}`;
+    this.routes.push({
+      kind: "upload",
+      method,
+      segments: fullPath.split("/"),
+      auth: options.auth ?? "paired",
+      invokeUpload: handler,
     });
   }
 
@@ -381,6 +442,19 @@ export class NodeServer {
       // JSON body is read (they are bodyless GETs).
       if (match.route.kind === "stream") {
         await match.route.invokeStream({
+          peer,
+          params: match.params,
+          req,
+          res,
+        });
+        return;
+      }
+
+      // Upload routes take over BOTH the raw request (binary body) and the
+      // response, after the same auth gate; the server does not read/parse the
+      // body (the handler streams it to disk under its own size cap).
+      if (match.route.kind === "upload") {
+        await match.route.invokeUpload({
           peer,
           params: match.params,
           req,

@@ -113,6 +113,7 @@ export {
   type PairingManagerOptions,
 } from "./pairing/pairing.js";
 export {
+  BUNDLE_UPLOAD_IDLE_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   FingerprintMismatchError,
   HfpClient,
@@ -140,6 +141,9 @@ export {
   type StreamRouteContext,
   type StreamRouteHandler,
   type StreamRouteOptions,
+  type UploadRouteContext,
+  type UploadRouteHandler,
+  type UploadRouteOptions,
 } from "./transport/server.js";
 export {
   type TrustedDevice,
@@ -155,6 +159,11 @@ export {
   isAncestor,
   resolveHeadCommit,
 } from "./workspace/git.js";
+export {
+  HEAD_COMMIT_HEADER,
+  REPO_ID_HEADER,
+  registerWorkspaceRoutes,
+} from "./workspace/routes.js";
 export {
   repoHash,
   WorkspaceError,
