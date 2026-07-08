@@ -75,6 +75,7 @@ async function createNode(
     allowedRepoIds: options.allowedRepoIds ?? [],
     maxBundleBytes: options.maxBundleBytes ?? 512 * 1024 * 1024,
     maxCachedCheckouts: 8,
+    gcAfterFetches: 100,
     gitTimeoutMs: 30_000,
   });
   await store.init();

@@ -11,6 +11,7 @@ export {
   DaemonConfigSchema,
   DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MAX_CACHED_CHECKOUTS,
+  DEFAULT_WORKSPACE_GC_AFTER_FETCHES,
   DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
   type DiscoveryConfig,
   DiscoveryConfigSchema,

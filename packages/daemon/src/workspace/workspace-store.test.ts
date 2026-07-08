@@ -9,7 +9,15 @@ import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
-import { createBundle, ok, resolveHeadCommit, runGit } from "./git.js";
+import {
+  commitPresent,
+  countObjects,
+  createBundle,
+  ok,
+  resolveHeadCommit,
+  runGit,
+  type WorkerGit,
+} from "./git.js";
 import {
   repoHash,
   WorkspaceError,
@@ -71,6 +79,7 @@ async function makeStore(
     allowedRepoIds: ["repo-a"],
     maxBundleBytes: 512 * 1024 * 1024,
     maxCachedCheckouts: 32,
+    gcAfterFetches: 100,
     gitTimeoutMs: 30_000,
     ...overrides,
   });
@@ -83,6 +92,46 @@ async function fullBundle(src: Src, headCommit: string): Promise<string> {
   const dir = await tempDir("homefleet-bundle-");
   const bundlePath = path.join(dir, "full.bundle");
   await createBundle({ repoPath: src.repoPath, bundlePath, headCommit });
+  return bundlePath;
+}
+
+/** A WorkerGit pointing at the store's on-disk bare cache repo for `repoId`. */
+function workerFor(cacheDir: string, repoId: string): WorkerGit {
+  return {
+    repoDir: path.join(cacheDir, repoHash(repoId), "repo.git"),
+    hooksPath: path.join(cacheDir, ".no-hooks"),
+    timeoutMs: 30_000,
+  };
+}
+
+/** A fresh repo with UNIQUE content (unrelated history, no object dedup). */
+async function makeUniqueRepo(
+  tag: string,
+): Promise<{ repoPath: string; head: string }> {
+  const repoPath = await tempDir("homefleet-uniq-");
+  const run = async (args: string[]): Promise<void> => {
+    const r = await runGit(args, { cwd: repoPath, timeoutMs: 30_000 });
+    if (!ok(r)) {
+      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    }
+  };
+  await run(["init", "--quiet"]);
+  await run(["config", "user.email", "t@example.com"]);
+  await run(["config", "user.name", "Test"]);
+  await run(["config", "commit.gpgsign", "false"]);
+  await writeFile(
+    path.join(repoPath, "data.txt"),
+    `unique-history-${tag}-${Math.random()}\n`,
+  );
+  await run(["add", "-A"]);
+  await run(["commit", "--quiet", "-m", `commit ${tag}`]);
+  return { repoPath, head: await resolveHeadCommit(repoPath, 30_000) };
+}
+
+async function fullBundleOf(repoPath: string, head: string): Promise<string> {
+  const dir = await tempDir("homefleet-bundle-");
+  const bundlePath = path.join(dir, "full.bundle");
+  await createBundle({ repoPath, bundlePath, headCommit: head });
   return bundlePath;
 }
 
@@ -282,6 +331,7 @@ test("checkout cap survives across store instances (init re-registers on-disk ch
     allowedRepoIds: ["repo-a"],
     maxBundleBytes: 512 * 1024 * 1024,
     maxCachedCheckouts: 3,
+    gcAfterFetches: 100,
     gitTimeoutMs: 30_000,
   };
   const store1 = new WorkspaceStore(opts);
@@ -311,3 +361,88 @@ test("resolver injects into the WorkspaceResolver contract", async () => {
     "content 0\n",
   );
 }, 30_000);
+
+test("a bundle advertising a head != the claimed headCommit imports no objects", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+
+  // A valid full bundle of c1, but we claim it delivers a different commit. The
+  // list-heads pre-filter rejects it from the header alone — before any fetch.
+  await expect(
+    store.applyBundle("repo-a", await fullBundle(src, c1), "0".repeat(40)),
+  ).rejects.toMatchObject({ code: "COMMIT_NOT_DELIVERED" });
+
+  const counts = await countObjects(workerFor(cacheDir, "repo-a"));
+  expect(counts.count).toBe(0);
+  expect(counts.inPack).toBe(0);
+}, 30_000);
+
+test("periodic gc reclaims superseded objects so the bare cache stays bounded", async () => {
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    gcAfterFetches: 2,
+  });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  const worker = workerFor(cacheDir, "repo-a");
+
+  const a = await makeUniqueRepo("A");
+  await store.applyBundle(
+    "repo-a",
+    await fullBundleOf(a.repoPath, a.head),
+    a.head,
+  );
+  expect(await commitPresent(worker, a.head)).toBe(true);
+
+  // A rejected upload in the mix must not corrupt the cache or advance the tip.
+  await expect(
+    store.applyBundle(
+      "repo-a",
+      await fullBundleOf(a.repoPath, a.head),
+      "0".repeat(40),
+    ),
+  ).rejects.toMatchObject({ code: "COMMIT_NOT_DELIVERED" });
+  expect(await store.haveTip("repo-a")).toBe(a.head);
+
+  // A second successful sync of an UNRELATED history moves the tip and hits the
+  // gc threshold; history A is now unreachable and gc reclaims it.
+  const b = await makeUniqueRepo("B");
+  await store.applyBundle(
+    "repo-a",
+    await fullBundleOf(b.repoPath, b.head),
+    b.head,
+  );
+  expect(await commitPresent(worker, b.head)).toBe(true);
+  expect(await commitPresent(worker, a.head)).toBe(false);
+}, 45_000);
+
+test("an in-use checkout survives a gc triggered by a later sync", async () => {
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    gcAfterFetches: 1,
+  });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  const worker = workerFor(cacheDir, "repo-a");
+
+  const a = await makeUniqueRepo("A");
+  await store.applyBundle(
+    "repo-a",
+    await fullBundleOf(a.repoPath, a.head),
+    a.head,
+  );
+  const dir = await store.resolve({ repoId: "repo-a", headCommit: a.head });
+  const content = await readFile(path.join(dir, "data.txt"), "utf8");
+
+  // Move the tip to an unrelated history B (gc runs every fetch): A is now only
+  // anchored by the live worktree, which gc must NOT prune.
+  const b = await makeUniqueRepo("B");
+  await store.applyBundle(
+    "repo-a",
+    await fullBundleOf(b.repoPath, b.head),
+    b.head,
+  );
+
+  expect(await readFile(path.join(dir, "data.txt"), "utf8")).toBe(content);
+  expect(await commitPresent(worker, a.head)).toBe(true);
+}, 45_000);

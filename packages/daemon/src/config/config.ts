@@ -62,10 +62,11 @@ export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
 export const DEFAULT_MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
 
 /**
- * Default cap on materialized checkouts retained across all repos. Oldest is
- * evicted when the cap is exceeded, so a peer syncing many commits cannot fill
- * the disk without bound (the recurring "no unbounded peer-driven state"
- * discipline). Set comfortably above the worker's job concurrency.
+ * Default cap on the NUMBER of materialized checkouts retained across all
+ * repos. When exceeded, the least-recently-used checkout directory is evicted
+ * (the recurring "no unbounded peer-driven state" discipline). This bounds the
+ * count of checkout working trees, not total disk (checkout sizes vary). Set
+ * comfortably above the worker's job concurrency.
  */
 export const DEFAULT_MAX_CACHED_CHECKOUTS = 32;
 
@@ -73,10 +74,21 @@ export const DEFAULT_MAX_CACHED_CHECKOUTS = 32;
 export const DEFAULT_WORKSPACE_GIT_TIMEOUT_MS = 120_000;
 
 /**
+ * Default number of successful bundle fetches into a repo's bare cache before
+ * `git gc --prune=now` runs (per repo). Bounds bare object-store accretion: an
+ * unbundle imports objects even for a subsequently-rejected upload, so without
+ * periodic gc a peer could grow `repo.git` without limit. gc is expensive, so
+ * it is amortized over this many fetches rather than run every time.
+ */
+export const DEFAULT_WORKSPACE_GC_AFTER_FETCHES = 20;
+
+/**
  * Worker-side workspace sync config (M7, ADR-0005). The worker only accepts
  * sync/jobs for repos on `allowedRepoIds`; an EMPTY allowlist (the default)
  * means accept NOTHING — fail closed. `cacheDir` defaults to
- * `<dataDir>/workspaces`; the size/count caps bound peer-driven disk growth.
+ * `<dataDir>/workspaces`. Peer-driven growth is bounded on two axes:
+ * `maxCachedCheckouts` caps the checkout COUNT, and `gcAfterFetches` bounds the
+ * bare object store by periodic gc.
  */
 export const WorkspaceConfigSchema = z.object({
   /** Repo identities this worker will sync and run jobs for. Empty = none. */
@@ -85,6 +97,8 @@ export const WorkspaceConfigSchema = z.object({
   cacheDir: z.string().min(1).optional(),
   maxBundleBytes: z.int().min(1).default(DEFAULT_MAX_BUNDLE_BYTES),
   maxCachedCheckouts: z.int().min(1).default(DEFAULT_MAX_CACHED_CHECKOUTS),
+  /** Fetches per repo between `git gc --prune=now` runs on its bare cache. */
+  gcAfterFetches: z.int().min(1).default(DEFAULT_WORKSPACE_GC_AFTER_FETCHES),
   gitTimeoutMs: z.int().min(1000).default(DEFAULT_WORKSPACE_GIT_TIMEOUT_MS),
 });
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;

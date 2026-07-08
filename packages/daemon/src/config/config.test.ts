@@ -9,6 +9,7 @@ import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
 import {
   DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MAX_CACHED_CHECKOUTS,
+  DEFAULT_WORKSPACE_GC_AFTER_FETCHES,
   DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
   loadDaemonConfig,
 } from "./config.js";
@@ -44,6 +45,7 @@ test("a missing config file yields all defaults", async () => {
       allowedRepoIds: [],
       maxBundleBytes: DEFAULT_MAX_BUNDLE_BYTES,
       maxCachedCheckouts: DEFAULT_MAX_CACHED_CHECKOUTS,
+      gcAfterFetches: DEFAULT_WORKSPACE_GC_AFTER_FETCHES,
       gitTimeoutMs: DEFAULT_WORKSPACE_GIT_TIMEOUT_MS,
     },
   });

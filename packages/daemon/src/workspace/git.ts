@@ -371,9 +371,23 @@ export interface WorkerGit {
   timeoutMs: number;
 }
 
-/** Worker-side `-c` config: disable hooks for received content. */
+/**
+ * Worker-side `-c` config applied to every call against received content:
+ * - `core.hooksPath=<empty dir>` — received content can never trigger a hook.
+ * - `protocol.ext.allow=never` — a `ext::` transport (which runs an arbitrary
+ *   program) is refused, so no fetch/bundle path can execute a command even if
+ *   a future change introduced one.
+ * - `fetch.recurseSubmodules=false` — a submodule reference in received content
+ *   never triggers a recursive fetch (another program-execution / SSRF vector).
+ * The exec-from-content vector is closed today by the empty hooksPath; the last
+ * two flags keep it closed by construction against future changes.
+ */
 function workerConfig(worker: WorkerGit): string[] {
-  return [`core.hooksPath=${worker.hooksPath}`];
+  return [
+    `core.hooksPath=${worker.hooksPath}`,
+    "protocol.ext.allow=never",
+    "fetch.recurseSubmodules=false",
+  ];
 }
 
 /**
@@ -392,6 +406,89 @@ export async function verifyBundle(
     config: workerConfig(worker),
   });
   return ok(result);
+}
+
+/**
+ * WORKER side: the refs a bundle advertises, as a `ref -> commit` map, read
+ * from the bundle HEADER only (`git bundle list-heads` imports NO objects). A
+ * cheap pre-fetch gate: the caller rejects a bundle whose advertised `HEAD`
+ * does not match the claimed commit BEFORE fetching, so a "claims X, advertises
+ * Y" bundle never imports objects into the cache. Returns an empty map on a
+ * garbage/unreadable bundle.
+ */
+export async function listBundleHeads(
+  worker: WorkerGit,
+  bundlePath: string,
+): Promise<Map<string, string>> {
+  const result = await runGit(["bundle", "list-heads", bundlePath], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  const heads = new Map<string, string>();
+  if (!ok(result)) {
+    return heads;
+  }
+  for (const line of result.stdout.split("\n")) {
+    // Each line is "<40-hex sha> <refname>".
+    const match = /^([0-9a-f]{40})\s+(\S+)/.exec(line.trim());
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      heads.set(match[2], match[1]);
+    }
+  }
+  return heads;
+}
+
+/**
+ * WORKER side: reclaim unreachable objects in the bare cache repo with
+ * `git gc --prune=now`. Safe here: the only reachability anchors are the tip
+ * ref and any live worktrees' HEADs, so an in-use checkout's commits are never
+ * pruned; objects left by a rejected (unbundled-then-discarded) upload are.
+ * Expensive, so the caller gates how often it runs — always under the per-repo
+ * lock so it cannot race a fetch or checkout.
+ */
+export async function gc(worker: WorkerGit): Promise<GitCommandResult> {
+  return runGit(["gc", "--prune=now", "--quiet"], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+}
+
+/** Parsed `git count-objects -v` — object-store size accounting. */
+export interface ObjectCounts {
+  /** Loose (unpacked) object count. */
+  count: number;
+  /** Loose object disk size, in KiB. */
+  sizeKiB: number;
+  /** Objects stored in packs. */
+  inPack: number;
+  /** Pack disk size, in KiB. */
+  sizePackKiB: number;
+}
+
+/** WORKER side: object-store accounting via `git count-objects -v`. */
+export async function countObjects(worker: WorkerGit): Promise<ObjectCounts> {
+  const result = await runGit(["count-objects", "-v"], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  const fields = new Map<string, number>();
+  if (ok(result)) {
+    for (const line of result.stdout.split("\n")) {
+      const match = /^(\S+):\s+(\d+)/.exec(line.trim());
+      if (match?.[1] !== undefined && match[2] !== undefined) {
+        fields.set(match[1], Number.parseInt(match[2], 10));
+      }
+    }
+  }
+  return {
+    count: fields.get("count") ?? 0,
+    sizeKiB: fields.get("size") ?? 0,
+    inPack: fields.get("in-pack") ?? 0,
+    sizePackKiB: fields.get("size-pack") ?? 0,
+  };
 }
 
 /**

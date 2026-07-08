@@ -435,6 +435,13 @@ export class NodeServer {
 
       if (match.route.auth === "paired" && !peer.paired) {
         this.sendJson(res, 401, hfpError("UNAUTHORIZED", "peer is not paired"));
+        // An upload route carries a (possibly large) binary body; the handler
+        // that would drain it never runs on a 401, so destroy the request once
+        // the response is flushed — matching the JSON-413 / workspace-route
+        // house pattern so a rejected uploader cannot leave a half-read socket.
+        if (match.route.kind === "upload") {
+          res.once("finish", () => req.destroy());
+        }
         return;
       }
 

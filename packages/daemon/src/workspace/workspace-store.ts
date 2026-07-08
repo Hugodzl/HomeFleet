@@ -12,17 +12,26 @@
  *    `C:\evil`, or `..\\..` cannot escape the cache root — traversal is
  *    structurally impossible, not filtered.
  * 3. **Only check out what was delivered.** `applyBundle` verifies the bundle,
- *    fetches it into a scratch ref, and refuses to advance the repo's tip
- *    unless the fetched commit equals the claimed `headCommit`. The resolver
- *    refuses to materialize a commit the cache does not actually contain.
+ *    rejects (before importing any object) a bundle whose advertised `HEAD`
+ *    ref does not match the claimed `headCommit`, fetches into a scratch ref,
+ *    and refuses to advance the repo's tip unless the fetched commit equals the
+ *    claimed `headCommit`. The resolver refuses to materialize a commit the
+ *    cache does not actually contain.
  *
  * Git is not concurrency-safe on one repository, so every operation for a given
  * repoId is serialized through a per-repo promise chain: two syncs, or a sync
  * racing a job's checkout, for the same repo can never interleave.
  *
- * Cache growth is bounded: materialized checkouts are capped
- * (`maxCachedCheckouts`, oldest evicted, evictions logged), so a peer syncing
- * many commits cannot fill the disk without limit.
+ * Peer-driven growth is bounded on two axes, both under the per-repo lock:
+ * - Materialized checkout COUNT is capped (`maxCachedCheckouts`, least-recently
+ *   -used evicted, evictions logged).
+ * - Bare object-store accretion is reclaimed by `git gc --prune=now` every
+ *   `gcAfterFetches` fetches per repo — an unbundle imports objects even for a
+ *   later-rejected upload, so periodic gc keeps `repo.git` from growing without
+ *   limit (the tip ref and live worktrees are the only anchors, so in-use
+ *   checkouts are never pruned).
+ * These bound checkout count and object-store size, respectively; they are not
+ * a hard total-disk guarantee.
  */
 import { createHash } from "node:crypto";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
@@ -36,7 +45,9 @@ import {
   deleteRef,
   describeGitFailure,
   fetchBundleHead,
+  gc,
   initBareRepo,
+  listBundleHeads,
   ok,
   removeWorktree,
   revParse,
@@ -49,6 +60,8 @@ import {
 const TIP_REF = "refs/homefleet/tip";
 /** Scratch ref a bundle fetch lands in before it is validated and promoted. */
 const INCOMING_REF = "refs/homefleet/incoming";
+/** The ref name our bundles advertise their head under (`git bundle create HEAD`). */
+const BUNDLE_HEAD_REF = "HEAD";
 
 export type WorkspaceErrorCode =
   | "REPO_NOT_ALLOWED"
@@ -96,6 +109,8 @@ export interface WorkspaceStoreOptions {
   allowedRepoIds: string[];
   maxBundleBytes: number;
   maxCachedCheckouts: number;
+  /** Fetches per repo between `git gc --prune=now` runs on its bare cache. */
+  gcAfterFetches: number;
   gitTimeoutMs: number;
   /** Diagnostic sink (evictions, git failures); defaults to no-op. */
   logger?: (message: string) => void;
@@ -115,6 +130,7 @@ export class WorkspaceStore {
   private readonly allowed: ReadonlySet<string>;
   private readonly maxBundleBytesValue: number;
   private readonly maxCachedCheckouts: number;
+  private readonly gcAfterFetches: number;
   private readonly gitTimeoutMs: number;
   private readonly log: (message: string) => void;
 
@@ -122,6 +138,8 @@ export class WorkspaceStore {
   private readonly locks = new Map<string, Promise<unknown>>();
   /** Live checkouts, keyed `${repoHash}:${headCommit}`, for LRU eviction. */
   private readonly checkouts = new Map<string, CheckoutEntry>();
+  /** Fetches applied per repo hash since its last gc (gc-gating counter). */
+  private readonly fetchesSinceGc = new Map<string, number>();
   private useTick = 0;
   private initialized = false;
 
@@ -130,6 +148,7 @@ export class WorkspaceStore {
     this.allowed = new Set(options.allowedRepoIds);
     this.maxBundleBytesValue = options.maxBundleBytes;
     this.maxCachedCheckouts = options.maxCachedCheckouts;
+    this.gcAfterFetches = options.gcAfterFetches;
     this.gitTimeoutMs = options.gitTimeoutMs;
     this.log = options.logger ?? (() => {});
   }
@@ -179,8 +198,9 @@ export class WorkspaceStore {
 
   /**
    * Applies a received bundle for `repoId` claiming to deliver `headCommit`:
-   * allowlist check -> verify -> fetch into a scratch ref -> confirm the
-   * fetched commit equals `headCommit` -> advance the tip. Serialized per repo.
+   * allowlist check -> verify -> reject-before-fetch if the advertised HEAD
+   * mismatches -> fetch into a scratch ref -> confirm the fetched commit equals
+   * `headCommit` -> advance the tip -> periodically gc. Serialized per repo.
    *
    * Throws {@link WorkspaceError} on any failure; on rejection the tip is never
    * advanced and no checkout is produced (the cache is left as it was).
@@ -209,6 +229,21 @@ export class WorkspaceStore {
           "received bundle failed `git bundle verify` " +
             "(malformed, or its prerequisites are not present)",
           { repoId },
+        );
+      }
+
+      // Cheap pre-fetch gate: reject a "claims X, advertises Y" bundle from the
+      // header alone (list-heads imports NO objects), so the gross-mismatch
+      // case never accretes objects in the bare cache. The authoritative
+      // post-fetch delivered-check below stays as the backstop.
+      const advertised = (await listBundleHeads(worker, bundlePath)).get(
+        BUNDLE_HEAD_REF,
+      );
+      if (advertised !== undefined && advertised !== headCommit) {
+        throw new WorkspaceError(
+          "COMMIT_NOT_DELIVERED",
+          "bundle advertises a head other than the claimed headCommit",
+          { repoId, headCommit, advertised },
         );
       }
 
@@ -247,6 +282,13 @@ export class WorkspaceStore {
           { repoId },
         );
       }
+
+      // Bound bare object-store growth: the fetch imported objects (and a
+      // rejected upload's fetch would have too), so gc unreachable objects
+      // every `gcAfterFetches` fetches. Still under the per-repo lock, so gc
+      // cannot race a fetch or a checkout; the tip ref + live worktrees anchor
+      // everything in use, so nothing needed is pruned.
+      await this.maybeGc(hash, worker);
     });
   }
 
@@ -352,6 +394,29 @@ export class WorkspaceStore {
     }
     await mkdir(this.repoRoot(hash), { recursive: true });
     await initBareRepo(repoDir, this.gitTimeoutMs);
+  }
+
+  /**
+   * Counts one fetch for `hash` and, every `gcAfterFetches`, reclaims
+   * unreachable objects. MUST be called under the repo's lock (it is, from
+   * `applyBundle`), so gc never races a fetch/checkout. A gc failure is logged,
+   * not thrown — it must never fail an otherwise-successful sync.
+   */
+  private async maybeGc(hash: string, worker: WorkerGit): Promise<void> {
+    const count = (this.fetchesSinceGc.get(hash) ?? 0) + 1;
+    if (count < this.gcAfterFetches) {
+      this.fetchesSinceGc.set(hash, count);
+      return;
+    }
+    this.fetchesSinceGc.set(hash, 0);
+    const result = await gc(worker);
+    if (ok(result)) {
+      this.log(`gc'd workspace cache ${hash} after ${count} fetches`);
+    } else {
+      this.log(
+        `gc of workspace cache ${hash} failed: ${describeGitFailure(result)}`,
+      );
+    }
   }
 
   /** Serializes work for one repo hash onto a single promise chain. */
