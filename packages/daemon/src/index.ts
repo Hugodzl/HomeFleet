@@ -97,6 +97,7 @@ export {
   MAX_TRACKED_DELEGATIONS,
 } from "./mcp/delegation-registry.js";
 export {
+  LOOPBACK_HOSTS,
   MAX_MCP_REQUEST_BYTES,
   type McpHttpServerOptions,
   type RunningMcpHttpServer,

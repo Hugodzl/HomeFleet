@@ -8,13 +8,23 @@
  * they bind), and silently substituting defaults could re-enable a channel
  * the user deliberately disabled.
  *
+ * Parsing is STRICT (`z.strictObject`): an unknown or typo'd key throws
+ * instead of being silently stripped — a stripped `"allowList"` would
+ * otherwise substitute the fail-closed default while the file LOOKS
+ * configured. The accepted trade-off: an older daemon refuses a newer
+ * config's unknown keys instead of ignoring them (consistent fail-closed).
+ *
  * Sections: `discovery` (M3), `workspace` (M7, worker side), and the M9
  * daemon-assembly set — `node`, `hfp`, `mcp`, `control`, `executors`,
  * `models`, `jobs`, `repos`.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
+import {
+  type AgentEndpointOptions,
+  type CommandAllowlistEntry,
+  MIN_AGENT_CONTEXT_WINDOW,
+} from "@homefleet/executors";
 import {
   DeviceIdSchema,
   DISCOVERY_MULTICAST_GROUP,
@@ -25,9 +35,22 @@ import {
   RepoIdSchema,
 } from "@homefleet/protocol";
 import { z } from "zod";
+import { LOOPBACK_HOSTS } from "../mcp/http-transport.js";
+
+/**
+ * Compile-time exact-shape guard: `true` only when `A` and `B` are mutually
+ * assignable. Used below to pin the config mirrors of executors' TS types —
+ * drift becomes a compile error instead of a silently-outdated comment.
+ */
+type MutuallyAssignable<A, B> = [A] extends [B]
+  ? [B] extends [A]
+    ? true
+    : false
+  : false;
+type Expect<T extends true> = T;
 
 /** A config-provided discovery entry for a node mDNS/UDP cannot see. */
-export const StaticNodeSchema = z.object({
+export const StaticNodeSchema = z.strictObject({
   host: z.string().min(1),
   /** The node's HFP HTTPS port. */
   port: z.int().min(1).max(65535),
@@ -39,7 +62,7 @@ export const StaticNodeSchema = z.object({
 });
 export type StaticNode = z.infer<typeof StaticNodeSchema>;
 
-export const DiscoveryConfigSchema = z.object({
+export const DiscoveryConfigSchema = z.strictObject({
   mdnsEnabled: z.boolean().default(true),
   udpEnabled: z.boolean().default(true),
   /**
@@ -97,7 +120,7 @@ export const DEFAULT_WORKSPACE_GC_AFTER_FETCHES = 20;
  * `maxCachedCheckouts` caps the checkout COUNT, and `gcAfterFetches` bounds the
  * bare object store by periodic gc.
  */
-export const WorkspaceConfigSchema = z.object({
+export const WorkspaceConfigSchema = z.strictObject({
   /** Repo identities this worker will sync and run jobs for. Empty = none. */
   allowedRepoIds: z.array(z.string().min(1)).default([]),
   /** Override for the per-repo cache root; defaults to `<dataDir>/workspaces`. */
@@ -129,20 +152,37 @@ export const DEFAULT_CONTROL_PORT = 56373;
  * fallback lives in the assembly, NOT here — config parsing stays pure (no
  * os/fs calls), so parsing the same file always yields the same object.
  */
-export const NodeConfigSchema = z.object({
+export const NodeConfigSchema = z.strictObject({
   /** Human-readable node name advertised in discovery and NodeInfo. */
   name: NodeNameSchema.optional(),
 });
 export type NodeConfig = z.infer<typeof NodeConfigSchema>;
 
 /** Bind address for the HFP node service (the mTLS HTTPS endpoint peers hit). */
-export const HfpConfigSchema = z.object({
-  /** LAN-facing by design — peers must be able to reach it. */
+export const HfpConfigSchema = z.strictObject({
+  /**
+   * LAN-facing by design — peers must be able to reach it. Note `0.0.0.0`
+   * is IPv4-only; that is intentional for v0 (discovery announces IPv4
+   * addresses). Set `"::"` explicitly for a dual-stack bind if needed.
+   */
   host: z.string().min(1).default("0.0.0.0"),
   /** `0` binds an ephemeral port (tests, multiple daemons on one machine). */
   port: z.int().min(0).max(65535).default(HFP_DEFAULT_PORT),
 });
 export type HfpConfig = z.infer<typeof HfpConfigSchema>;
+
+/**
+ * A host field restricted to loopback, validated at PARSE time against the
+ * same `LOOPBACK_HOSTS` set the MCP transport enforces at bind time — a
+ * non-loopback value fails with a config error immediately instead of a
+ * bind-time crash later (same refuse-early posture as the agent
+ * contextWindow floor).
+ */
+const LoopbackHostSchema = z
+  .string()
+  .refine((host) => LOOPBACK_HOSTS.has(host), {
+    message: `must be a loopback host: ${[...LOOPBACK_HOSTS].join(", ")}`,
+  });
 
 /**
  * Bind address for the MCP front local agents connect to. Loopback by
@@ -152,8 +192,8 @@ export type HfpConfig = z.infer<typeof HfpConfigSchema>;
  * way to expose MCP on the LAN. The default port is a stable well-known
  * value so MCP client configs are written once.
  */
-export const McpConfigSchema = z.object({
-  host: z.string().min(1).default("127.0.0.1"),
+export const McpConfigSchema = z.strictObject({
+  host: LoopbackHostSchema.default("127.0.0.1"),
   port: z.int().min(0).max(65535).default(DEFAULT_MCP_PORT),
 });
 export type McpConfig = z.infer<typeof McpConfigSchema>;
@@ -163,8 +203,8 @@ export type McpConfig = z.infer<typeof McpConfigSchema>;
  * Loopback-only by design: it is a local admin surface; remote
  * administration goes through HFP (mTLS + pairing), never this port.
  */
-export const ControlConfigSchema = z.object({
-  host: z.string().min(1).default("127.0.0.1"),
+export const ControlConfigSchema = z.strictObject({
+  host: LoopbackHostSchema.default("127.0.0.1"),
   port: z.int().min(0).max(65535).default(DEFAULT_CONTROL_PORT),
 });
 export type ControlConfig = z.infer<typeof ControlConfigSchema>;
@@ -172,9 +212,9 @@ export type ControlConfig = z.infer<typeof ControlConfigSchema>;
 /**
  * Mirrors `CommandAllowlistEntry` from `@homefleet/executors` (that package
  * exports only the TS interface, not a zod schema, so config validates its
- * own copy — keep the two shapes in sync).
+ * own copy — the guard below keeps the two shapes in sync at compile time).
  */
-export const CommandAllowlistEntryConfigSchema = z.object({
+export const CommandAllowlistEntryConfigSchema = z.strictObject({
   /**
    * Executable path or name to spawn for this logical command; defaults to
    * the logical name itself (see the executors package for the win32
@@ -185,6 +225,10 @@ export const CommandAllowlistEntryConfigSchema = z.object({
 export type CommandAllowlistEntryConfig = z.infer<
   typeof CommandAllowlistEntryConfigSchema
 >;
+// Compile error here = the schema above drifted from CommandAllowlistEntry.
+type _CommandAllowlistEntryMirrorGuard = Expect<
+  MutuallyAssignable<CommandAllowlistEntryConfig, CommandAllowlistEntry>
+>;
 
 /** Logical command name -> how it runs. Enforcement is an exact-name match. */
 const CommandAllowlistConfigSchema = z.record(
@@ -192,14 +236,14 @@ const CommandAllowlistConfigSchema = z.record(
   CommandAllowlistEntryConfigSchema,
 );
 
-export const CommandExecutorConfigSchema = z.object({
+export const CommandExecutorConfigSchema = z.strictObject({
   /** Empty allowlist = the executor is offered but no command may run. */
   allowlist: CommandAllowlistConfigSchema.default({}),
 });
 export type CommandExecutorConfig = z.infer<typeof CommandExecutorConfigSchema>;
 
-/** Mirrors `AgentEndpointOptions` in @homefleet/executors. */
-export const AgentEndpointConfigSchema = z.object({
+/** Mirrors `AgentEndpointOptions` in @homefleet/executors (guard below). */
+export const AgentEndpointConfigSchema = z.strictObject({
   /** OpenAI-compatible base URL; `/chat/completions` is appended. */
   baseUrl: z.url(),
   /** Sent as a Bearer token when present. */
@@ -216,8 +260,12 @@ export const AgentEndpointConfigSchema = z.object({
   contextWindow: z.int().min(MIN_AGENT_CONTEXT_WINDOW),
 });
 export type AgentEndpointConfig = z.infer<typeof AgentEndpointConfigSchema>;
+// Compile error here = the schema above drifted from AgentEndpointOptions.
+type _AgentEndpointMirrorGuard = Expect<
+  MutuallyAssignable<AgentEndpointConfig, AgentEndpointOptions>
+>;
 
-export const AgentExecutorConfigSchema = z.object({
+export const AgentExecutorConfigSchema = z.strictObject({
   endpoint: AgentEndpointConfigSchema,
   /** Allowlist for the agent's run_command tool; absent disables the tool. */
   commandAllowlist: CommandAllowlistConfigSchema.optional(),
@@ -230,7 +278,7 @@ export type AgentExecutorConfig = z.infer<typeof AgentExecutorConfigSchema>;
  * jobs) until one is explicitly configured, the same posture as the
  * workspace allowlist.
  */
-export const ExecutorsConfigSchema = z.object({
+export const ExecutorsConfigSchema = z.strictObject({
   command: CommandExecutorConfigSchema.optional(),
   agent: AgentExecutorConfigSchema.optional(),
 });
@@ -241,7 +289,7 @@ export type ExecutorsConfig = z.infer<typeof ExecutorsConfigSchema>;
  * own `DEFAULT_MAX_*` values apply — those numbers are deliberately NOT
  * duplicated here, so the JobManager stays their single owner.
  */
-export const JobsConfigSchema = z.object({
+export const JobsConfigSchema = z.strictObject({
   maxConcurrentJobs: z.int().min(1).optional(),
   maxQueuedJobs: z.int().min(1).optional(),
   maxRetainedJobs: z.int().min(1).optional(),
@@ -254,14 +302,14 @@ export type JobsConfig = z.infer<typeof JobsConfigSchema>;
  * listed here cannot be synced FROM this machine (the worker side has its
  * own independent allowlist, `workspace.allowedRepoIds`).
  */
-export const RepoMappingSchema = z.object({
+export const RepoMappingSchema = z.strictObject({
   repoId: RepoIdSchema,
   /** Local path of the git working copy to bundle from. */
   path: z.string().min(1),
 });
 export type RepoMapping = z.infer<typeof RepoMappingSchema>;
 
-export const DaemonConfigSchema = z.object({
+export const DaemonConfigSchema = z.strictObject({
   // prefault: a config file without a `discovery` key gets the sub-object's
   // field-level defaults applied, same as an empty file.
   discovery: DiscoveryConfigSchema.prefault({}),

@@ -41,8 +41,12 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-/** Hosts the MCP front is allowed to bind to — loopback only. */
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+/**
+ * Hosts the MCP front is allowed to bind to — loopback only. Exported so the
+ * daemon config can validate `mcp.host` / `control.host` against the same
+ * set at PARSE time (fail early with a config error, not at bind time).
+ */
+export const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /**
  * Hard cap on an MCP request body. Mirrors the HFP transport's MAX_BODY_BYTES

@@ -300,6 +300,39 @@ test("a repo mapping with an empty path throws", async () => {
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
+test("an unknown (typo'd) key throws instead of silently applying defaults", async () => {
+  // Strip mode would drop "maxConcurrentJob" and run on the default limit
+  // while the file LOOKS configured; strict parsing surfaces the typo.
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ jobs: { maxConcurrentJob: 2 } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("an unknown top-level key throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ discoverey: {} }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a non-loopback mcp or control host throws at parse time", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ mcp: { host: "0.0.0.0" } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+  await writeConfig(dir, JSON.stringify({ control: { host: "192.168.1.5" } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("loopback aliases are accepted for mcp and control hosts", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({ mcp: { host: "localhost" }, control: { host: "::1" } }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.mcp.host).toBe("localhost");
+  expect(config.control.host).toBe("::1");
+});
+
 test("job limits below 1 throw", async () => {
   const dir = await newDataDir();
   await writeConfig(dir, JSON.stringify({ jobs: { maxConcurrentJobs: 0 } }));
