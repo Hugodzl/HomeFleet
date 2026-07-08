@@ -24,6 +24,7 @@ import {
   endpointSourceFromDiscovery,
   NodeDirectory,
 } from "./mcp/node-directory.js";
+import { createRepoResolver } from "./mcp/repo-resolver.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createNodeInfoProvider } from "./node/node-info.js";
 import { PairingManager } from "./pairing/pairing.js";
@@ -243,9 +244,18 @@ export class Daemon {
       ourNodeInfo: nodeInfoProvider,
     });
     const delegations = new DelegationRegistry();
+    // Delegating-side repo mapping (M9 Unit 6): delegate_task syncs a repoId
+    // from ITS local path here, resolved from config, before dispatching.
+    const repoResolver = createRepoResolver(config.repos);
     const mcpFront = await startMcpHttpServer({
       createServer: () =>
-        createMcpServer({ hfpClient, nodeDirectory, delegations }),
+        createMcpServer({
+          hfpClient,
+          workspaceSync: hfpClient,
+          repoResolver,
+          nodeDirectory,
+          delegations,
+        }),
       host: config.mcp.host,
       port: config.mcp.port,
     });

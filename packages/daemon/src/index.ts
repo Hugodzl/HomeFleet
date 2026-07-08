@@ -114,6 +114,7 @@ export {
   type NodeEndpointSource,
   type ResolvedNode,
 } from "./mcp/node-directory.js";
+export { createRepoResolver } from "./mcp/repo-resolver.js";
 export {
   createMcpServer,
   MCP_SERVER_NAME,
@@ -128,7 +129,9 @@ export {
   type McpToolCollaborators,
   type NodeSummary,
   NodeSummarySchema,
+  type RepoResolver,
   registerHomeFleetTools,
+  type WorkspaceSyncClient,
 } from "./mcp/tools.js";
 export {
   createNodeInfoProvider,

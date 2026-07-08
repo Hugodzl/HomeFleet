@@ -17,6 +17,7 @@ import {
   type MockScriptEntry,
 } from "@homefleet/executors";
 import {
+  type JobParams,
   JobResultSchema,
   JobStatusSchema,
   type NodeInfo,
@@ -35,21 +36,48 @@ import {
   makeTempDataDir,
   removeTempDataDir,
 } from "../test-fixtures.js";
-import { HfpClient } from "../transport/client.js";
+import { HfpClient, HfpRequestError } from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
+import { GitError } from "../workspace/git.js";
 import { DelegationRegistry } from "./delegation-registry.js";
 import { NodeDirectory, type NodeEndpoint } from "./node-directory.js";
 import { createMcpServer } from "./server.js";
 import {
   DelegateTaskOutputSchema,
+  type DelegationClient,
   JobResultOutputSchema,
   JobStatusOutputSchema,
   ListNodesOutputSchema,
+  type RepoResolver,
+  type WorkspaceSyncClient,
 } from "./tools.js";
 
 const HOST = "127.0.0.1";
-const WORKSPACE = { repoId: "test-repo", headCommit: "a".repeat(40) };
+/** repoId-only: the daemon derives headCommit by syncing (never the agent). */
+const WORKSPACE = { repoId: "test-repo" };
+/** The default fake sync client's headCommit, for tests that don't care. */
+const FAKE_SYNCED_HEAD_COMMIT = "a".repeat(40);
+/** The default fake repo resolver's mapping, for tests that don't care. */
+const FAKE_REPO_PATH = "/fake/repos/test-repo";
+
+/** A workspaceSync fake that never touches git or the network. */
+function fakeWorkspaceSync(
+  headCommit: string = FAKE_SYNCED_HEAD_COMMIT,
+): WorkspaceSyncClient {
+  return {
+    syncWorkspace: async () => ({ headCommit }),
+  };
+}
+
+/** A repoResolver fake mapping `WORKSPACE.repoId` to a fixed local path. */
+function fakeRepoResolver(
+  mapping: Record<string, string> = { "test-repo": FAKE_REPO_PATH },
+): RepoResolver {
+  return {
+    resolveRepoPath: (repoId) => mapping[repoId],
+  };
+}
 
 interface Daemon {
   name: string;
@@ -157,10 +185,20 @@ async function pairAToB(a: Daemon, b: Daemon): Promise<void> {
   });
 }
 
+interface ConnectAgentOverrides {
+  /** Overrides the MCP server's DelegationClient (default: `agent.client`). */
+  hfpClient?: DelegationClient;
+  /** Overrides the workspace-sync fake (default: always succeeds). */
+  workspaceSync?: WorkspaceSyncClient;
+  /** Overrides the repo-resolver fake (default: maps `WORKSPACE.repoId`). */
+  repoResolver?: RepoResolver;
+}
+
 /** Wires an MCP server for `agent`, connects a Client over a linked transport. */
 async function connectAgent(
   agent: Daemon,
   endpoints: Map<string, NodeEndpoint>,
+  overrides: ConnectAgentOverrides = {},
 ): Promise<{ client: Client; delegations: DelegationRegistry }> {
   const nodeDirectory = new NodeDirectory({
     trustStore: agent.trustStore,
@@ -171,7 +209,9 @@ async function connectAgent(
   });
   const delegations = new DelegationRegistry();
   const mcp = createMcpServer({
-    hfpClient: agent.client,
+    hfpClient: overrides.hfpClient ?? agent.client,
+    workspaceSync: overrides.workspaceSync ?? fakeWorkspaceSync(),
+    repoResolver: overrides.repoResolver ?? fakeRepoResolver(),
     nodeDirectory,
     delegations,
     requestTimeoutMs: 8000,
@@ -497,3 +537,181 @@ test("HFP BUSY maps to an informative tool error (not a raw stack)", async () =>
 
   await call(client, "cancel_job", { jobId: firstJob });
 }, 20_000);
+
+test("delegate_task syncs the workspace before delegating, and delegates with the SYNCED headCommit", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  const syncCalls: Array<{ repoPath: string; repoId: string }> = [];
+  const syncedHead = "b".repeat(40);
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async (_target, repo) => {
+      syncCalls.push(repo);
+      return { headCommit: syncedHead };
+    },
+  };
+  const delegateCalls: JobParams[] = [];
+  const hfpClient: DelegationClient = {
+    delegate: async (target, params) => {
+      delegateCalls.push(params);
+      return agent.client.delegate(target, params);
+    },
+    jobSnapshot: (target, jobId) => agent.client.jobSnapshot(target, jobId),
+    cancelJob: (target, jobId) => agent.client.cancelJob(target, jobId),
+  };
+  const repoResolver = fakeRepoResolver({ "repo-y": "/configured/repo-y" });
+
+  const { client } = await connectAgent(agent, endpoints, {
+    hfpClient,
+    workspaceSync,
+    repoResolver,
+  });
+
+  const delegated = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: { repoId: "repo-y" },
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+
+  expect(syncCalls).toEqual([
+    { repoPath: "/configured/repo-y", repoId: "repo-y" },
+  ]);
+  expect(delegateCalls).toHaveLength(1);
+  expect(delegateCalls[0]?.workspace).toEqual({
+    repoId: "repo-y",
+    headCommit: syncedHead,
+  });
+});
+
+test("delegate_task with a repoId not mapped in this daemon's config is a clean error; nothing is synced or delegated", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  let syncCalled = false;
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async () => {
+      syncCalled = true;
+      return { headCommit: FAKE_SYNCED_HEAD_COMMIT };
+    },
+  };
+  const repoResolver: RepoResolver = { resolveRepoPath: () => undefined };
+  const { client, delegations } = await connectAgent(agent, endpoints, {
+    workspaceSync,
+    repoResolver,
+  });
+
+  const result = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: { repoId: "unmapped-repo" },
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toMatch(/no local repo mapped/i);
+  expect(text).toContain("unmapped-repo");
+  expect(syncCalled).toBe(false);
+  expect(delegations.size).toBe(0);
+});
+
+test("delegate_task: an HFP sync failure (WORKSPACE_UNAVAILABLE) is a clean worker-error message; nothing is delegated", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async () => {
+      throw new HfpRequestError(
+        403,
+        { code: "WORKSPACE_UNAVAILABLE", message: "repo not allowlisted" },
+        "HFP request failed with status 403",
+      );
+    },
+  };
+  let delegateCalled = false;
+  const hfpClient: DelegationClient = {
+    delegate: async (target, params) => {
+      delegateCalled = true;
+      return agent.client.delegate(target, params);
+    },
+    jobSnapshot: (target, jobId) => agent.client.jobSnapshot(target, jobId),
+    cancelJob: (target, jobId) => agent.client.cancelJob(target, jobId),
+  };
+  const { client, delegations } = await connectAgent(agent, endpoints, {
+    workspaceSync,
+    hfpClient,
+  });
+
+  const result = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: WORKSPACE,
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toMatch(/WORKSPACE_UNAVAILABLE/);
+  expect(delegateCalled).toBe(false);
+  expect(delegations.size).toBe(0);
+});
+
+test("delegate_task: a local GitError during sync is a distinct 'local repo' error, not the generic worker-error phrasing", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async () => {
+      throw new GitError("could not resolve HEAD of /nowhere: git exited 128");
+    },
+  };
+  let delegateCalled = false;
+  const hfpClient: DelegationClient = {
+    delegate: async (target, params) => {
+      delegateCalled = true;
+      return agent.client.delegate(target, params);
+    },
+    jobSnapshot: (target, jobId) => agent.client.jobSnapshot(target, jobId),
+    cancelJob: (target, jobId) => agent.client.cancelJob(target, jobId),
+  };
+  const repoResolver = fakeRepoResolver({ "test-repo": "/nowhere" });
+  const { client, delegations } = await connectAgent(agent, endpoints, {
+    workspaceSync,
+    hfpClient,
+    repoResolver,
+  });
+
+  const result = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: WORKSPACE,
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toMatch(/Could not read or bundle the local repo/i);
+  expect(text).toContain("/nowhere");
+  expect(text).toContain("test-repo");
+  expect(delegateCalled).toBe(false);
+  expect(delegations.size).toBe(0);
+});

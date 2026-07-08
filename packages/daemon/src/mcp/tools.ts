@@ -7,14 +7,22 @@
  * schema is reused verbatim so the local API cannot drift from the wire
  * contract. The tool INPUT schemas are new and local to the daemon: they are
  * the agent-facing API, not the HFP wire protocol. `delegate_task` presents a
- * slightly friendlier input (budgets flattened) and translates it to a
- * `JobParams`, re-validated with `JobParamsSchema` before it ever leaves.
+ * slightly friendlier input (budgets flattened, workspace is repoId-only) and
+ * translates it to a `JobParams`, re-validated with `JobParamsSchema` before
+ * it ever leaves.
+ *
+ * `delegate_task` ALWAYS syncs the named repo to the worker before delegating
+ * (M9 Unit 6): the agent supplies only a `repoId`, this daemon resolves it to
+ * its OWN local repo path (`config.repos`), syncs that repo's current HEAD to
+ * the worker, and uses the SYNCED commit as the job's `WorkspaceRef` — the
+ * agent never supplies (and cannot lie about) a headCommit.
  *
  * Errors follow the MCP tool-error convention: a handler NEVER throws into the
- * transport. A bad request (unknown/unpaired node, unknown job) and a remote
- * failure (BUSY, timeout, ...) are both returned as `{ isError: true }` with a
- * clear message, and are phrased so the agent can tell the two apart. Raw
- * stacks are never surfaced.
+ * transport. A bad request (unknown/unpaired node, unmapped repo, unknown job)
+ * and a remote failure (BUSY, timeout, sync failure, ...) are both returned as
+ * `{ isError: true }` with a clear message, phrased so the agent can tell
+ * "my local repo is broken" from "the worker rejected it" from "the node is
+ * unreachable". Raw stacks are never surfaced.
  */
 import {
   type CancelResponse,
@@ -29,7 +37,7 @@ import {
   JobStatusSchema,
   ModelInfoSchema,
   NodeRoleSchema,
-  WorkspaceRefSchema,
+  RepoIdSchema,
 } from "@homefleet/protocol";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -41,6 +49,7 @@ import {
   HfpTimeoutError,
   MissingServerCertificateError,
 } from "../transport/client.js";
+import { GitError } from "../workspace/git.js";
 import type {
   DelegationRegistry,
   DelegationRoute,
@@ -54,9 +63,33 @@ export interface DelegationClient {
   cancelJob(target: HfpTarget, jobId: string): Promise<CancelResponse>;
 }
 
+/**
+ * The delegating-side workspace-sync surface `delegate_task` calls before
+ * dispatching (HfpClient.syncWorkspace satisfies it structurally). Kept
+ * separate from {@link DelegationClient}: sync is a workspace concern, not a
+ * job-lifecycle one, and a test fake for one need not fake the other.
+ */
+export interface WorkspaceSyncClient {
+  syncWorkspace(
+    target: HfpTarget,
+    repo: { repoPath: string; repoId: string },
+  ): Promise<{ headCommit: string }>;
+}
+
+/**
+ * Resolves a repoId to this daemon's OWN local repo path (`config.repos`).
+ * `undefined` means this daemon has no repo mapped to that repoId — the repo
+ * cannot be synced from here, so `delegate_task` fails closed.
+ */
+export interface RepoResolver {
+  resolveRepoPath(repoId: string): string | undefined;
+}
+
 /** Collaborators shared by every tool (injected; nothing global). */
 export interface McpToolCollaborators {
   hfpClient: DelegationClient;
+  workspaceSync: WorkspaceSyncClient;
+  repoResolver: RepoResolver;
   nodeDirectory: Pick<NodeDirectory, "list" | "resolve">;
   delegations: DelegationRegistry;
   /**
@@ -111,9 +144,15 @@ const ListNodesInputShape = {
   reachableOnly: z.boolean().optional(),
 } as const;
 
+/**
+ * The agent supplies ONLY a repoId, never a commit: the daemon derives the
+ * headCommit by syncing its own mapped local repo's current HEAD.
+ */
+const TaskWorkspaceInputSchema = z.object({ repoId: RepoIdSchema });
+
 const ReconTaskInputSchema = z.object({
   type: z.literal("recon"),
-  workspace: WorkspaceRefSchema,
+  workspace: TaskWorkspaceInputSchema,
   prompt: z.string().min(1).max(16384),
   model: z.string().optional(),
   /** Flattened budgets (default applied by the protocol schema when omitted). */
@@ -123,7 +162,7 @@ const ReconTaskInputSchema = z.object({
 
 const CommandTaskInputSchema = z.object({
   type: z.literal("command"),
-  workspace: WorkspaceRefSchema,
+  workspace: TaskWorkspaceInputSchema,
   command: z.string(),
   args: z.array(z.string()).optional(),
   timeoutMs: z.int().min(1000).max(3_600_000).optional(),
@@ -158,8 +197,13 @@ function fail(text: string): CallToolResult {
 
 // --- Translation & error mapping ---
 
-/** Friendly task input → validated protocol JobParams (the wire contract). */
-function toJobParams(task: TaskInput): JobParams {
+/**
+ * Friendly task input + the SYNCED headCommit → validated protocol JobParams
+ * (the wire contract). `headCommit` comes from `workspaceSync.syncWorkspace`,
+ * never from the agent — see the file doc.
+ */
+function toJobParams(task: TaskInput, headCommit: string): JobParams {
+  const workspace = { repoId: task.workspace.repoId, headCommit };
   if (task.type === "recon") {
     const budgets: Record<string, number> = {};
     if (task.maxToolCalls !== undefined)
@@ -167,7 +211,7 @@ function toJobParams(task: TaskInput): JobParams {
     if (task.maxWallMs !== undefined) budgets.maxWallMs = task.maxWallMs;
     return JobParamsSchema.parse({
       type: "recon",
-      workspace: task.workspace,
+      workspace,
       prompt: task.prompt,
       ...(task.model !== undefined ? { model: task.model } : {}),
       budgets,
@@ -175,7 +219,7 @@ function toJobParams(task: TaskInput): JobParams {
   }
   return JobParamsSchema.parse({
     type: "command",
-    workspace: task.workspace,
+    workspace,
     command: task.command,
     ...(task.args !== undefined ? { args: task.args } : {}),
     ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
@@ -220,6 +264,28 @@ function describeHfpFailure(error: unknown): string {
 
 function suffix(detail: string): string {
   return detail === "" ? "." : `: ${detail}`;
+}
+
+/**
+ * A clean, non-leaking message for a failed `syncWorkspace` call. A local
+ * {@link GitError} (this daemon's OWN repo could not be read or bundled) gets
+ * a distinct, honest message — NOT the generic worker-error phrasing — so the
+ * agent can tell "my local repo is broken" apart from "the worker rejected
+ * it" (an {@link HfpRequestError}/{@link HfpTimeoutError}/etc., covered by
+ * {@link describeHfpFailure}).
+ */
+function describeSyncFailure(
+  error: unknown,
+  repoPath: string,
+  repoId: string,
+): string {
+  if (error instanceof GitError) {
+    return (
+      `Could not read or bundle the local repo at ${repoPath} for ` +
+      `"${repoId}": ${error.message}`
+    );
+  }
+  return describeHfpFailure(error);
 }
 
 function unknownJob(jobId: string): CallToolResult {
@@ -272,8 +338,14 @@ export function registerHomeFleetTools(
   server: McpServer,
   collaborators: McpToolCollaborators,
 ): void {
-  const { hfpClient, nodeDirectory, delegations, requestTimeoutMs } =
-    collaborators;
+  const {
+    hfpClient,
+    workspaceSync,
+    repoResolver,
+    nodeDirectory,
+    delegations,
+    requestTimeoutMs,
+  } = collaborators;
 
   const targetFor = (route: DelegationRoute): HfpTarget => ({
     host: route.host,
@@ -322,7 +394,9 @@ export function registerHomeFleetTools(
       description:
         "Delegate a job to a paired worker node: a read-only repo 'recon' " +
         "analysis by the worker's local model, or an allowlisted 'command' " +
-        "execution. Returns a jobId; poll it with job_status / job_result.",
+        "execution. The named repo (workspace.repoId) is synced from this " +
+        "daemon's local mapping to the worker before the job is delegated. " +
+        "Returns a jobId; poll it with job_status / job_result.",
       inputSchema: DelegateTaskInputShape,
       outputSchema: DelegateTaskOutputSchema.shape,
     },
@@ -341,9 +415,44 @@ export function registerHomeFleetTools(
             "Make sure its daemon is running and discoverable, then retry.",
         );
       }
+
+      // Fail closed: this daemon can only sync a repo it has a local mapping
+      // for (config.repos). No mapping -> no attempt to sync or delegate.
+      const { repoId } = task.workspace;
+      const repoPath = repoResolver.resolveRepoPath(repoId);
+      if (repoPath === undefined) {
+        return fail(
+          `This daemon has no local repo mapped to "${repoId}"; add it to ` +
+            "this daemon's config repos list before delegating a task " +
+            "against it.",
+        );
+      }
+
+      const target: HfpTarget = {
+        host: resolved.host,
+        port: resolved.port,
+        expectedDeviceId: node,
+        ...(requestTimeoutMs !== undefined
+          ? { timeoutMs: requestTimeoutMs }
+          : {}),
+      };
+
+      // Sync BEFORE delegating, always (M9 Unit 6): the worker must hold the
+      // repo at this commit before the job that reads it is dispatched.
+      let headCommit: string;
+      try {
+        const synced = await workspaceSync.syncWorkspace(target, {
+          repoPath,
+          repoId,
+        });
+        headCommit = synced.headCommit;
+      } catch (error) {
+        return fail(describeSyncFailure(error, repoPath, repoId));
+      }
+
       let params: JobParams;
       try {
-        params = toJobParams(task);
+        params = toJobParams(task, headCommit);
       } catch (error) {
         return fail(
           `The task parameters are invalid: ${
@@ -353,14 +462,6 @@ export function registerHomeFleetTools(
           }`,
         );
       }
-      const target: HfpTarget = {
-        host: resolved.host,
-        port: resolved.port,
-        expectedDeviceId: node,
-        ...(requestTimeoutMs !== undefined
-          ? { timeoutMs: requestTimeoutMs }
-          : {}),
-      };
       try {
         const { jobId } = await hfpClient.delegate(target, params);
         // Record ONLY on success, so a failed delegation leaves no phantom

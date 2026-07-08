@@ -45,6 +45,12 @@ function emptyServerFactory(): McpHttpServerOptions["createServer"] {
           throw new Error("unused");
         },
       },
+      workspaceSync: {
+        syncWorkspace: async () => {
+          throw new Error("unused");
+        },
+      },
+      repoResolver: { resolveRepoPath: () => undefined },
       nodeDirectory: { list: async () => [], resolve: () => undefined },
       delegations,
     });

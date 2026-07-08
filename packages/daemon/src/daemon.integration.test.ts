@@ -161,7 +161,11 @@ function portAccepts(port: number): Promise<boolean> {
   });
 }
 
-test("two assembled daemons: pair, sync a workspace, delegate through the MCP HTTP front, clean stop", async () => {
+test("two assembled daemons: pair, delegate_task auto-syncs the workspace through the MCP HTTP front, clean stop", async () => {
+  // The source repo exists BEFORE either daemon starts, since it is now the
+  // delegator's config (not a manual pre-sync) that makes it available.
+  const src = await makeSrcRepo("hello from the assembled daemon");
+
   // Worker: offers a command executor (node) and allows repo-x syncs.
   const worker = await startDaemon("worker", {
     executors: {
@@ -170,7 +174,9 @@ test("two assembled daemons: pair, sync a workspace, delegate through the MCP HT
     workspace: { allowedRepoIds: ["repo-x"] },
   });
   // Delegator: no executors; discovers the worker via a static config entry
-  // (the deterministic stand-in for mDNS/UDP on a test box).
+  // (the deterministic stand-in for mDNS/UDP on a test box); maps "repo-x" to
+  // the source repo's local path so delegate_task can sync it on its own
+  // (M9 Unit 6 — no manual pre-sync from the test).
   const delegator = await startDaemon("delegator", {
     discovery: {
       mdnsEnabled: false,
@@ -179,17 +185,9 @@ test("two assembled daemons: pair, sync a workspace, delegate through the MCP HT
         { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
       ],
     },
+    repos: [{ repoId: "repo-x", path: src.repoPath }],
   });
   await pair(delegator, worker);
-
-  // Pre-sync the source repo into the worker's workspace store (Unit 6 wires
-  // sync-on-delegate; here the delegating side drives it directly).
-  const src = await makeSrcRepo("hello from the assembled daemon");
-  const sync = await delegator.hfpClient.syncWorkspace(
-    { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
-    { repoPath: src.repoPath, repoId: "repo-x" },
-  );
-  expect(sync.headCommit).toBe(src.head);
 
   const mcp = await connectMcp(delegator);
 
@@ -204,14 +202,16 @@ test("two assembled daemons: pair, sync a workspace, delegate through the MCP HT
   expect(peer?.roles).toEqual(["execution"]);
   expect(peer?.maxConcurrentJobs).toBeGreaterThanOrEqual(1);
 
-  // delegate_task -> the job runs IN the synced workspace on the worker.
+  // delegate_task -> the daemon syncs "repo-x" (from its config mapping) to
+  // the worker BEFORE dispatching, then the job runs IN that synced
+  // workspace. The agent supplies only the repoId; no headCommit.
   const delegated = await mcp.callTool({
     name: "delegate_task",
     arguments: {
       node: worker.deviceId,
       task: {
         type: "command",
-        workspace: { repoId: "repo-x", headCommit: src.head },
+        workspace: { repoId: "repo-x" },
         command: "node",
         args: [
           "-e",

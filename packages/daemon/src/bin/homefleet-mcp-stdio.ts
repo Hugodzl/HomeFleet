@@ -33,6 +33,7 @@ import {
   endpointSourceFromDiscovery,
   NodeDirectory,
 } from "../mcp/node-directory.js";
+import { createRepoResolver } from "../mcp/repo-resolver.js";
 import { createMcpServer } from "../mcp/server.js";
 import { createNodeInfoProvider } from "../node/node-info.js";
 import { HfpClient } from "../transport/client.js";
@@ -71,6 +72,10 @@ export async function buildStdioMcpServer(dataDir: string): Promise<{
   });
   const server = createMcpServer({
     hfpClient,
+    workspaceSync: hfpClient,
+    // Sync-on-delegate (M9 Unit 6) is wired identically here: repoId ->
+    // local path comes from the same config.repos this shim already loads.
+    repoResolver: createRepoResolver(config.repos),
     nodeDirectory,
     delegations: new DelegationRegistry(),
   });
