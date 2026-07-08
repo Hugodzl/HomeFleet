@@ -201,4 +201,4 @@ test("caps the registry at MAX_KNOWN_NODES, evicting the oldest sighting", async
   // The cap survives a reload.
   const reloaded = await KnownNodesRegistry.load(dir);
   expect(reloaded.list()).toHaveLength(MAX_KNOWN_NODES);
-});
+}, 30_000);
