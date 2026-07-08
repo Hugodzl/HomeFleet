@@ -69,15 +69,22 @@ export const DEFAULT_MAX_RETAINED_JOBS = 256;
 export const DEFAULT_CANCEL_UNWIND_TIMEOUT_MS = 30_000;
 
 /**
- * Resolves a workspace reference to an absolute, already-materialized
- * directory. M5 does NOT transfer workspaces (that is M7, git bundles); the
- * daemon injects a resolver. A rejection yields a terminal `failed` result
- * with `WORKSPACE_UNAVAILABLE`.
+ * Resolves a workspace reference to a release handle: the absolute,
+ * already-materialized checkout directory plus a `release` callback. The
+ * daemon injects a resolver (M5 does NOT transfer workspaces — that is M7, git
+ * bundles). A rejection yields a terminal `failed` result with
+ * `WORKSPACE_UNAVAILABLE`.
+ *
+ * The handle PINS its checkout against eviction for as long as the job is
+ * reading it: the resolver holds a reference the store will not evict, and the
+ * caller MUST invoke `release()` exactly once when it is done with the
+ * directory (see {@link JobManager.executeJob}). `release()` is safe to call
+ * once; callers must not call it twice.
  */
 export type WorkspaceResolver = (
   ref: WorkspaceRef,
   owner: string,
-) => Promise<string>;
+) => Promise<{ dir: string; release: () => void }>;
 
 export interface JobManagerOptions {
   /** One executor per supported job type; a duplicate type is a config error. */
@@ -470,9 +477,13 @@ export class JobManager {
     record.startedAt = Date.now();
     this.append(record, { type: "status", status: "running" });
 
-    let workspaceDir: string;
+    // Acquire the workspace as a release handle: for as long as `handle` is
+    // held the checkout is PINNED against eviction, so the store cannot yank a
+    // directory this job is reading. A resolution FAILURE is caught here —
+    // nothing was acquired, so there is nothing to release.
+    let handle: { dir: string; release: () => void };
     try {
-      workspaceDir = await this.resolveWorkspace(
+      handle = await this.resolveWorkspace(
         record.params.workspace,
         record.owner,
       );
@@ -481,44 +492,52 @@ export class JobManager {
       return;
     }
 
-    if (record.abort.signal.aborted) {
-      this.finishJob(record, this.canceledResult(record));
-      return;
-    }
-
-    const executor = this.executors.get(record.params.type);
-    if (executor === undefined) {
-      // Guarded at submit; here only if the registry changed under us.
-      this.finishJob(
-        record,
-        this.errorResult(record, "UNSUPPORTED_JOB_TYPE", "no executor"),
-      );
-      return;
-    }
-
-    const context: ExecutionContext = {
-      jobId: record.jobId,
-      workspaceDir,
-      emit: (payload) => this.emitExecutorEvent(record, payload),
-      signal: record.abort.signal,
-    };
-
-    let result: JobResult;
+    // Past acquisition: `release()` must run exactly once on EVERY terminal
+    // path (abort-after-resolve, missing executor, executor success/throw), so
+    // wrap the rest in a finally. `release()` is idempotent in the store, but
+    // this finally is the single caller and fires it just once.
     try {
-      result = await executor.execute(
-        // The registry key equals params.type, so this cast is sound.
-        record.params as never,
-        context,
-      );
-    } catch (error) {
-      // Executors resolve in every outcome; a throw is a programmer error.
-      result = this.errorResult(
-        record,
-        "INTERNAL",
-        `executor threw: ${describeError(error)}`,
-      );
+      if (record.abort.signal.aborted) {
+        this.finishJob(record, this.canceledResult(record));
+        return;
+      }
+
+      const executor = this.executors.get(record.params.type);
+      if (executor === undefined) {
+        // Guarded at submit; here only if the registry changed under us.
+        this.finishJob(
+          record,
+          this.errorResult(record, "UNSUPPORTED_JOB_TYPE", "no executor"),
+        );
+        return;
+      }
+
+      const context: ExecutionContext = {
+        jobId: record.jobId,
+        workspaceDir: handle.dir,
+        emit: (payload) => this.emitExecutorEvent(record, payload),
+        signal: record.abort.signal,
+      };
+
+      let result: JobResult;
+      try {
+        result = await executor.execute(
+          // The registry key equals params.type, so this cast is sound.
+          record.params as never,
+          context,
+        );
+      } catch (error) {
+        // Executors resolve in every outcome; a throw is a programmer error.
+        result = this.errorResult(
+          record,
+          "INTERNAL",
+          `executor threw: ${describeError(error)}`,
+        );
+      }
+      this.finishJob(record, result);
+    } finally {
+      handle.release();
     }
-    this.finishJob(record, result);
   }
 
   /**

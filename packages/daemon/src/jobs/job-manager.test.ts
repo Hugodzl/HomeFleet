@@ -15,7 +15,11 @@ import type {
 } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { JobDispatchError } from "./job.js";
-import { JobManager, type JobManagerOptions } from "./job-manager.js";
+import {
+  JobManager,
+  type JobManagerOptions,
+  type WorkspaceResolver,
+} from "./job-manager.js";
 
 const OWNER = "owner-device-a";
 const OTHER_OWNER = "owner-device-b";
@@ -98,7 +102,9 @@ const managers: JobManager[] = [];
 function makeManager(options: Partial<JobManagerOptions> = {}): JobManager {
   const manager = new JobManager({
     executors: options.executors ?? [new SucceedingExecutor()],
-    resolveWorkspace: options.resolveWorkspace ?? (async () => "/unit-ws"),
+    resolveWorkspace:
+      options.resolveWorkspace ??
+      (async () => ({ dir: "/unit-ws", release: () => {} })),
     ...options,
   });
   managers.push(manager);
@@ -295,6 +301,61 @@ test("subscriberCount is owner-checked and does not leak another peer's job", as
   expect(() => manager.subscriberCount(jobId, OTHER_OWNER)).toThrow(
     JobDispatchError,
   );
+});
+
+test("the resolver release handle fires when a job reaches a terminal state", async () => {
+  // Each resolve hands out a handle whose release bumps a shared counter, so we
+  // can assert the pin is released on every post-acquire terminal path.
+  let releases = 0;
+  const resolveWorkspace: WorkspaceResolver = async () => ({
+    dir: "/unit-ws",
+    release: () => {
+      releases += 1;
+    },
+  });
+
+  // Succeeded: the executor resolves normally.
+  const okManager = makeManager({
+    executors: [new SucceedingExecutor()],
+    resolveWorkspace,
+  });
+  const okJob = okManager.submit(commandParams(), OWNER);
+  await waitUntil(() => isSucceeded(okManager, okJob.jobId));
+
+  // Failed: a throwing executor is backstopped into a terminal `failed`.
+  const failManager = makeManager({
+    executors: [new ThrowingExecutor()],
+    resolveWorkspace,
+  });
+  const failJob = failManager.submit(commandParams(), OWNER);
+  await waitUntil(() => {
+    try {
+      return failManager.snapshot(failJob.jobId, OWNER).status === "failed";
+    } catch {
+      return false;
+    }
+  });
+
+  // Canceled: a running job is aborted and unwinds to `canceled`.
+  const cancelManager = makeManager({
+    executors: [new AbortAwareExecutor()],
+    resolveWorkspace,
+  });
+  const cancelJob = cancelManager.submit(commandParams(), OWNER);
+  await waitUntil(() => {
+    try {
+      return (
+        cancelManager.snapshot(cancelJob.jobId, OWNER).status === "running"
+      );
+    } catch {
+      return false;
+    }
+  });
+  const response = await cancelManager.cancel(cancelJob.jobId, OWNER);
+  expect(response.status).toBe("canceled");
+
+  // Exactly one release per job — succeeded, failed, canceled — and never twice.
+  expect(releases).toBe(3);
 });
 
 /** A second command-typed executor is a config error, so the backstop test's

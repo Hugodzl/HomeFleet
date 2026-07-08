@@ -123,6 +123,13 @@ interface CheckoutEntry {
   dir: string;
   /** Monotonic last-use tick; higher = more recently used. */
   usedAt: number;
+  /**
+   * Number of live resolve handles reading this checkout. A checkout with
+   * `refcount > 0` is PINNED: eviction skips it so a running job's checkout is
+   * never `git worktree remove`d out from under it. Decremented (floored at 0)
+   * when a handle's `release` is called.
+   */
+  refcount: number;
 }
 
 export class WorkspaceStore {
@@ -294,15 +301,23 @@ export class WorkspaceStore {
 
   /**
    * The {@link WorkspaceResolver} implementation: resolves a `WorkspaceRef` to
-   * an absolute, materialized checkout directory. Fails (throws
-   * {@link WorkspaceError}, which the JobManager turns into a terminal
-   * `WORKSPACE_UNAVAILABLE`) if the repo is not allowlisted or the commit has
-   * not been synced into the cache.
+   * a release handle — the absolute, materialized checkout directory plus a
+   * `release` callback. Fails (throws {@link WorkspaceError}, which the
+   * JobManager turns into a terminal `WORKSPACE_UNAVAILABLE`) if the repo is
+   * not allowlisted or the commit has not been synced into the cache.
+   *
+   * Handing out the dir PINS the checkout: its refcount is incremented (under
+   * the repo lock, before eviction runs) so a running job's checkout is never
+   * evicted out from under it. The returned `release` decrements the refcount
+   * (floored at 0); it is guarded so a double-call is a harmless no-op.
    */
-  async resolve(ref: WorkspaceRef): Promise<string> {
+  async resolve(
+    ref: WorkspaceRef,
+  ): Promise<{ dir: string; release: () => void }> {
     this.requireAllowed(ref.repoId);
     const hash = repoHash(ref.repoId);
     const { headCommit } = ref;
+    const key = checkoutKey(hash, headCommit);
     const dir = await this.withRepoLock(hash, async () => {
       const repoDir = this.repoDir(hash);
       if (!(await pathExists(repoDir))) {
@@ -321,32 +336,42 @@ export class WorkspaceStore {
         );
       }
       const checkoutDir = this.checkoutDir(hash, headCommit);
-      const key = checkoutKey(hash, headCommit);
-      if (await isPopulatedCheckout(checkoutDir)) {
-        this.touch(key, hash, headCommit, checkoutDir);
-        return checkoutDir;
+      if (!(await isPopulatedCheckout(checkoutDir))) {
+        // Remove any stale/partial dir before re-adding the worktree.
+        await rm(checkoutDir, { recursive: true, force: true });
+        const added = await addWorktree(worker, checkoutDir, headCommit);
+        if (!ok(added)) {
+          throw new WorkspaceError(
+            "GIT_FAILED",
+            `could not materialize checkout: ${describeGitFailure(added)}`,
+            { repoId: ref.repoId, headCommit },
+          );
+        }
       }
-      // Remove any stale/partial dir before re-adding the worktree.
-      await rm(checkoutDir, { recursive: true, force: true });
-      const added = await addWorktree(worker, checkoutDir, headCommit);
-      if (!ok(added)) {
-        throw new WorkspaceError(
-          "GIT_FAILED",
-          `could not materialize checkout: ${describeGitFailure(added)}`,
-          { repoId: ref.repoId, headCommit },
-        );
-      }
+      // Track the checkout (bumping last-use) and PIN it before we release the
+      // lock, so the eviction pass below — and any concurrent resolve's pass —
+      // cannot pick it as a victim while this handle is outstanding.
       this.touch(key, hash, headCommit, checkoutDir);
+      this.pin(key);
       return checkoutDir;
     });
     // Evict AFTER releasing this repo's lock, and take only the victim's lock,
     // so eviction never holds two repo locks at once (no deadlock).
     await this.evictToCapacity();
-    return dir;
+    let released = false;
+    const release = (): void => {
+      if (released) {
+        return;
+      }
+      released = true;
+      this.unpin(key);
+    };
+    return { dir, release };
   }
 
   /** A resolver bound to this store, for injection into the JobManager. */
   createResolver(): WorkspaceResolver {
+    // owner is intentionally ignored: the worker cache is not per-owner.
     return (ref: WorkspaceRef) => this.resolve(ref);
   }
 
@@ -435,6 +460,13 @@ export class WorkspaceStore {
     return next;
   }
 
+  /**
+   * Marks a checkout most-recently-used. Updates an EXISTING entry in place
+   * (preserving its refcount — a pinned checkout must stay pinned across a
+   * re-resolve) and only mints a fresh entry (refcount 0) when none exists.
+   * The pin for a resolve is applied by {@link resolve} via {@link pin} after
+   * this call, so a plain last-use bump never changes the reference count.
+   */
   private touch(
     key: string,
     repoHashValue: string,
@@ -442,26 +474,61 @@ export class WorkspaceStore {
     dir: string,
   ): void {
     this.useTick += 1;
+    const existing = this.checkouts.get(key);
+    if (existing !== undefined) {
+      existing.usedAt = this.useTick;
+      return;
+    }
     this.checkouts.set(key, {
       repoHash: repoHashValue,
       headCommit,
       dir,
       usedAt: this.useTick,
+      refcount: 0,
     });
+  }
+
+  /** Pins a checkout (increments its refcount) so eviction will skip it. */
+  private pin(key: string): void {
+    const entry = this.checkouts.get(key);
+    if (entry !== undefined) {
+      entry.refcount += 1;
+    }
+  }
+
+  /** Unpins a checkout (decrements its refcount, floored at 0). */
+  private unpin(key: string): void {
+    const entry = this.checkouts.get(key);
+    if (entry !== undefined && entry.refcount > 0) {
+      entry.refcount -= 1;
+    }
   }
 
   /** Evicts least-recently-used checkouts until within the retention cap. */
   private async evictToCapacity(): Promise<void> {
     while (this.checkouts.size > this.maxCachedCheckouts) {
+      // Pick the LRU victim among UNPINNED checkouts only: a pinned checkout
+      // (refcount > 0) is being read by a running job and must never be
+      // `git worktree remove`d out from under it.
       let victimKey: string | undefined;
       let victim: CheckoutEntry | undefined;
       for (const [key, entry] of this.checkouts) {
+        if (entry.refcount > 0) {
+          continue;
+        }
         if (victim === undefined || entry.usedAt < victim.usedAt) {
           victimKey = key;
           victim = entry;
         }
       }
       if (victimKey === undefined || victim === undefined) {
+        // Every over-cap checkout is pinned; evicting any would yank a
+        // running job's checkout. Stop rather than spin forever — the cap is
+        // temporarily exceeded and shrinks as jobs finish and release.
+        this.log(
+          `workspace checkout eviction blocked: all ${this.checkouts.size} ` +
+            `checkout(s) pinned by running jobs (cap ${this.maxCachedCheckouts})`,
+        );
         return;
       }
       // Drop from the map first so a concurrent resolve does not pick it as a
@@ -521,6 +588,7 @@ export class WorkspaceStore {
               headCommit,
               dir,
               usedAt: 0,
+              refcount: 0,
             },
             mtimeMs: info.mtimeMs,
           });

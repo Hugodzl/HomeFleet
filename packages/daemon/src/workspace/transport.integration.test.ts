@@ -183,7 +183,7 @@ test("have-tip is null before sync and the head after uploading a bundle", async
   expect(await a.client.haveTip(target(b), "repo-a")).toBe(head);
 
   // The worker can now materialize the committed file for that commit.
-  const dir = await b.store.resolve({ repoId: "repo-a", headCommit: head });
+  const { dir } = await b.store.resolve({ repoId: "repo-a", headCommit: head });
   expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );

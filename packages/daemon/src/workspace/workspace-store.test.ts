@@ -178,7 +178,10 @@ test("full then incremental sync; the resolver materializes the right content", 
 
   // Full sync to c1, resolve, read the committed file.
   await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
-  const dir1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const { dir: dir1 } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: c1,
+  });
   expect(await readFile(path.join(dir1, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
@@ -196,7 +199,10 @@ test("full then incremental sync; the resolver materializes the right content", 
   await store.applyBundle("repo-a", incrPath, c2);
   expect(await store.haveTip("repo-a")).toBe(c2);
 
-  const dir2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  const { dir: dir2 } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: c2,
+  });
   expect(await readFile(path.join(dir2, "file.txt"), "utf8")).toBe(
     "content 0\ncontent 1\n",
   );
@@ -255,7 +261,7 @@ test("repoId path-traversal attempts are neutralized by hashing", async () => {
 
   for (const repoId of traversals) {
     await store.applyBundle(repoId, await fullBundle(src, head), head);
-    const dir = await store.resolve({ repoId, headCommit: head });
+    const { dir } = await store.resolve({ repoId, headCommit: head });
     // The materialized dir is inside the cache root, under the hashed name.
     const resolved = path.resolve(dir);
     expect(resolved.startsWith(path.resolve(cacheDir) + path.sep)).toBe(true);
@@ -292,7 +298,7 @@ test("per-repo operations serialize: concurrent syncs + a resolve do not corrupt
 
   // Final state is consistent and the checkout is valid.
   expect(await store.haveTip("repo-a")).toBe(c1);
-  const dir = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const { dir } = await store.resolve({ repoId: "repo-a", headCommit: c1 });
   expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
@@ -310,14 +316,57 @@ test("checkout retention cap evicts the least-recently-used checkout", async () 
   // A full bundle of c3 contains c1, c2, c3.
   await store.applyBundle("repo-a", await fullBundle(src, c3), c3);
 
-  const d1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  const d2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
-  const d3 = await store.resolve({ repoId: "repo-a", headCommit: c3 });
+  // Release each handle right after resolving so it is unpinned and thus a
+  // valid eviction victim (a pinned checkout is never evicted).
+  const { dir: d1, release: r1 } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: c1,
+  });
+  r1();
+  const { dir: d2, release: r2 } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: c2,
+  });
+  r2();
+  const { dir: d3, release: r3 } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: c3,
+  });
+  r3();
 
   // Cap is 2: the oldest (c1) checkout was evicted; c2 and c3 remain on disk.
   await expect(stat(path.join(d1, ".git"))).rejects.toThrow();
   expect((await stat(path.join(d2, ".git"))).isFile()).toBe(true);
   expect((await stat(path.join(d3, ".git"))).isFile()).toBe(true);
+}, 45_000);
+
+test("a pinned checkout is not evicted while its handle is held, and is after release", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 1,
+  });
+  // A full bundle of c2 contains c1 and c2.
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  // Hold BOTH handles. With cap 1 the second resolve's eviction pass runs while
+  // both checkouts are pinned, so it cannot evict either — both survive on disk
+  // despite the cap being exceeded.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
+
+  // Release c1's handle, then trigger another eviction pass (via a resolve):
+  // c1 is now unpinned and becomes the victim; c2 stays pinned and survives.
+  h1.release();
+  await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
+  expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
+
+  h2.release();
 }, 45_000);
 
 test("checkout cap survives across store instances (init re-registers on-disk checkouts)", async () => {
@@ -337,9 +386,9 @@ test("checkout cap survives across store instances (init re-registers on-disk ch
   const store1 = new WorkspaceStore(opts);
   await store1.init();
   await store1.applyBundle("repo-a", await fullBundle(src, c3), c3);
-  await store1.resolve({ repoId: "repo-a", headCommit: c1 });
-  await store1.resolve({ repoId: "repo-a", headCommit: c2 });
-  await store1.resolve({ repoId: "repo-a", headCommit: c3 });
+  (await store1.resolve({ repoId: "repo-a", headCommit: c1 })).release();
+  (await store1.resolve({ repoId: "repo-a", headCommit: c2 })).release();
+  (await store1.resolve({ repoId: "repo-a", headCommit: c3 })).release();
 
   // A new store over the same cacheDir with a tighter cap must evict on init.
   const store2 = new WorkspaceStore({ ...opts, maxCachedCheckouts: 1 });
@@ -356,7 +405,10 @@ test("resolver injects into the WorkspaceResolver contract", async () => {
   const store = await makeStore({ allowedRepoIds: ["repo-a"] });
   await store.applyBundle("repo-a", await fullBundle(src, head), head);
   const resolver = store.createResolver();
-  const dir = await resolver({ repoId: "repo-a", headCommit: head }, "owner-x");
+  const { dir } = await resolver(
+    { repoId: "repo-a", headCommit: head },
+    "owner-x",
+  );
   expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
@@ -431,7 +483,7 @@ test("an in-use checkout survives a gc triggered by a later sync", async () => {
     await fullBundleOf(a.repoPath, a.head),
     a.head,
   );
-  const dir = await store.resolve({ repoId: "repo-a", headCommit: a.head });
+  const { dir } = await store.resolve({ repoId: "repo-a", headCommit: a.head });
   const content = await readFile(path.join(dir, "data.txt"), "utf8");
 
   // Move the tip to an unrelated history B (gc runs every fetch): A is now only
