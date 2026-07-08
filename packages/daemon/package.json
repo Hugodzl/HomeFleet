@@ -11,6 +11,7 @@
     }
   },
   "bin": {
+    "homefleet": "./src/bin/homefleet.ts",
     "homefleet-mcp-stdio": "./src/bin/homefleet-mcp-stdio.ts",
     "homefleetd": "./src/bin/homefleetd.ts"
   },

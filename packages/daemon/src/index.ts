@@ -6,6 +6,32 @@
  * multicast + static entries, merged by the aggregator) and the daemon
  * config file. Job dispatch (M5) builds on these.
  */
+export { type CliDeps, type CliIdentity, runCli } from "./cli/cli.js";
+export {
+  ControlClient,
+  type ControlClientLike,
+  type ControlClientOptions,
+  ControlRequestError,
+  DaemonUnreachableError,
+  type PairBeginResult,
+  type PairConnectInput,
+} from "./cli/control-client.js";
+export {
+  type AutostartCreateOptions,
+  type AutostartRemoveOptions,
+  DEFAULT_AUTOSTART_TASK_NAME,
+  DEFAULT_RULE_NAME_PREFIX,
+  type FirewallPortOptions,
+  type FirewallRemoveOptions,
+  type FirewallRuleKind,
+  firewallRuleName,
+  generateAutostartCreateCommand,
+  generateAutostartRemoveCommand,
+  generateFirewallAllowCommands,
+  generateFirewallRemoveCommands,
+  PUBLIC_PROFILE_WARNING,
+  publicProfileCheckCommand,
+} from "./cli/setup-commands.js";
 export {
   type AgentEndpointConfig,
   AgentEndpointConfigSchema,
