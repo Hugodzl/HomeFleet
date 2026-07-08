@@ -253,7 +253,15 @@ async function controlRequest(
   body?: unknown,
 ): Promise<unknown> {
   const fetchImpl = options.fetch ?? globalThis.fetch;
-  const url = `http://${options.host}:${options.port}${path}`;
+  // IPv6 literals (e.g. "::1", schema-accepted for control.host — see
+  // ../config/config.ts's LoopbackHostSchema) must be bracketed in a URL
+  // authority ("[::1]"), or URL parsing (and thus `fetch`) throws. A bare
+  // "::1" would otherwise make every request look like a transport failure
+  // (see DaemonUnreachableError's doc) even though the daemon is reachable.
+  const urlHost = options.host.includes(":")
+    ? `[${options.host}]`
+    : options.host;
+  const url = `http://${urlHost}:${options.port}${path}`;
   let response: Response;
   try {
     response = await fetchImpl(url, {

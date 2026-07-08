@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type { DaemonConfig } from "../config/config.js";
 import {
   type ControlClientLike,
+  ControlRequestError,
   DaemonUnreachableError,
 } from "./control-client.js";
 import {
@@ -233,6 +234,16 @@ function parsePairConnectArgs(
     );
     return undefined;
   }
+  if (positional.length > 3) {
+    deps.stderr(
+      `pair connect: unexpected extra argument(s): ${positional.slice(3).join(" ")}`,
+    );
+    return undefined;
+  }
+  if (host.trim().length === 0) {
+    deps.stderr("pair connect: host must not be empty");
+    return undefined;
+  }
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     deps.stderr(`pair connect: invalid port "${portText}"`);
@@ -249,7 +260,23 @@ async function runPairConnect(args: string[], deps: CliDeps): Promise<number> {
     return 2;
   }
   return withControlClient(deps, async (client) => {
-    const summary = await client.pairConnect(parsed);
+    let summary: Awaited<ReturnType<ControlClientLike["pairConnect"]>>;
+    try {
+      summary = await client.pairConnect(parsed);
+    } catch (error) {
+      // A 502 from the daemon means the ATTEMPT against the peer couldn't
+      // complete (unreachable, timeout, TLS/fingerprint failure — see
+      // control-server.ts's pairingErrorStatus) — distinct from THIS node's
+      // own daemon being unreachable (DaemonUnreachableError, handled by
+      // withControlClient) and worth the same "who's actually down" framing.
+      if (error instanceof ControlRequestError && error.status === 502) {
+        deps.stderr(
+          `Could not reach the peer at ${parsed.host}:${parsed.port}: ${error.message}`,
+        );
+        return 1;
+      }
+      throw error;
+    }
     if (summary.accepted) {
       const idText =
         summary.deviceId !== undefined ? shortId(summary.deviceId) : "unknown";
@@ -266,6 +293,12 @@ async function runPairConnect(args: string[], deps: CliDeps): Promise<number> {
 async function runPair(args: string[], deps: CliDeps): Promise<number> {
   const [sub, ...rest] = args;
   if (sub === "begin") {
+    if (rest.length > 0) {
+      deps.stderr(
+        `pair begin: unexpected extra argument(s): ${rest.join(" ")}`,
+      );
+      return 2;
+    }
     return runPairBegin(deps);
   }
   if (sub === "connect") {
@@ -350,7 +383,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     return 0;
   }
   if (command === undefined) {
-    deps.stdout(USAGE);
+    deps.stderr(USAGE);
     return 2;
   }
   switch (command) {
@@ -359,11 +392,19 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     case "pair":
       return runPair(rest, deps);
     case "nodes":
+      if (rest.length > 0) {
+        deps.stderr(`nodes: unexpected extra argument(s): ${rest.join(" ")}`);
+        return 2;
+      }
       return runNodes(deps);
     case "status":
+      if (rest.length > 0) {
+        deps.stderr(`status: unexpected extra argument(s): ${rest.join(" ")}`);
+        return 2;
+      }
       return runStatus(deps);
     default:
-      deps.stdout(USAGE);
+      deps.stderr(USAGE);
       return 2;
   }
 }

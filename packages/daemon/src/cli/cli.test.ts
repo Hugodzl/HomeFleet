@@ -13,7 +13,10 @@ import type {
   PairBeginResult,
   PairConnectInput,
 } from "./control-client.js";
-import { DaemonUnreachableError } from "./control-client.js";
+import {
+  ControlRequestError,
+  DaemonUnreachableError,
+} from "./control-client.js";
 
 const FAKE_DEVICE_ID = "a".repeat(64);
 const FAKE_PEER_DEVICE_ID = "b".repeat(64);
@@ -138,18 +141,21 @@ describe("usage / unknown", () => {
     expect(stdoutLines.join("\n")).toContain("Usage:");
   });
 
-  test("no subcommand prints usage and returns 2", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("no subcommand prints usage to STDERR and returns 2", async () => {
+    const { deps, stdoutLines, stderrLines } = makeHarness();
     const code = await runCli([], deps);
     expect(code).toBe(2);
-    expect(stdoutLines.join("\n")).toContain("Usage:");
+    expect(stderrLines.join("\n")).toContain("Usage:");
+    // Only the successful --help path writes to stdout.
+    expect(stdoutLines).toEqual([]);
   });
 
-  test("unknown subcommand prints usage and returns 2", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("unknown subcommand prints usage to STDERR and returns 2", async () => {
+    const { deps, stdoutLines, stderrLines } = makeHarness();
     const code = await runCli(["bogus"], deps);
     expect(code).toBe(2);
-    expect(stdoutLines.join("\n")).toContain("Usage:");
+    expect(stderrLines.join("\n")).toContain("Usage:");
+    expect(stdoutLines).toEqual([]);
   });
 });
 
@@ -183,19 +189,44 @@ describe("setup", () => {
     });
     const code = await runCli(["setup"], deps);
     expect(code).toBe(0);
-    expect(stdoutLines.join("\n")).toContain("name:");
+    expect(stdoutLines.join("\n")).toContain(
+      "(unset — falls back to this machine's hostname",
+    );
   });
 });
 
 describe("pair begin", () => {
-  test("prints the code and connect instructions", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("prints the code and connect instructions, using config.control for the client", async () => {
+    const { deps, stdoutLines, makeControlClientCalls } = makeHarness();
     const code = await runCli(["pair", "begin"], deps);
     expect(code).toBe(0);
     const output = stdoutLines.join("\n");
     expect(output).toContain("ABCDEFGH");
     expect(output).toContain("homefleet pair connect");
     expect(output).toContain("56370"); // this node's hfp port from config
+    expect(makeControlClientCalls).toEqual([
+      { host: "127.0.0.1", port: 56373 },
+    ]);
+  });
+
+  test("omits the Expires line when the daemon doesn't report expiresAt", async () => {
+    const controlClient = fakeControlClient({
+      pairBegin: async () => ({ code: "ABCDEFGH" }),
+    });
+    const { deps, stdoutLines } = makeHarness({ controlClient });
+    const code = await runCli(["pair", "begin"], deps);
+    expect(code).toBe(0);
+    const output = stdoutLines.join("\n");
+    expect(output).toContain("ABCDEFGH");
+    expect(output).not.toContain("Expires:");
+  });
+
+  test("extra positional argument is a usage error (exit 2)", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(["pair", "begin", "bogus-arg"], deps);
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("unexpected extra argument");
+    expect(makeControlClientCalls).toEqual([]);
   });
 
   test("DaemonUnreachableError yields a friendly stderr message and exit 1", async () => {
@@ -218,14 +249,32 @@ describe("pair begin", () => {
 });
 
 describe("pair connect", () => {
-  test("accepted pairing prints peer name and short id", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("accepted pairing prints peer name and short id, using config.control for the client", async () => {
+    const { deps, stdoutLines, makeControlClientCalls } = makeHarness();
     const code = await runCli(
       ["pair", "connect", "192.168.1.50", "56370", "ABCDEFGH"],
       deps,
     );
     expect(code).toBe(0);
     expect(stdoutLines.join("\n")).toContain("peer-node");
+    expect(makeControlClientCalls).toEqual([
+      { host: "127.0.0.1", port: 56373 },
+    ]);
+  });
+
+  test("accepted pairing without a deviceId falls back to 'unknown'", async () => {
+    const controlClient = fakeControlClient({
+      pairConnect: async () => ({ accepted: true, name: "peer-node" }),
+    });
+    const { deps, stdoutLines } = makeHarness({ controlClient });
+    const code = await runCli(
+      ["pair", "connect", "192.168.1.50", "56370", "ABCDEFGH"],
+      deps,
+    );
+    expect(code).toBe(0);
+    expect(stdoutLines.join("\n")).toContain(
+      'Paired with "peer-node" (unknown).',
+    );
   });
 
   test("passes --expect through as expectedDeviceId", async () => {
@@ -279,13 +328,54 @@ describe("pair connect", () => {
     expect(makeControlClientCalls).toEqual([]);
   });
 
-  test("invalid port is a usage error (exit 2)", async () => {
-    const { deps } = makeHarness();
+  test("empty host is a usage error (exit 2), no control client built", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(
+      ["pair", "connect", "", "56370", "ABCDEFGH"],
+      deps,
+    );
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("host must not be empty");
+    expect(makeControlClientCalls).toEqual([]);
+  });
+
+  test("extra positional argument (e.g. a forgotten --expect) is a usage error, not silently dropped", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(
+      [
+        "pair",
+        "connect",
+        "192.168.1.50",
+        "56370",
+        "ABCDEFGH",
+        FAKE_PEER_DEVICE_ID,
+      ],
+      deps,
+    );
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("unexpected extra argument");
+    expect(makeControlClientCalls).toEqual([]);
+  });
+
+  test("--expect with no following value is a usage error (exit 2)", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(
+      ["pair", "connect", "192.168.1.50", "56370", "ABCDEFGH", "--expect"],
+      deps,
+    );
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("requires a deviceId argument");
+    expect(makeControlClientCalls).toEqual([]);
+  });
+
+  test("invalid port is a usage error (exit 2) with a specific message", async () => {
+    const { deps, stderrLines } = makeHarness();
     const code = await runCli(
       ["pair", "connect", "host", "not-a-port", "ABCDEFGH"],
       deps,
     );
     expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain('invalid port "not-a-port"');
   });
 
   test("DaemonUnreachableError yields friendly stderr and exit 1", async () => {
@@ -302,22 +392,59 @@ describe("pair connect", () => {
     expect(code).toBe(1);
     expect(stderrLines.join("\n")).toContain("Is homefleetd running?");
   });
+
+  test("a peer-unreachable ControlRequestError (502) prints a labeled message, not a raw errno string", async () => {
+    const controlClient = fakeControlClient({
+      pairConnect: async () => {
+        throw new ControlRequestError(
+          502,
+          "connect ECONNREFUSED 192.168.1.50:56370",
+        );
+      },
+    });
+    const { deps, stderrLines } = makeHarness({ controlClient });
+    const code = await runCli(
+      ["pair", "connect", "192.168.1.50", "56370", "ABCDEFGH"],
+      deps,
+    );
+    expect(code).toBe(1);
+    expect(stderrLines.join("\n")).toContain(
+      "Could not reach the peer at 192.168.1.50:56370",
+    );
+    expect(stderrLines.join("\n")).toContain(
+      "connect ECONNREFUSED 192.168.1.50:56370",
+    );
+  });
 });
 
 describe("pair (unknown subcommand)", () => {
   test("unknown pair subcommand is a usage error", async () => {
-    const { deps } = makeHarness();
+    const { deps, stderrLines } = makeHarness();
     const code = await runCli(["pair", "bogus"], deps);
     expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain(
+      "usage: homefleet pair <begin|connect>",
+    );
   });
 });
 
 describe("nodes", () => {
-  test("empty directory prints a clear message", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("empty directory prints a clear message, using config.control for the client", async () => {
+    const { deps, stdoutLines, makeControlClientCalls } = makeHarness();
     const code = await runCli(["nodes"], deps);
     expect(code).toBe(0);
     expect(stdoutLines.join("\n")).toMatch(/no paired nodes/i);
+    expect(makeControlClientCalls).toEqual([
+      { host: "127.0.0.1", port: 56373 },
+    ]);
+  });
+
+  test("extra positional argument is a usage error (exit 2), no control client built", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(["nodes", "bogus"], deps);
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("unexpected extra argument");
+    expect(makeControlClientCalls).toEqual([]);
   });
 
   test("prints an aligned table with one row per node", async () => {
@@ -376,8 +503,8 @@ describe("nodes", () => {
 });
 
 describe("status", () => {
-  test("prints key: value lines for every field", async () => {
-    const { deps, stdoutLines } = makeHarness();
+  test("prints key: value lines for every field, using config.control for the client", async () => {
+    const { deps, stdoutLines, makeControlClientCalls } = makeHarness();
     const code = await runCli(["status"], deps);
     expect(code).toBe(0);
     const output = stdoutLines.join("\n");
@@ -392,6 +519,44 @@ describe("status", () => {
     expect(output).toContain("models: test-model");
     expect(output).toContain("activeJobs: 1");
     expect(output).toContain("maxConcurrentJobs: 4");
+    expect(makeControlClientCalls).toEqual([
+      { host: "127.0.0.1", port: 56373 },
+    ]);
+  });
+
+  test("extra positional argument is a usage error (exit 2), no control client built", async () => {
+    const { deps, stderrLines, makeControlClientCalls } = makeHarness();
+    const code = await runCli(["status", "bogus"], deps);
+    expect(code).toBe(2);
+    expect(stderrLines.join("\n")).toContain("unexpected extra argument");
+    expect(makeControlClientCalls).toEqual([]);
+  });
+
+  test("empty roles/executors/models fall back to '(none)'", async () => {
+    const controlClient = fakeControlClient({
+      status: async () => ({
+        deviceId: FAKE_DEVICE_ID,
+        name: "test-node",
+        platform: "linux",
+        daemonVersion: "0.1.0",
+        protocolVersion: "0.1.0",
+        hfpPort: 56370,
+        mcpPort: 56372,
+        controlPort: 56373,
+        roles: [],
+        executors: [],
+        models: [],
+        activeJobs: 0,
+        maxConcurrentJobs: 4,
+      }),
+    });
+    const { deps, stdoutLines } = makeHarness({ controlClient });
+    const code = await runCli(["status"], deps);
+    expect(code).toBe(0);
+    const output = stdoutLines.join("\n");
+    expect(output).toContain("roles: (none)");
+    expect(output).toContain("executors: (none)");
+    expect(output).toContain("models: (none)");
   });
 
   test("DaemonUnreachableError yields a friendly stderr message and exit 1, no stack", async () => {

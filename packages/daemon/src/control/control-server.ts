@@ -308,11 +308,16 @@ export async function startControlServer(
     }
     const parsed = PairConnectRequestSchema.safeParse(parsedJson);
     if (!parsed.success) {
-      respondError(
-        res,
-        400,
-        `invalid pair/connect request: ${parsed.error.message}`,
-      );
+      // Build a short human-readable message from the issues rather than
+      // forwarding zod's raw (multi-line, pretty-printed JSON) `.message` —
+      // that blob is meant for a developer console, not a CLI user's
+      // terminal (see cli.ts's parsePairConnectArgs, which also rejects an
+      // empty host client-side so this path is normally unreachable, but a
+      // future caller of this route should still get a clean message).
+      const issues = parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(body)"}: ${issue.message}`)
+        .join("; ");
+      respondError(res, 400, `invalid pair/connect request: ${issues}`);
       return;
     }
     const input: PairConnectRequest = parsed.data;
