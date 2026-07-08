@@ -113,7 +113,12 @@ test("both executors -> both roles", () => {
 test("a live jobs source is re-read on every call (activeJobs changes)", () => {
   let active = 0;
   const build = makeProvider({
-    jobs: { activeJobCount: () => active, maxConcurrent: 4 },
+    jobs: {
+      get activeJobs() {
+        return active;
+      },
+      maxConcurrent: 4,
+    },
   });
   expect(build().activeJobs).toBe(0);
   expect(build().maxConcurrentJobs).toBe(4);
@@ -171,11 +176,12 @@ test("every emitted profile parses NodeInfoSchema", () => {
   expect(() => NodeInfoSchema.parse(info)).not.toThrow();
 });
 
-test("a schema-violating profile fails closed at build time", () => {
+test("a schema-violating profile fails closed at FACTORY time", () => {
   // A hostname with a control character survives truncation but violates
-  // NodeNameSchema — the provider must throw rather than emit it.
-  const build = makeProvider({
-    hostname: `bad${String.fromCharCode(0x07)}name`,
-  });
-  expect(() => build()).toThrow();
+  // NodeNameSchema. All failable fields are static, so the profile would be
+  // invalid forever — the FACTORY itself must throw (eager validation), so
+  // daemon assembly fails at startup instead of every later `hello`.
+  expect(() =>
+    makeProvider({ hostname: `bad${String.fromCharCode(0x07)}name` }),
+  ).toThrow();
 });

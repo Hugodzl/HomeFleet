@@ -29,8 +29,8 @@ export type NodeInfoConfig = Pick<
  * dependency on the jobs module.
  */
 export interface JobLoadSource {
-  /** Number of jobs currently running. */
-  activeJobCount(): number;
+  /** Number of jobs currently running (queued jobs are not counted). */
+  readonly activeJobs: number;
   /** The effective concurrency limit the manager enforces. */
   readonly maxConcurrent: number;
 }
@@ -88,6 +88,9 @@ function resolveNodeName(
  *
  * Every call validates its output with `NodeInfoSchema.parse` — fail closed:
  * a bad config value or hostname can never emit an invalid profile to peers.
+ * Validation ALSO runs once eagerly inside this factory (see below), so a
+ * deterministically-invalid profile fails daemon assembly at startup with a
+ * clear zod error instead of surfacing per `hello`.
  */
 export function createNodeInfoProvider(
   options: NodeInfoProviderOptions,
@@ -117,7 +120,7 @@ export function createNodeInfoProvider(
   };
   const platform = currentPlatform();
 
-  return (): NodeInfo =>
+  const build = (): NodeInfo =>
     NodeInfoSchema.parse({
       deviceId,
       name,
@@ -130,6 +133,15 @@ export function createNodeInfoProvider(
       hardware,
       // See {@link NodeInfoProviderOptions.jobs} for the 1/0 default.
       maxConcurrentJobs: jobs?.maxConcurrent ?? 1,
-      activeJobs: jobs?.activeJobCount() ?? 0,
+      activeJobs: jobs?.activeJobs ?? 0,
     } satisfies NodeInfo);
+
+  // Eager validation: every realistically-failable field (name, versions,
+  // models) is STATIC, so an invalid profile is invalid deterministically
+  // forever — better to fail assembly right here, at startup, than to have
+  // every later `hello` throw mid-handshake (and, in pairing, after trust
+  // was already granted). The per-call parse above stays as belt-and-
+  // suspenders for the live fields.
+  build();
+  return build;
 }

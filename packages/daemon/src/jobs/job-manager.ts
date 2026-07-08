@@ -165,10 +165,12 @@ export class JobManager {
   }
 
   /**
-   * Number of jobs currently running. Feeds `NodeInfo.activeJobs` so peers
-   * see this worker's live load in the `hello` handshake.
+   * Number of jobs currently RUNNING. Feeds `NodeInfo.activeJobs` so peers
+   * see this worker's live load in the `hello` handshake. Queued jobs are
+   * deliberately NOT counted: the queue is not part of the advertised
+   * profile, so a scheduler must not assume this reflects total backlog.
    */
-  activeJobCount(): number {
+  get activeJobs(): number {
     return this.running.size;
   }
 
