@@ -1,0 +1,527 @@
+/**
+ * Safe `git` wrapper for workspace sync (M7, ADR-0005).
+ *
+ * Every git invocation goes through {@link runGit}: `shell: false`, arguments
+ * as an array (never interpolated into a shell), a hardened environment, and a
+ * bounded timeout that kills the process (tree) so a wedged git can never hang
+ * the daemon. Results are typed — a nonzero exit is data, not a throw.
+ *
+ * Two sides use these helpers:
+ * - The DELEGATING side runs against the user's OWN repository (trusted):
+ *   {@link resolveHeadCommit}, {@link isAncestor}, {@link createBundle}. These
+ *   subcommands never execute repository hooks.
+ * - The WORKER side runs against a daemon-owned cache repo, fed content from a
+ *   PAIRED-BUT-UNTRUSTED peer (M8 threat model: a compromised paired device).
+ *   Those calls additionally point `core.hooksPath` at an empty directory so
+ *   received content can never trigger a hook, and only ever check out a commit
+ *   the received bundle actually delivered ({@link verifyBundle} +
+ *   {@link fetchBundleHead} + an explicit tip/commit re-check in the store).
+ *
+ * The environment is hardened on BOTH sides: `GIT_CONFIG_GLOBAL` /
+ * `GIT_CONFIG_SYSTEM` are pointed at a path that does not exist (git treats an
+ * unreadable config file as empty), so ambient user/system git config cannot
+ * change behavior; `GIT_TERMINAL_PROMPT=0` guarantees git never blocks on a
+ * prompt. Repo-LOCAL config is always the daemon's or the user's own and is
+ * trusted; bundles carry only objects and refs, never config or hooks.
+ */
+import { type ChildProcess, spawn } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+
+/** Default per-invocation git timeout. Generous; bundle ops on a big repo. */
+export const DEFAULT_GIT_TIMEOUT_MS = 120_000;
+
+/** A 40-char lowercase hex commit hash (git's SHA-1 object name). */
+export const COMMIT_HASH_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * How long {@link runGit} waits for `close` after issuing the kill before it
+ * force-settles anyway (mirrors safeSpawn's watchdog): a killer that exits
+ * without reaping a stuck child must not wedge the daemon on the child's pipes.
+ */
+export const GIT_KILL_GRACE_MS = 2000;
+
+/**
+ * Per-stream capture cap for git stdout/stderr. Our commands emit small output
+ * (a hash, a verify report); this only guards against a pathological flood.
+ */
+export const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
+
+/**
+ * A path that intentionally does not exist. Used for `GIT_CONFIG_GLOBAL` /
+ * `GIT_CONFIG_SYSTEM`: git treats an unreadable config file as empty, which is
+ * the documented way to ignore ambient config. (`os.devNull` is NOT usable —
+ * git on Windows rejects the `\\.\NUL` device path.)
+ */
+const NONEXISTENT_CONFIG_PATH = path.join(
+  os.tmpdir(),
+  "homefleet-nonexistent-gitconfig-do-not-create",
+);
+
+/** Every possible ending of a git invocation, as data (never thrown). */
+export interface GitCommandResult {
+  /** Process exit code, or `null` when our kill path terminated it. */
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** The timeout fired and the process was killed. */
+  timedOut: boolean;
+  /** The process could not be spawned at all (e.g. git not on PATH). */
+  spawnError?: string;
+}
+
+export interface RunGitOptions {
+  cwd?: string;
+  /** Defaults to {@link DEFAULT_GIT_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  /**
+   * `-c key=value` config pairs inserted before the subcommand. The worker
+   * side uses this to disable hooks (`core.hooksPath=<empty dir>`).
+   */
+  config?: string[];
+  /** Cancellation; aborting takes the same kill path as the timeout. */
+  signal?: AbortSignal;
+  /**
+   * Test seam: the binary to spawn. Defaults to `"git"`. A test points this at
+   * `process.execPath` to exercise the timeout/kill path deterministically
+   * (mirrors safeSpawn's `killer`/`killGraceMs` seams).
+   */
+  binary?: string;
+  /** Test seam: override {@link GIT_KILL_GRACE_MS}. */
+  killGraceMs?: number;
+}
+
+/** `true` iff the git call exited 0. */
+export function ok(result: GitCommandResult): boolean {
+  return result.code === 0;
+}
+
+/** A short, log-safe description of a failed git result. */
+export function describeGitFailure(result: GitCommandResult): string {
+  if (result.spawnError !== undefined) {
+    return `git could not be spawned: ${result.spawnError}`;
+  }
+  if (result.timedOut) {
+    return "git timed out";
+  }
+  const stderr = result.stderr.trim();
+  return `git exited ${result.code}${stderr === "" ? "" : `: ${stderr}`}`;
+}
+
+function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) {
+    return;
+  }
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+      stdio: "ignore",
+    }).once("error", () => {
+      // taskkill missing/failed: the timeout outcome is still reported.
+    });
+  } else {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
+/** Collects a stream up to the byte cap; overflow is dropped (drained). */
+class CappedCollector {
+  private readonly chunks: Buffer[] = [];
+  private bytes = 0;
+
+  push(chunk: Buffer): void {
+    const budget = MAX_GIT_OUTPUT_BYTES - this.bytes;
+    if (budget <= 0) {
+      return;
+    }
+    const kept = chunk.length <= budget ? chunk : chunk.subarray(0, budget);
+    this.chunks.push(kept);
+    this.bytes += kept.length;
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf8");
+  }
+}
+
+/**
+ * Runs one git command to a typed outcome. Never rejects on git-shaped
+ * failure: spawn errors, nonzero exits, and timeouts are all encoded in the
+ * returned {@link GitCommandResult}. Bounded by `timeoutMs`; on overrun the
+ * process (tree) is killed and, if it still does not close, force-settled.
+ */
+export function runGit(
+  args: string[],
+  options: RunGitOptions = {},
+): Promise<GitCommandResult> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+  const killGraceMs = options.killGraceMs ?? GIT_KILL_GRACE_MS;
+  const binary = options.binary ?? "git";
+  const configArgs = (options.config ?? []).flatMap((pair) => ["-c", pair]);
+  const finalArgs = [...configArgs, ...args];
+
+  return new Promise((resolve) => {
+    const child = spawn(binary, finalArgs, {
+      cwd: options.cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      env: {
+        ...process.env,
+        // Ignore ambient user/system git config (see file doc).
+        GIT_CONFIG_GLOBAL: NONEXISTENT_CONFIG_PATH,
+        GIT_CONFIG_SYSTEM: NONEXISTENT_CONFIG_PATH,
+        // Never block on a credential/other prompt.
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+
+    const stdout = new CappedCollector();
+    const stderr = new CappedCollector();
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+
+    let killedByUs = false;
+    let timedOut = false;
+    let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+
+    const settle = (result: GitCommandResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog);
+      }
+      if (options.signal !== undefined) {
+        options.signal.removeEventListener("abort", onAbort);
+      }
+      resolve(result);
+    };
+
+    const kill = (dueToTimeout: boolean): void => {
+      if (settled || killedByUs) {
+        return;
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      killedByUs = true;
+      timedOut = dueToTimeout;
+      killTree(child);
+      watchdog = setTimeout(() => {
+        settle({
+          code: null,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          timedOut,
+        });
+      }, killGraceMs);
+    };
+
+    const timer = setTimeout(() => kill(true), timeoutMs);
+    const onAbort = (): void => kill(false);
+    if (options.signal !== undefined) {
+      if (options.signal.aborted) {
+        // Already aborted: kill as soon as the child exists.
+        queueMicrotask(() => kill(false));
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    child.once("error", (error) => {
+      settle({
+        code: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        spawnError: error.message,
+      });
+    });
+
+    child.once("close", (code) => {
+      settle({
+        code: killedByUs ? null : code,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        timedOut,
+      });
+    });
+  });
+}
+
+/** Thrown by the delegating-side helpers when git fails unexpectedly. */
+export class GitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitError";
+  }
+}
+
+/**
+ * DELEGATING side: the current committed head of `repoPath` as a 40-hex commit
+ * hash. Throws {@link GitError} if the directory is not a git repo, has no
+ * commits, or git fails.
+ */
+export async function resolveHeadCommit(
+  repoPath: string,
+  timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+): Promise<string> {
+  const result = await runGit(["rev-parse", "HEAD"], {
+    cwd: repoPath,
+    timeoutMs,
+  });
+  if (!ok(result)) {
+    throw new GitError(
+      `could not resolve HEAD of ${repoPath}: ${describeGitFailure(result)}`,
+    );
+  }
+  const head = result.stdout.trim();
+  if (!COMMIT_HASH_RE.test(head)) {
+    throw new GitError(`rev-parse HEAD returned an unexpected value: ${head}`);
+  }
+  return head;
+}
+
+/**
+ * DELEGATING side: whether `ancestor` is an ancestor of `descendant` in
+ * `repoPath` (so an incremental `ancestor..descendant` bundle is possible).
+ * A commit unknown to the repo yields `false` (not an error).
+ */
+export async function isAncestor(
+  repoPath: string,
+  ancestor: string,
+  descendant: string,
+  timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+): Promise<boolean> {
+  if (!COMMIT_HASH_RE.test(ancestor) || !COMMIT_HASH_RE.test(descendant)) {
+    return false;
+  }
+  const result = await runGit(
+    ["merge-base", "--is-ancestor", ancestor, descendant],
+    { cwd: repoPath, timeoutMs },
+  );
+  // Exit 0 => ancestor; 1 => not; anything else (e.g. 128, bad object) => not.
+  return result.code === 0;
+}
+
+export interface CreateBundleOptions {
+  /** Repo to bundle from (the delegating side's own repo). */
+  repoPath: string;
+  /** Absolute path of the bundle file to create. */
+  bundlePath: string;
+  /** The head to deliver (must be the repo's current HEAD). */
+  headCommit: string;
+  /**
+   * The worker's existing tip, when an incremental bundle is wanted. Must be an
+   * ancestor of `headCommit` (verify with {@link isAncestor} first). Absent =>
+   * a full bundle.
+   */
+  have?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * DELEGATING side: writes a git bundle of `HEAD` to `bundlePath`. Full when
+ * `have` is absent, otherwise incremental (`HEAD --not <have>`). The bundle
+ * records the ref `HEAD` pointing at `headCommit`, which the worker fetches;
+ * incremental bundles record `have` as a prerequisite so the worker's
+ * `bundle verify` fails unless it already has that commit.
+ *
+ * The caller MUST ensure `headCommit` is the repo's current HEAD and (for the
+ * incremental case) that `have` is a strict ancestor — an empty range makes
+ * `git bundle create` fail ("Refusing to create empty bundle").
+ */
+export async function createBundle(
+  options: CreateBundleOptions,
+): Promise<void> {
+  const { repoPath, bundlePath, have } = options;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
+  const args = ["bundle", "create", bundlePath, "HEAD"];
+  if (have !== undefined) {
+    if (!COMMIT_HASH_RE.test(have)) {
+      throw new GitError(`invalid 'have' commit: ${have}`);
+    }
+    args.push("--not", have);
+  }
+  const result = await runGit(args, { cwd: repoPath, timeoutMs });
+  if (!ok(result)) {
+    throw new GitError(
+      `git bundle create failed: ${describeGitFailure(result)}`,
+    );
+  }
+}
+
+/**
+ * WORKER-side git context: a bare cache repo and an empty hooks directory that
+ * disables hook execution on every call against received content.
+ */
+export interface WorkerGit {
+  /** The bare cache repo (`--git-dir`). */
+  repoDir: string;
+  /** An existing, empty directory used as `core.hooksPath` (no hooks). */
+  hooksPath: string;
+  timeoutMs: number;
+}
+
+/** Worker-side `-c` config: disable hooks for received content. */
+function workerConfig(worker: WorkerGit): string[] {
+  return [`core.hooksPath=${worker.hooksPath}`];
+}
+
+/**
+ * WORKER side: `git bundle verify`. Returns `true` iff the bundle is a
+ * structurally valid bundle AND all of its prerequisites are already present
+ * in the cache repo (so an incremental bundle from an unknown base is
+ * rejected). A garbage file returns `false`.
+ */
+export async function verifyBundle(
+  worker: WorkerGit,
+  bundlePath: string,
+): Promise<boolean> {
+  const result = await runGit(["bundle", "verify", bundlePath], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  return ok(result);
+}
+
+/**
+ * WORKER side: fetch the bundle's `HEAD` ref into `intoRef` in the cache repo,
+ * bringing its objects in. `intoRef` should be a scratch ref the caller
+ * validates before advancing the real tip.
+ */
+export async function fetchBundleHead(
+  worker: WorkerGit,
+  bundlePath: string,
+  intoRef: string,
+): Promise<GitCommandResult> {
+  return runGit(["fetch", "--quiet", bundlePath, `+HEAD:${intoRef}`], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+}
+
+/**
+ * WORKER side: resolve a ref/rev to a commit hash, or `null` if it does not
+ * exist. Used to read the current tip and to read a scratch ref back.
+ */
+export async function revParse(
+  worker: WorkerGit,
+  rev: string,
+): Promise<string | null> {
+  const result = await runGit(["rev-parse", "--verify", "--quiet", rev], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  if (!ok(result)) {
+    return null;
+  }
+  const value = result.stdout.trim();
+  return COMMIT_HASH_RE.test(value) ? value : null;
+}
+
+/** WORKER side: whether `commit` exists as a commit object in the cache repo. */
+export async function commitPresent(
+  worker: WorkerGit,
+  commit: string,
+): Promise<boolean> {
+  if (!COMMIT_HASH_RE.test(commit)) {
+    return false;
+  }
+  const result = await runGit(["cat-file", "-e", `${commit}^{commit}`], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  return ok(result);
+}
+
+/** WORKER side: point `ref` at `commit` (creates or moves it). */
+export async function updateRef(
+  worker: WorkerGit,
+  ref: string,
+  commit: string,
+): Promise<GitCommandResult> {
+  return runGit(["update-ref", ref, commit], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+}
+
+/** WORKER side: delete `ref` if it exists (best effort). */
+export async function deleteRef(worker: WorkerGit, ref: string): Promise<void> {
+  await runGit(["update-ref", "-d", ref], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+}
+
+/**
+ * WORKER side: materialize a clean, detached checkout of `commit` into
+ * `checkoutDir` via a git worktree (objects are shared with the cache repo; no
+ * shared HEAD is touched, so concurrent checkouts do not collide). The caller
+ * MUST have already confirmed `commit` is present. Hooks are disabled.
+ */
+export async function addWorktree(
+  worker: WorkerGit,
+  checkoutDir: string,
+  commit: string,
+): Promise<GitCommandResult> {
+  return runGit(
+    ["worktree", "add", "--detach", "--force", checkoutDir, commit],
+    {
+      cwd: worker.repoDir,
+      timeoutMs: worker.timeoutMs,
+      config: workerConfig(worker),
+    },
+  );
+}
+
+/**
+ * WORKER side: remove a worktree (eviction). Best effort: prunes stale
+ * administrative entries afterward so a partially-removed worktree does not
+ * accumulate.
+ */
+export async function removeWorktree(
+  worker: WorkerGit,
+  checkoutDir: string,
+): Promise<void> {
+  await runGit(["worktree", "remove", "--force", checkoutDir], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+  await runGit(["worktree", "prune"], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+  });
+}
+
+/** WORKER side: initialize a bare cache repo at `repoDir` (idempotent). */
+export async function initBareRepo(
+  repoDir: string,
+  timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+): Promise<void> {
+  const result = await runGit(["init", "--quiet", "--bare", repoDir], {
+    timeoutMs,
+  });
+  if (!ok(result)) {
+    throw new GitError(
+      `could not init bare repo at ${repoDir}: ${describeGitFailure(result)}`,
+    );
+  }
+}
