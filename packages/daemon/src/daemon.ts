@@ -114,12 +114,29 @@ interface DaemonRuntime {
  * bucket — so a caller (and eventually the CLI/user) can tell "the peer
  * never accepted" apart from "the peer accepted but our local bookkeeping
  * failed", which calls for retrying THIS side, not a fresh pairing attempt.
- * Only `hfpClient.pair` and `trustStore.add` are used, narrowed via `Pick`
- * so tests can pass minimal fakes instead of real client/store instances.
+ *
+ * After trust is established, this ALSO seeds `knownNodes` with the peer's
+ * HFP endpoint (the `input.host:input.port` this function just dialed) —
+ * `NodeDirectory`'s endpoint source falls back to `knownNodes.list()` (see
+ * `endpointSourceFromDiscovery`), so without this a freshly CLI-paired peer
+ * reports `reachable: false` until live mDNS/UDP discovery independently
+ * finds it, which is a known-flaky/blockable path (Windows firewalls in
+ * particular). This is purely an accelerator, not the source of truth —
+ * trust already came from `trustStore.add` above — so a `knownNodes.record`
+ * failure must not fail the pairing; see the try/catch around it below.
+ * (The inbound/responder side, `PairingManager.handlePairRequest`, cannot be
+ * seeded the same way: it only ever observes the peer's ephemeral outbound
+ * TCP source port, never the peer's HFP *listening* port, so this fix is
+ * necessarily outbound-only.)
+ *
+ * Only `hfpClient.pair`, `trustStore.add`, and `knownNodes.record` are used,
+ * narrowed via `Pick` so tests can pass minimal fakes instead of real
+ * client/store/registry instances.
  */
 export async function pairWithPeer(options: {
   hfpClient: Pick<HfpClient, "pair">;
   trustStore: Pick<TrustStore, "add">;
+  knownNodes: Pick<KnownNodesRegistry, "record">;
   nodeInfoProvider: () => NodeInfo;
   input: {
     host: string;
@@ -128,7 +145,8 @@ export async function pairWithPeer(options: {
     expectedDeviceId?: string;
   };
 }): Promise<PairConnectSummary> {
-  const { hfpClient, trustStore, nodeInfoProvider, input } = options;
+  const { hfpClient, trustStore, knownNodes, nodeInfoProvider, input } =
+    options;
   const target: PairTarget = {
     host: input.host,
     port: input.port,
@@ -165,6 +183,23 @@ export async function pairWithPeer(options: {
       ),
       { status: 500 },
     );
+  }
+  try {
+    // Best-effort accelerator, not the source of truth: trust is already
+    // established by `trustStore.add` above, so a registry-persist failure
+    // here must NOT fail the pairing — the peer simply falls back to live
+    // discovery to become reachable, same as any other statically-unknown
+    // peer. See this function's doc comment for the full rationale.
+    await knownNodes.record({
+      deviceId: serverDeviceId,
+      name: response.nodeInfo.name,
+      host: input.host,
+      port: input.port,
+      lastSeenAt: new Date().toISOString(),
+      source: "static",
+    });
+  } catch {
+    // Swallowed deliberately — see the comment above.
   }
   return {
     accepted: true,
@@ -373,7 +408,13 @@ export class Daemon {
     const controlSurface: ControlSurface = {
       beginPairing: () => pairingManager.beginPairing(),
       pairWith: (input) =>
-        pairWithPeer({ hfpClient, trustStore, nodeInfoProvider, input }),
+        pairWithPeer({
+          hfpClient,
+          trustStore,
+          knownNodes,
+          nodeInfoProvider,
+          input,
+        }),
       status: (): ControlStatus => {
         const info = nodeInfoProvider();
         return {
