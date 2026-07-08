@@ -369,6 +369,35 @@ test("a pinned checkout is not evicted while its handle is held, and is after re
   h2.release();
 }, 45_000);
 
+test("the store's release handle is idempotent: a double-release neither throws nor sticks the pin", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 1,
+  });
+  // A full bundle of c2 contains c1 and c2.
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  // Resolve c1 with the store's OWN release closure, then call it TWICE. The
+  // `released` guard must make the second call a no-op and the `unpin` floor
+  // must keep the refcount at 0 (never negative) — so c1 ends up genuinely
+  // unpinned, not stuck pinned by a double-decrement gone wrong.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+  h1.release();
+
+  // Cap is 1: resolving a DIFFERENT commit runs an eviction pass. c1 must now
+  // be evicted — proving the double-release left it unpinned. Had it thrown or
+  // driven the refcount negative/stuck-pinned, c1 would have survived.
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
+  expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
+
+  h2.release();
+}, 45_000);
+
 test("checkout cap survives across store instances (init re-registers on-disk checkouts)", async () => {
   const src = await makeSrc();
   const c1 = await src.commit("c1");

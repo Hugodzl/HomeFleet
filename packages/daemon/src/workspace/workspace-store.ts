@@ -355,9 +355,18 @@ export class WorkspaceStore {
       this.pin(key);
       return checkoutDir;
     });
-    // Evict AFTER releasing this repo's lock, and take only the victim's lock,
-    // so eviction never holds two repo locks at once (no deadlock).
-    await this.evictToCapacity();
+    // The pin was committed under the repo lock; the `return` below is its
+    // commit point — the caller only learns the handle (and thus how to
+    // `release` the pin) once we return. Any throw before that return must
+    // unpin, or this checkout leaks a pin and becomes permanently unevictable.
+    try {
+      // Evict AFTER releasing this repo's lock, and take only the victim's
+      // lock, so eviction never holds two repo locks at once (no deadlock).
+      await this.evictToCapacity();
+    } catch (error) {
+      this.unpin(key);
+      throw error;
+    }
     let released = false;
     const release = (): void => {
       if (released) {
