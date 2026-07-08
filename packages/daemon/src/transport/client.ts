@@ -12,8 +12,10 @@
  */
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import {
@@ -45,6 +47,11 @@ import {
 import type { z } from "zod";
 import { certFingerprint } from "../identity/fingerprint.js";
 import type { Identity } from "../identity/identity.js";
+import {
+  createBundle,
+  isAncestor,
+  resolveHeadCommit,
+} from "../workspace/git.js";
 import { MAX_BODY_BYTES } from "./limits.js";
 
 /**
@@ -426,6 +433,51 @@ export class HfpClient {
       throw error;
     } finally {
       socket.destroy();
+    }
+  }
+
+  /**
+   * Delegating-side workspace sync (M7): make the worker's cache hold this
+   * repo's current committed head, then return that head for a `WorkspaceRef`.
+   *
+   * Reads the local repo's HEAD, asks the worker what it already has
+   * ({@link haveTip}), and ships the difference as a git bundle: nothing when
+   * the worker is already at HEAD; an incremental `have..HEAD` bundle when the
+   * worker's commit is an ancestor of HEAD; otherwise a full bundle. The temp
+   * bundle is always cleaned up. Committed state only (ADR-0005): a bundle
+   * carries commits, never the working tree.
+   *
+   * `repoPath` is the delegator's OWN repository (trusted). Errors surface
+   * typed: a non-allowlisted repo makes {@link haveTip} throw
+   * {@link HfpRequestError}; git failures throw {@link GitError}.
+   */
+  async syncWorkspace(
+    target: HfpTarget,
+    repo: { repoPath: string; repoId: string },
+  ): Promise<{ headCommit: string }> {
+    const headCommit = await resolveHeadCommit(repo.repoPath);
+    const have = await this.haveTip(target, repo.repoId);
+    if (have === headCommit) {
+      // The worker is already at this commit; nothing to transfer.
+      return { headCommit };
+    }
+    const incremental =
+      have !== null && (await isAncestor(repo.repoPath, have, headCommit));
+    const tempDir = await mkdtemp(
+      path.join(os.tmpdir(), "homefleet-bundle-out-"),
+    );
+    const bundlePath = path.join(tempDir, "sync.bundle");
+    try {
+      await createBundle({
+        repoPath: repo.repoPath,
+        bundlePath,
+        headCommit,
+        ...(incremental && have !== null ? { have } : {}),
+      });
+      await this.uploadBundle(target, repo.repoId, headCommit, bundlePath);
+      return { headCommit };
+    } finally {
+      await rm(tempDir, { recursive: true, force: true, maxRetries: 3 });
     }
   }
 
