@@ -72,15 +72,15 @@ function quoteForPowerShellSingle(value: string, label: string): string {
 }
 
 /**
- * Quotes `value` as a double-quoted token (used for `schtasks` arguments,
- * which follow traditional Windows command-line quoting rather than
- * PowerShell's). Rather than implement `"`-escaping (fiddly and easy to get
+ * Validates that `value` is safe to embed in a `"`-delimited native
+ * (`schtasks`/cmd-style) token: no control characters, non-empty, and no
+ * embedded `"`. Rather than implement `"`-escaping (fiddly and easy to get
  * subtly wrong for an infrequently-exercised code path), this REJECTS any
  * embedded `"` outright — Windows filesystem paths and task names can never
  * legitimately contain one (NTFS disallows `"` in file/directory names), so
  * rejecting is both safe and never a real-world false positive.
  */
-function quoteForDoubleQuoted(value: string, label: string): string {
+function assertSafeForNativeQuoting(value: string, label: string): void {
   assertNoControlChars(value, label);
   if (value.length === 0) {
     throw new Error(`${label} must not be empty`);
@@ -88,7 +88,42 @@ function quoteForDoubleQuoted(value: string, label: string): string {
   if (value.includes('"')) {
     throw new Error(`${label} must not contain a double-quote character`);
   }
+}
+
+/**
+ * Quotes `value` as a plain double-quoted token (used for `schtasks`
+ * arguments that are embedded standalone, e.g. `/TN`). This is safe ONLY
+ * when the resulting `"..."` token is itself wrapped in an outer PowerShell
+ * single-quoted literal before being embedded in a generated command (see
+ * `quoteTaskNameForSchtasks`) — a bare `"${value}"` interpolated directly
+ * into a double-quoted-context command string is live PowerShell syntax
+ * (subject to `$variable`/`$(...)` expansion), not an inert literal.
+ */
+function quoteForDoubleQuoted(value: string, label: string): string {
+  assertSafeForNativeQuoting(value, label);
   return `"${value}"`;
+}
+
+/**
+ * Quotes a Task Scheduler `taskName` for safe embedding as a `/TN` argument.
+ * Produces a plain double-quoted token (`"name"`) wrapped in an outer
+ * PowerShell single-quoted literal (`'"name"'`). The outer single-quote
+ * wrap is essential, not decorative: PowerShell performs `$variable` and
+ * `$(...)` subexpression expansion inside double-quoted string literals, so
+ * a bare `"${taskName}"` token containing e.g. `$(Get-Date)` would be
+ * evaluated by PowerShell before `schtasks` ever runs — arbitrary-code
+ * execution the instant the generated line is pasted into PowerShell.
+ * Wrapping in an outer single-quoted literal (which is never expanded)
+ * neutralizes that while still delivering exactly one correct token —
+ * including embedded spaces or apostrophes — to the native `schtasks.exe`
+ * process. (Verified empirically against a real Windows PowerShell +
+ * native child process.)
+ */
+function quoteTaskNameForSchtasks(taskName: string): string {
+  return quoteForPowerShellSingle(
+    quoteForDoubleQuoted(taskName, "taskName"),
+    "taskName",
+  );
 }
 
 /**
@@ -128,6 +163,9 @@ export function firewallRuleName(
   ruleNamePrefix: string = DEFAULT_RULE_NAME_PREFIX,
 ): string {
   assertNoControlChars(ruleNamePrefix, "ruleNamePrefix");
+  if (ruleNamePrefix.length === 0) {
+    throw new Error("ruleNamePrefix must not be empty");
+  }
   switch (kind) {
     case "hfp-tcp":
       return `${ruleNamePrefix} HFP (TCP)`;
@@ -258,24 +296,37 @@ export interface AutostartCreateOptions {
  * the daemon does not need, and should not run with, elevated rights.
  *
  * `schtasks` follows traditional Windows command-line quoting, not
- * PowerShell's, so the executable + entry path pair is double-quoted the
- * `schtasks`/cmd way and that whole value is then wrapped in a PowerShell
- * single-quoted string for `/TR` — this is the standard pattern for passing
- * a quote-containing literal through PowerShell to a native executable
- * unchanged, and is what lets both paths safely contain spaces.
+ * PowerShell's, so the executable + entry path pair needs `"..."` quoting
+ * around each path for `schtasks` to treat them as two distinct, correctly
+ * delimited tokens once it re-parses `/TR`'s value. That `"..." "..."` text
+ * is then embedded inside an outer PowerShell single-quoted literal so
+ * PowerShell treats the whole thing as one inert argument rather than
+ * expanding anything in it — but the inner `"` delimiters must be
+ * backslash-escaped (`\"..\" \"..\"`) rather than left bare. A bare
+ * `"..." "..."` value, once re-quoted by PowerShell for the native process
+ * it's launching, does NOT survive as a single argument whenever either
+ * path contains a space (e.g. the common `C:\Program Files\nodejs\node.exe`
+ * default install path): PowerShell's own re-quoting logic sees a value
+ * that already starts and ends with a literal `"` and passes it through
+ * unchanged, so the native process's own argv parser sees it as several
+ * independently-quoted, space-fragmented tokens instead of one `/TR` value
+ * — silently registering a broken scheduled task. Backslash-escaping the
+ * inner quotes avoids that ambiguity and was verified empirically (real
+ * Windows PowerShell + a native child process) to deliver exactly one
+ * correct token, quotes and spaces intact, for both paths.
  */
 export function generateAutostartCreateCommand({
   nodeExecPath,
   daemonEntryPath,
   taskName = DEFAULT_AUTOSTART_TASK_NAME,
 }: AutostartCreateOptions): string {
-  const quotedNode = quoteForDoubleQuoted(nodeExecPath, "nodeExecPath");
-  const quotedEntry = quoteForDoubleQuoted(daemonEntryPath, "daemonEntryPath");
+  assertSafeForNativeQuoting(nodeExecPath, "nodeExecPath");
+  assertSafeForNativeQuoting(daemonEntryPath, "daemonEntryPath");
   const trValue = quoteForPowerShellSingle(
-    `${quotedNode} ${quotedEntry}`,
+    `\\"${nodeExecPath}\\" \\"${daemonEntryPath}\\"`,
     "the node/daemon command line",
   );
-  const quotedTaskName = quoteForDoubleQuoted(taskName, "taskName");
+  const quotedTaskName = quoteTaskNameForSchtasks(taskName);
   return `schtasks /Create /TN ${quotedTaskName} /TR ${trValue} /SC ONLOGON /RL LIMITED /F`;
 }
 
@@ -291,6 +342,6 @@ export interface AutostartRemoveOptions {
 export function generateAutostartRemoveCommand({
   taskName = DEFAULT_AUTOSTART_TASK_NAME,
 }: AutostartRemoveOptions = {}): string {
-  const quotedTaskName = quoteForDoubleQuoted(taskName, "taskName");
+  const quotedTaskName = quoteTaskNameForSchtasks(taskName);
   return `schtasks /Delete /TN ${quotedTaskName} /F`;
 }
