@@ -40,8 +40,11 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 /**
- * Raw config input for a test daemon: loopback HFP + MCP on ephemeral ports,
- * live discovery channels OFF (no real mDNS/UDP in tests — Windows CI and
+ * Raw config input for a test daemon: loopback HFP + MCP + control on
+ * ephemeral ports (two daemons run side by side in this suite; the config
+ * schema's default control port is a single fixed value, so leaving it
+ * unset would collide the moment a second daemon tried to bind it), live
+ * discovery channels OFF (no real mDNS/UDP in tests — Windows CI and
  * parallel suites would cross-talk), everything else from `overrides`.
  */
 function testConfig(name: string, overrides: Record<string, unknown> = {}) {
@@ -49,6 +52,7 @@ function testConfig(name: string, overrides: Record<string, unknown> = {}) {
     node: { name },
     hfp: { host: HOST, port: 0 },
     mcp: { host: HOST, port: 0 },
+    control: { host: HOST, port: 0 },
     discovery: { mdnsEnabled: false, udpEnabled: false },
     ...overrides,
   });

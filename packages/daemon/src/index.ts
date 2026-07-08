@@ -46,6 +46,20 @@ export {
   WorkspaceConfigSchema,
 } from "./config/config.js";
 export { resolveDataDir } from "./config/paths.js";
+export {
+  CONTROL_HEADER,
+  type ControlServerOptions,
+  type ControlStatus,
+  type ControlSurface,
+  MAX_CONTROL_REQUEST_BYTES,
+  type PairConnectSummary,
+  type RunningControlServer,
+  startControlServer,
+} from "./control/control-server.js";
+export {
+  type PairConnectRequest,
+  PairConnectRequestSchema,
+} from "./control/messages.js";
 export { DAEMON_VERSION, Daemon, type DaemonOptions } from "./daemon.js";
 export {
   DiscoveryAggregator,

@@ -33,6 +33,7 @@ async function main(): Promise<void> {
     `homefleetd started: "${info.name}" (${daemon.deviceId.slice(0, 12)}…) ` +
       `hfp ${config.hfp.host}:${daemon.hfpPort} ` +
       `mcp http://${config.mcp.host}:${daemon.mcpPort}/mcp ` +
+      `control http://${config.control.host}:${daemon.controlPort} ` +
       `data ${dataDir}\n`,
   );
 

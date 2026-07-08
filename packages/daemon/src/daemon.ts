@@ -13,6 +13,12 @@ import {
 } from "@homefleet/executors";
 import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
+import {
+  type ControlStatus,
+  type ControlSurface,
+  type PairConnectSummary,
+  startControlServer,
+} from "./control/control-server.js";
 import { DiscoveryAggregator } from "./discovery/aggregator.js";
 import { KnownNodesRegistry } from "./discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "./identity/identity.js";
@@ -28,7 +34,7 @@ import { createRepoResolver } from "./mcp/repo-resolver.js";
 import { createMcpServer } from "./mcp/server.js";
 import { createNodeInfoProvider } from "./node/node-info.js";
 import { PairingManager } from "./pairing/pairing.js";
-import { HfpClient } from "./transport/client.js";
+import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
 import { DAEMON_VERSION } from "./version.js";
@@ -75,6 +81,70 @@ interface DaemonRuntime {
   workspaceStore: WorkspaceStore;
   hfpPort: number;
   mcpPort: number;
+  controlPort: number;
+}
+
+/**
+ * The control API's outbound pairing attempt (`POST /control/pair/connect`):
+ * performs the HFP pair handshake against `input.host:input.port` and, only
+ * on acceptance, adds the peer to the LIVE trust store — the same trust
+ * store `nodeServer` consults on every incoming request, so a paired-from-
+ * the-CLI device is immediately usable, not just persisted to disk.
+ *
+ * Trusts the TLS-OBSERVED `serverDeviceId`, never the peer's claimed
+ * `nodeInfo.deviceId` — `HfpClient.pair` already throws
+ * `FingerprintMismatchError` if an accepted response's claimed identity
+ * disagrees with the certificate presented, so by the time we get here the
+ * two are guaranteed equal; this mirrors `PairingManager.handlePairRequest`,
+ * which trusts the responder-side TLS-observed peer identity the same way.
+ *
+ * A rejected pairing (wrong/expired code) resolves `{accepted: false}` — it
+ * is NOT an error. A thrown error (unreachable peer, TLS/timeout failure)
+ * propagates to the caller, which turns it into a clean 4xx/5xx HTTP
+ * response (see control-server.ts); it must never reach here as a stack
+ * trace.
+ */
+async function pairWithPeer(options: {
+  hfpClient: HfpClient;
+  trustStore: TrustStore;
+  nodeInfoProvider: () => NodeInfo;
+  input: {
+    host: string;
+    port: number;
+    code: string;
+    expectedDeviceId?: string;
+  };
+}): Promise<PairConnectSummary> {
+  const { hfpClient, trustStore, nodeInfoProvider, input } = options;
+  const target: PairTarget = {
+    host: input.host,
+    port: input.port,
+    ...(input.expectedDeviceId !== undefined
+      ? { expectedDeviceId: input.expectedDeviceId }
+      : {}),
+  };
+  const { response, serverDeviceId } = await hfpClient.pair(
+    target,
+    input.code,
+    nodeInfoProvider(),
+  );
+  // Schema invariant: `response.nodeInfo` is defined whenever `accepted` is
+  // true (see `PairResponseSchema`'s superRefine). Treating the impossible
+  // "accepted but no nodeInfo" case as a plain rejection, rather than
+  // asserting, keeps this fail-closed even if that invariant is ever broken.
+  if (!response.accepted || response.nodeInfo === undefined) {
+    return { accepted: false };
+  }
+  await trustStore.add({
+    deviceId: serverDeviceId,
+    name: response.nodeInfo.name,
+    addedAt: new Date().toISOString(),
+  });
+  return {
+    accepted: true,
+    deviceId: serverDeviceId,
+    name: response.nodeInfo.name,
+  };
 }
 
 /** Builds the executor list from config. Nothing configured = run no jobs. */
@@ -232,10 +302,10 @@ export class Daemon {
     await aggregator.start();
     this.teardown.push(() => aggregator.stop());
 
-    // The MCP front (delegating side) comes up LAST: it must never accept a
-    // delegation against a half-assembled daemon. Collaborators are shared
-    // across the per-request MCP servers (the delegation registry is the
-    // cross-request state; the servers themselves are stateless).
+    // The MCP front (delegating side) comes up second-to-last: it must never
+    // accept a delegation against a half-assembled daemon. Collaborators are
+    // shared across the per-request MCP servers (the delegation registry is
+    // the cross-request state; the servers themselves are stateless).
     const hfpClient = new HfpClient(identity);
     const nodeDirectory = new NodeDirectory({
       trustStore,
@@ -261,6 +331,51 @@ export class Daemon {
     });
     this.teardown.push(() => mcpFront.close());
 
+    // The control API (M9 Unit 7) comes up LAST, after both LAN-facing
+    // (`nodeServer`) and delegating (`mcpFront`) fronts are live: pairing
+    // and status/nodes reads it serves must reflect a FULLY-assembled
+    // daemon. It tears down FIRST (LIFO), alongside the MCP front — both
+    // local fronts stop accepting new admin/agent traffic before discovery,
+    // the LAN server, and job/workspace teardown run.
+    //
+    // `controlPort` starts at 0 and is set synchronously right after
+    // `startControlServer` resolves, below — before the event loop can hand
+    // control back to any in-flight request — so `status()` (read via this
+    // closure) never observes a stale 0 once the server can actually be
+    // reached.
+    let controlPort = 0;
+    const controlSurface: ControlSurface = {
+      beginPairing: () => pairingManager.beginPairing(),
+      pairWith: (input) =>
+        pairWithPeer({ hfpClient, trustStore, nodeInfoProvider, input }),
+      status: (): ControlStatus => {
+        const info = nodeInfoProvider();
+        return {
+          deviceId: info.deviceId,
+          name: info.name,
+          platform: info.platform,
+          daemonVersion: info.daemonVersion,
+          protocolVersion: info.protocolVersion,
+          hfpPort,
+          mcpPort: mcpFront.port,
+          controlPort,
+          roles: info.roles,
+          executors: info.executors,
+          models: info.models,
+          activeJobs: info.activeJobs,
+          maxConcurrentJobs: info.maxConcurrentJobs,
+        };
+      },
+      listNodes: () => nodeDirectory.list(),
+    };
+    const controlServer = await startControlServer({
+      surface: controlSurface,
+      host: config.control.host,
+      port: config.control.port,
+    });
+    controlPort = controlServer.port;
+    this.teardown.push(() => controlServer.close());
+
     this.runtime = {
       deviceId: identity.deviceId,
       trustStore,
@@ -271,14 +386,16 @@ export class Daemon {
       workspaceStore,
       hfpPort,
       mcpPort: mcpFront.port,
+      controlPort,
     };
   }
 
   /**
-   * Idempotent, ORDERED teardown (the reverse of start order): close the MCP
-   * front first (no new delegations), then discovery (stop announcing), then
-   * the LAN server (no new peer requests), then drain/abort jobs, then cancel
-   * in-flight git in the workspace store.
+   * Idempotent, ORDERED teardown (the reverse of start order): close the
+   * control API and the MCP front first (no new admin/agent traffic), then
+   * discovery (stop announcing), then the LAN server (no new peer
+   * requests), then drain/abort jobs, then cancel in-flight git in the
+   * workspace store.
    */
   async stop(): Promise<void> {
     if (this.state === "stopped") {
@@ -322,6 +439,11 @@ export class Daemon {
   /** The actually-bound MCP front (loopback) port. */
   get mcpPort(): number {
     return this.started.mcpPort;
+  }
+
+  /** The actually-bound control API (loopback) port. */
+  get controlPort(): number {
+    return this.started.controlPort;
   }
 
   /** Exposed for pairing flows (begin/complete a pairing on this node). */
