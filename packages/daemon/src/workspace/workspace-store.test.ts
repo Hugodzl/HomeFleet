@@ -498,6 +498,80 @@ test("periodic gc reclaims superseded objects so the bare cache stays bounded", 
   expect(await commitPresent(worker, a.head)).toBe(false);
 }, 45_000);
 
+test("stop() fails closed: haveTip / applyBundle / resolve reject as stopped", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  // Sync once so the repo exists on disk; stop() must still fail closed after.
+  await store.applyBundle("repo-a", await fullBundle(src, head), head);
+
+  await store.stop();
+
+  const expected = { code: "GIT_FAILED", message: /stopped/i };
+  await expect(store.haveTip("repo-a")).rejects.toMatchObject(expected);
+  await expect(
+    store.applyBundle("repo-a", await fullBundle(src, head), head),
+  ).rejects.toMatchObject(expected);
+  await expect(
+    store.resolve({ repoId: "repo-a", headCommit: head }),
+  ).rejects.toMatchObject(expected);
+  // The rejection is the typed workspace error, not a raw throw.
+  await expect(store.haveTip("repo-a")).rejects.toBeInstanceOf(WorkspaceError);
+}, 30_000);
+
+test("stop() is idempotent: calling it twice neither throws nor hangs", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.stop();
+  await expect(store.stop()).resolves.toBeUndefined();
+}, 30_000);
+
+test("stop() aborts the controller and that signal is threaded into worker git", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  // The WorkerGit the store builds carries the store's abort signal, so every
+  // worker-side helper (which passes `worker.signal`) is cancellable by stop().
+  const internals = store as unknown as {
+    abort: AbortController;
+    worker(hash: string): WorkerGit;
+  };
+  const hash = repoHash("repo-a");
+  expect(internals.abort.signal.aborted).toBe(false);
+  expect(internals.worker(hash).signal).toBe(internals.abort.signal);
+
+  await store.stop();
+  expect(internals.abort.signal.aborted).toBe(true);
+  // Still the same signal, now aborted — an in-flight op observing it is killed.
+  expect(internals.worker(hash).signal?.aborted).toBe(true);
+}, 30_000);
+
+test("stop() cancels an in-flight worker git op so it settles well before the git timeout", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  // A large git timeout: were the signal NOT wired, a wedged in-flight op would
+  // block up to this long. With cancellation the op settles in a fraction of it.
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    gitTimeoutMs: 60_000,
+  });
+  // Sync once so the bare repo already exists: the in-flight op we cancel below
+  // is then a worker-git call (verify/fetch), which surfaces as a WorkspaceError
+  // rather than the init path.
+  await store.applyBundle("repo-a", await fullBundle(src, head), head);
+
+  // Kick off another sync (which runs several worker-side git ops), then abort
+  // it via stop() in the same tick — the stopped-guard was already passed, so
+  // the op runs and is cancelled mid-flight. It must settle promptly rather than
+  // wait out the 60s gitTimeoutMs.
+  const started = Date.now();
+  const applying = store.applyBundle(
+    "repo-a",
+    await fullBundle(src, head),
+    head,
+  );
+  await store.stop();
+  await expect(applying).rejects.toBeInstanceOf(WorkspaceError);
+  expect(Date.now() - started).toBeLessThan(15_000);
+}, 30_000);
+
 test("an in-use checkout survives a gc triggered by a later sync", async () => {
   const store = await makeStore({
     allowedRepoIds: ["repo-a"],

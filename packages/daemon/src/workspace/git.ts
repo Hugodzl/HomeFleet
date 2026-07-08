@@ -369,6 +369,14 @@ export interface WorkerGit {
   /** An existing, empty directory used as `core.hooksPath` (no hooks). */
   hooksPath: string;
   timeoutMs: number;
+  /**
+   * Cancellation for every call built from this context. The store owns one
+   * {@link AbortController} and threads its signal here so a daemon shutdown can
+   * cancel an in-flight worker-side git op (fetch/checkout/gc) immediately —
+   * aborting takes the same kill path as the timeout, so git returns in ms
+   * rather than running to `timeoutMs`. Optional; absent = no cancellation.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -404,6 +412,7 @@ export async function verifyBundle(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   return ok(result);
 }
@@ -424,6 +433,7 @@ export async function listBundleHeads(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   const heads = new Map<string, string>();
   if (!ok(result)) {
@@ -452,6 +462,7 @@ export async function gc(worker: WorkerGit): Promise<GitCommandResult> {
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
 }
 
@@ -473,6 +484,7 @@ export async function countObjects(worker: WorkerGit): Promise<ObjectCounts> {
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   const fields = new Map<string, number>();
   if (ok(result)) {
@@ -505,6 +517,7 @@ export async function fetchBundleHead(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
 }
 
@@ -520,6 +533,7 @@ export async function revParse(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   if (!ok(result)) {
     return null;
@@ -540,6 +554,7 @@ export async function commitPresent(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   return ok(result);
 }
@@ -554,6 +569,7 @@ export async function updateRef(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
 }
 
@@ -563,6 +579,7 @@ export async function deleteRef(worker: WorkerGit, ref: string): Promise<void> {
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
 }
 
@@ -583,6 +600,7 @@ export async function addWorktree(
       cwd: worker.repoDir,
       timeoutMs: worker.timeoutMs,
       config: workerConfig(worker),
+      signal: worker.signal,
     },
   );
 }
@@ -600,21 +618,29 @@ export async function removeWorktree(
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
   await runGit(["worktree", "prune"], {
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
+    signal: worker.signal,
   });
 }
 
-/** WORKER side: initialize a bare cache repo at `repoDir` (idempotent). */
+/**
+ * WORKER side: initialize a bare cache repo at `repoDir` (idempotent). Takes an
+ * optional `signal` (rather than a full {@link WorkerGit}, since there is no
+ * repo yet) so a shutdown can cancel even this first op.
+ */
 export async function initBareRepo(
   repoDir: string,
   timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<void> {
   const result = await runGit(["init", "--quiet", "--bare", repoDir], {
     timeoutMs,
+    signal,
   });
   if (!ok(result)) {
     throw new GitError(

@@ -150,6 +150,16 @@ export class WorkspaceStore {
   private useTick = 0;
   private initialized = false;
 
+  /**
+   * Cancels in-flight worker-side git. Its signal is threaded into every
+   * {@link WorkerGit} this store builds (and into {@link initBareRepo}), so
+   * {@link stop} can abort a running fetch/checkout/gc immediately rather than
+   * letting it run to `gitTimeoutMs`.
+   */
+  private readonly abort = new AbortController();
+  /** Set by {@link stop}; makes the public entry points fail closed. */
+  private stopped = false;
+
   constructor(options: WorkspaceStoreOptions) {
     this.cacheDir = path.resolve(options.cacheDir);
     this.allowed = new Set(options.allowedRepoIds);
@@ -192,6 +202,7 @@ export class WorkspaceStore {
    * error so the delegator learns the repo is not accepted).
    */
   async haveTip(repoId: string): Promise<string | null> {
+    this.requireNotStopped();
     this.requireAllowed(repoId);
     const hash = repoHash(repoId);
     return this.withRepoLock(hash, async () => {
@@ -217,6 +228,7 @@ export class WorkspaceStore {
     bundlePath: string,
     headCommit: string,
   ): Promise<void> {
+    this.requireNotStopped();
     this.requireAllowed(repoId);
     if (!COMMIT_HASH_RE.test(headCommit)) {
       throw new WorkspaceError(
@@ -314,6 +326,7 @@ export class WorkspaceStore {
   async resolve(
     ref: WorkspaceRef,
   ): Promise<{ dir: string; release: () => void }> {
+    this.requireNotStopped();
     this.requireAllowed(ref.repoId);
     const hash = repoHash(ref.repoId);
     const { headCommit } = ref;
@@ -378,6 +391,33 @@ export class WorkspaceStore {
     return { dir, release };
   }
 
+  /**
+   * Stops the store for daemon shutdown. Idempotent. Guarantees:
+   * - Any git op already in flight is cancelled: {@link abort} fires, which the
+   *   threaded signal turns into the same kill path as a timeout, so a running
+   *   fetch/checkout/gc returns in milliseconds instead of at `gitTimeoutMs`.
+   *   On Windows this releases a live `git worktree` lock promptly, so teardown
+   *   `rm` does not fail with EBUSY.
+   * - New work fails closed: after stop, `applyBundle`, `resolve`, and
+   *   `haveTip` reject before touching disk.
+   *
+   * Best-effort waits out the current per-repo lock chains so a just-cancelled
+   * op has unwound before we return; this is a courtesy, not a correctness
+   * requirement (the abort already makes those settle fast). Rejections in the
+   * chain are swallowed — a cancelled op rejecting is the expected outcome.
+   */
+  async stop(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
+    this.abort.abort();
+    // Await whatever is currently chained per repo so in-flight (now-aborted)
+    // ops have unwound. Snapshot first: the map is mutated as chains resolve.
+    const pending = [...this.locks.values()];
+    await Promise.allSettled(pending);
+  }
+
   /** A resolver bound to this store, for injection into the JobManager. */
   createResolver(): WorkspaceResolver {
     // owner is intentionally ignored: the worker cache is not per-owner.
@@ -385,6 +425,21 @@ export class WorkspaceStore {
   }
 
   // --- internals -----------------------------------------------------------
+
+  /**
+   * Fails closed once {@link stop} has run. Reuses the `GIT_FAILED` code (no new
+   * wire mapping) — the route maps it to a clear INTERNAL error; the message
+   * says the store is stopped. Checked at the top of every public entry point,
+   * before any disk access.
+   */
+  private requireNotStopped(): void {
+    if (this.stopped) {
+      throw new WorkspaceError(
+        "GIT_FAILED",
+        "workspace store is stopped (daemon shutting down)",
+      );
+    }
+  }
 
   private requireAllowed(repoId: string): void {
     if (!this.allowed.has(repoId)) {
@@ -417,6 +472,9 @@ export class WorkspaceStore {
       repoDir: this.repoDir(hash),
       hooksPath: this.hooksPath(),
       timeoutMs: this.gitTimeoutMs,
+      // Threads the store's cancellation into every worker-side git call, so a
+      // stop() aborts an in-flight op instead of waiting out gitTimeoutMs.
+      signal: this.abort.signal,
     };
   }
 
@@ -427,7 +485,7 @@ export class WorkspaceStore {
       return;
     }
     await mkdir(this.repoRoot(hash), { recursive: true });
-    await initBareRepo(repoDir, this.gitTimeoutMs);
+    await initBareRepo(repoDir, this.gitTimeoutMs, this.abort.signal);
   }
 
   /**
