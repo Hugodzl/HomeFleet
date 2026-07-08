@@ -309,6 +309,24 @@ export const RepoMappingSchema = z.strictObject({
 });
 export type RepoMapping = z.infer<typeof RepoMappingSchema>;
 
+/**
+ * The delegating-side repo list. Duplicate `repoId`s are REJECTED at load
+ * time (fail closed, like the rest of this file): a repoId maps to exactly one
+ * local path, so a second entry for the same id is an ambiguous, silently
+ * last-wins config the user almost certainly did not intend — surfacing it as
+ * an error is safer than picking one.
+ */
+export const ReposConfigSchema = z
+  .array(RepoMappingSchema)
+  .default([])
+  .refine(
+    (repos) => new Set(repos.map((r) => r.repoId)).size === repos.length,
+    {
+      message:
+        "repos contains duplicate repoId entries; each repoId must be unique",
+    },
+  );
+
 export const DaemonConfigSchema = z.strictObject({
   // prefault: a config file without a `discovery` key gets the sub-object's
   // field-level defaults applied, same as an empty file.
@@ -325,7 +343,7 @@ export const DaemonConfigSchema = z.strictObject({
   /** Models this node advertises in NodeInfo (protocol `ModelInfoSchema`). */
   models: z.array(ModelInfoSchema).default([]),
   jobs: JobsConfigSchema.prefault({}),
-  repos: z.array(RepoMappingSchema).default([]),
+  repos: ReposConfigSchema,
 });
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 

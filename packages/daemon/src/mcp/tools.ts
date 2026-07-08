@@ -267,25 +267,41 @@ function suffix(detail: string): string {
 }
 
 /**
- * A clean, non-leaking message for a failed `syncWorkspace` call. A local
- * {@link GitError} (this daemon's OWN repo could not be read or bundled) gets
- * a distinct, honest message — NOT the generic worker-error phrasing — so the
- * agent can tell "my local repo is broken" apart from "the worker rejected
- * it" (an {@link HfpRequestError}/{@link HfpTimeoutError}/etc., covered by
- * {@link describeHfpFailure}).
+ * A clean, non-leaking message for a failed `syncWorkspace` call, phrased so
+ * the agent can tell WHO failed. Only the enumerated worker/network error
+ * types are blamed on the worker (via {@link describeHfpFailure}); a local
+ * {@link GitError} names the local repo; and EVERYTHING else is treated as a
+ * local fault too — `syncWorkspace`/`uploadBundle` can reject with a RAW,
+ * untyped local error (a `createReadStream` fs error on an AV-locked/EBUSY
+ * bundle, or an ENOSPC/EACCES from the temp-bundle `mkdtemp`/`rm`), none of
+ * which are the worker's doing, so the message must NOT claim it was. Fail
+ * closed on classification: an unrecognized error is local, not remote.
  */
 function describeSyncFailure(
   error: unknown,
   repoPath: string,
   repoId: string,
 ): string {
+  if (
+    error instanceof HfpRequestError ||
+    error instanceof HfpTimeoutError ||
+    error instanceof FingerprintMismatchError ||
+    error instanceof MissingServerCertificateError
+  ) {
+    return describeHfpFailure(error);
+  }
   if (error instanceof GitError) {
     return (
-      `Could not read or bundle the local repo at ${repoPath} for ` +
+      `Could not read or bundle the local repo at "${repoPath}" for ` +
       `"${repoId}": ${error.message}`
     );
   }
-  return describeHfpFailure(error);
+  // Neither a typed worker/network error nor a GitError: a raw LOCAL fault
+  // (fs error streaming the bundle, temp-dir failure). Do NOT blame the worker.
+  return (
+    `Could not sync the local repo at "${repoPath}" for "${repoId}": ` +
+    `${error instanceof Error ? error.message : String(error)}`
+  );
 }
 
 function unknownJob(jobId: string): CallToolResult {

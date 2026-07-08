@@ -300,6 +300,22 @@ test("a repo mapping with an empty path throws", async () => {
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
+test("duplicate repoIds in repos are rejected at load time (fail closed)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      repos: [
+        { repoId: "homefleet", path: "/a" },
+        { repoId: "homefleet", path: "/b" },
+      ],
+    }),
+  );
+  // A repoId maps to exactly one path; a second entry is ambiguous, not
+  // silently last-wins.
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
 test("an unknown (typo'd) key throws instead of silently applying defaults", async () => {
   // Strip mode would drop "maxConcurrentJob" and run on the default limit
   // while the file LOOKS configured; strict parsing surfaces the typo.

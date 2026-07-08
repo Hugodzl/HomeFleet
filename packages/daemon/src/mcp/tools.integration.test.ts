@@ -445,6 +445,41 @@ test("delegate_task to an unknown/unpaired node is a clean error and records not
   expect(delegations.size).toBe(0);
 });
 
+test("delegate_task to a paired-but-undiscovered node errors before syncing (undiscovered check precedes the sync)", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  // Pair so the worker is TRUSTED, but give the directory NO endpoint for it:
+  // resolve() then returns a node with undefined host/port (never discovered).
+  await pairAToB(agent, worker);
+
+  let syncCalled = false;
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async () => {
+      syncCalled = true;
+      return { headCommit: FAKE_SYNCED_HEAD_COMMIT };
+    },
+  };
+  const { client, delegations } = await connectAgent(agent, new Map(), {
+    workspaceSync,
+  });
+
+  const result = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: WORKSPACE,
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toMatch(/not been discovered/i);
+  // The undiscovered guard runs BEFORE the sync: nothing was synced or recorded.
+  expect(syncCalled).toBe(false);
+  expect(delegations.size).toBe(0);
+});
+
 test("job_status / job_result / cancel_job for an unknown jobId are clean errors", async () => {
   const agent = await createDaemon("agent");
   const { client } = await connectAgent(agent, new Map());
@@ -712,6 +747,60 @@ test("delegate_task: a local GitError during sync is a distinct 'local repo' err
   expect(text).toMatch(/Could not read or bundle the local repo/i);
   expect(text).toContain("/nowhere");
   expect(text).toContain("test-repo");
+  expect(delegateCalled).toBe(false);
+  expect(delegations.size).toBe(0);
+});
+
+test("delegate_task: a RAW (non-Git, non-HFP) local error during sync yields a neutral local message, not 'against the worker'", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  const workspaceSync: WorkspaceSyncClient = {
+    syncWorkspace: async () => {
+      // Models a raw fs fault (e.g. createReadStream EBUSY on the bundle, or
+      // an ENOSPC from the temp-dir ops) — NOT a GitError, NOT an HFP error.
+      const error = new Error("EBUSY: resource busy or locked") as Error & {
+        code: string;
+      };
+      error.code = "EBUSY";
+      throw error;
+    },
+  };
+  let delegateCalled = false;
+  const hfpClient: DelegationClient = {
+    delegate: async (target, params) => {
+      delegateCalled = true;
+      return agent.client.delegate(target, params);
+    },
+    jobSnapshot: (target, jobId) => agent.client.jobSnapshot(target, jobId),
+    cancelJob: (target, jobId) => agent.client.cancelJob(target, jobId),
+  };
+  const repoResolver = fakeRepoResolver({ "test-repo": "/local/src" });
+  const { client, delegations } = await connectAgent(agent, endpoints, {
+    workspaceSync,
+    hfpClient,
+    repoResolver,
+  });
+
+  const result = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: WORKSPACE,
+      command: "node",
+      args: ["-e", "0"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  // Neutral local phrasing that does NOT blame the worker.
+  expect(text).toMatch(/Could not sync the local repo/i);
+  expect(text).toContain("/local/src");
+  expect(text).toContain("test-repo");
+  expect(text).toContain("EBUSY");
+  expect(text).not.toMatch(/against the worker/i);
   expect(delegateCalled).toBe(false);
   expect(delegations.size).toBe(0);
 });
