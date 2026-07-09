@@ -2,7 +2,7 @@
 
 **Your coding agent, but your other PCs do the heavy lifting.**
 
-HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — powered entirely by **local models**, entirely on **your LAN**, with no cloud in the loop.
+HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
 > **Status: v0.1 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
@@ -15,6 +15,10 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > release you install from source, Windows-first; npm packages come later.
 > The [Quickstart](#quickstart) below runs today on a single machine;
 > pairing two real machines is the [two-machine demo](#two-machine-demo).
+
+Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
+[ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),
+and day-by-day [devlogs](devlog/).
 
 ## Why
 
@@ -58,6 +62,10 @@ Single machine, dev setup. This is enough to build the daemon, run it, and
 point an MCP client at it — pairing a second real machine is the
 [two-machine demo](#two-machine-demo) below.
 
+You need Node ≥ 20, pnpm 11 (`corepack enable` is the easiest way), and git;
+recon jobs additionally need an OpenAI-compatible model server on the worker
+(Ollama, LM Studio, llama.cpp `llama-server`, ...).
+
 ```bash
 git clone https://github.com/Hugodzl/HomeFleet.git
 cd HomeFleet
@@ -66,7 +74,7 @@ pnpm build        # tsup bundles packages/daemon's three bins to dist/bin/*.js
 ```
 
 `pnpm build` is required — the bins are plain, bare-`node`-runnable ESM files;
-there is no `tsx`/dev-mode path for running them anymore. Invoke them with
+there is no `tsx`/dev-mode path for running them. Invoke them with
 `node`:
 
 ```bash
@@ -86,16 +94,21 @@ itself):
 node packages/daemon/dist/bin/homefleet.js setup
 ```
 
-Run the printed `New-NetFirewallRule` commands (HFP TCP + discovery UDP,
-scoped to the Private network profile) in an elevated PowerShell, and check
-the printed network-profile warning — the rules only take effect on a
-Private-profile adapter.
+Run the printed `New-NetFirewallRule` commands (HFP — the daemon's LAN
+protocol — TCP, plus discovery UDP, scoped to the Private network profile)
+in an elevated PowerShell, and check the printed network-profile warning —
+the rules only take effect on a Private-profile adapter. The rules only
+matter once you pair a second machine; for this single-machine quickstart
+they're safe to defer.
 
-Before starting the daemon, write a `config.json` in its data directory (by
-default `%LOCALAPPDATA%\homefleet` on Windows; override with
-`HOMEFLEET_DATA_DIR`). A fresh install with no config file runs no executors
-and syncs no repos — everything below is opt-in. A worker offering a local
-model plus a command allowlist, for one repo:
+Next, `config.json`, in the daemon's data directory (by default
+`%LOCALAPPDATA%\homefleet` on Windows; override with `HOMEFLEET_DATA_DIR`).
+For this single-machine quickstart you can skip it and start the daemon
+bare — with no config file it runs no executors and syncs no repos;
+everything is opt-in. Write one when the machine takes a role. The two
+examples below are the two roles — worker and delegator — and one machine
+can carry both in the same file. A worker offering a local model plus a
+command allowlist, for one repo:
 
 ```json
 {
@@ -145,7 +158,7 @@ for the exact `.mcp.json` form and the stdio-shim alternative.
 
 ## Two-machine demo
 
-This is the M8 acceptance path: two physical machines, each running
+This is the v0.1 acceptance path: two physical machines, each running
 `homefleetd`, paired, delegating a real job to a real local model. This
 exact path ran for real on the reference rig on 2026-07-09 — timings, token
 rates, and the Windows MAX_PATH lesson it surfaced are in the
@@ -153,12 +166,13 @@ rates, and the Windows MAX_PATH lesson it surfaced are in the
 [Quickstart](#quickstart) above through `pnpm build` **on both machines**
 first, then:
 
-1. On **each** machine, run `homefleet setup`, run the printed firewall
-   commands in an elevated PowerShell, and start `homefleetd`. Give the
-   worker machine a `config.json` with an `agent` and/or `command` executor
-   and a non-empty `workspace.allowedRepoIds`; give the delegating machine a
-   `repos` mapping naming the same repoId (see the Quickstart's examples and
-   the [configuration reference](docs/reference/configuration.md)).
+1. On **each** machine, run `homefleet setup` and run the printed firewall
+   commands in an elevated PowerShell. Then write `config.json`: give the
+   worker machine an `agent` and/or `command` executor and a non-empty
+   `workspace.allowedRepoIds`; give the delegating machine a `repos` mapping
+   naming the same repoId (see the Quickstart's examples and the
+   [configuration reference](docs/reference/configuration.md)). Only then
+   start `homefleetd` — config is read once at startup, not reloaded.
 2. **Pair them.** On machine B (the worker), open a pairing window:
    ```bash
    node packages/daemon/dist/bin/homefleet.js pair begin
