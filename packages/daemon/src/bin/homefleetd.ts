@@ -4,8 +4,10 @@
  * (and validates) the config, assembles the {@link Daemon}, and runs until
  * SIGINT/SIGTERM.
  *
- * All operator output goes to STDERR: stdout stays clean so the bin composes
- * with pipelines and supervisors that capture it.
+ * All operator output goes to STDERR — stdout stays clean so the bin composes
+ * with pipelines and supervisors that capture it — with one exception:
+ * `--version` prints its version line to stdout and exits without starting
+ * the daemon.
  */
 import { fileURLToPath } from "node:url";
 import { loadDaemonConfig } from "../config/config.js";
