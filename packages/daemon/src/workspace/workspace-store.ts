@@ -3,8 +3,8 @@
  *
  * Turns received git bundles into materialized checkouts a job executor can
  * read. On-disk layout (kept deliberately short — Windows MAX_PATH (260)
- * defense-in-depth; everything past the cache root is exactly 37 chars, so
- * checkout file paths rarely approach the limit regardless of git's
+ * defense-in-depth; a checkout dir sits exactly 37 chars past the cache root,
+ * so checkout file paths rarely approach the limit regardless of git's
  * `core.longpaths` mode):
  *
  *   <cacheDir>\<repoKey>\repo.git        bare cache repo
@@ -398,11 +398,37 @@ export class WorkspaceStore {
       if (await isPopulatedCheckout(checkoutDir)) {
         // Verify-on-reuse (invariant 4): the dir name is a truncated commit
         // key, so an existing worktree MUST prove it holds the requested FULL
-        // commit before it is handed out.
+        // commit before it is handed out. `null` is a read FAILURE (aborted or
+        // timed-out git, corrupt gitlink) — NOT evidence of a different
+        // commit — so the two diverge below: a failure must never be reported
+        // as a commit-key collision.
         const actual = await worktreeHead(worker, checkoutDir);
         if (actual !== headCommit) {
           const existing = this.checkouts.get(key);
-          if (existing !== undefined && existing.refcount > 0) {
+          const pinned = existing !== undefined && existing.refcount > 0;
+          if (actual === null) {
+            if (pinned) {
+              // Unreadable but a running job is reading it: never remove.
+              throw new WorkspaceError(
+                "GIT_FAILED",
+                "could not read checkout HEAD to verify reuse of a checkout " +
+                  "pinned by a running job",
+                { repoId: ref.repoId, headCommit },
+              );
+            }
+            if (this.abort.signal.aborted) {
+              // The store is stopping, so the failed read IS (almost surely)
+              // the abort, not a broken checkout. Don't destroy a probably
+              // valid checkout on the way down; fail this resolve instead.
+              throw new WorkspaceError(
+                "GIT_FAILED",
+                "could not read checkout HEAD (store is stopping)",
+                { repoId: ref.repoId, headCommit },
+              );
+            }
+            // Unreadable, unpinned, store live: a broken checkout (e.g.
+            // corrupt gitlink). Fall through to self-heal like a mismatch.
+          } else if (pinned) {
             // PINNED mismatch: a running job is reading this dir. Removing it
             // would be exactly the yank pinning exists to prevent, so fail
             // this resolve instead (correctness over availability).
@@ -413,15 +439,16 @@ export class WorkspaceStore {
               { repoId: ref.repoId, headCommit, checkedOut: actual },
             );
           }
-          // Unpinned mismatch: this is a REGISTERED worktree, so remove it
-          // properly (like eviction does), then fall through to re-add.
+          // Unpinned mismatch/breakage: this is a REGISTERED worktree, so
+          // remove it properly (like eviction does), then fall through to
+          // re-add.
           await removeWorktree(worker, checkoutDir);
-          await rm(checkoutDir, { recursive: true, force: true });
+          await this.removeCheckoutDir(checkoutDir, ref.repoId, headCommit);
         }
       }
       if (!(await isPopulatedCheckout(checkoutDir))) {
         // Remove any stale/partial dir before re-adding the worktree.
-        await rm(checkoutDir, { recursive: true, force: true });
+        await this.removeCheckoutDir(checkoutDir, ref.repoId, headCommit);
         const added = await addWorktree(worker, checkoutDir, headCommit);
         if (!ok(added)) {
           throw new WorkspaceError(
@@ -642,6 +669,27 @@ export class WorkspaceStore {
     }
   }
 
+  /**
+   * Removes a checkout dir on resolve()'s behalf, normalizing raw fs errors
+   * (Windows EPERM/EBUSY on in-use files) to resolve()'s typed contract of
+   * throwing {@link WorkspaceError} on any failure.
+   */
+  private async removeCheckoutDir(
+    dir: string,
+    repoId: string,
+    headCommit: string,
+  ): Promise<void> {
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      throw new WorkspaceError(
+        "GIT_FAILED",
+        `could not remove checkout dir: ${describeError(error)}`,
+        { repoId, headCommit },
+      );
+    }
+  }
+
   /** Evicts least-recently-used checkouts until within the retention cap. */
   private async evictToCapacity(): Promise<void> {
     // Once stopped, run no worktree removal/prune: resolve() calls this in a
@@ -677,11 +725,23 @@ export class WorkspaceStore {
         );
         return;
       }
-      // Drop from the map first so a concurrent resolve does not pick it as a
-      // reuse target while we are removing it.
+      // Drop from the map first so the cap accounting shrinks now and another
+      // eviction pass cannot double-pick this victim. That does NOT stop reuse:
+      // resolve() targets checkouts by what is on DISK (isPopulatedCheckout),
+      // so a resolve for this same checkout that queued on the repo lock ahead
+      // of our removal can still find the dir, verify it, re-mint a map entry,
+      // and PIN it — the locked callback below re-checks for that and backs
+      // off rather than delete a dir a job now holds.
       this.checkouts.delete(victimKey);
       const evicted = victim;
+      let reused = false;
       await this.withRepoLock(evicted.repoKey, async () => {
+        if (this.checkouts.has(victimKey)) {
+          // Re-minted while our removal waited on the lock: a queued-ahead
+          // resolve reused the dir. It is live (and pinned) again; leave it.
+          reused = true;
+          return;
+        }
         try {
           await removeWorktree(this.worker(evicted.repoKey), evicted.dir);
           await rm(evicted.dir, { recursive: true, force: true });
@@ -691,6 +751,10 @@ export class WorkspaceStore {
           );
         }
       });
+      if (reused) {
+        // Re-scan: the survivor is back in the map (pinned, so not a victim).
+        continue;
+      }
       this.log(
         `evicted workspace checkout ${evicted.dir} ` +
           `(retention cap ${this.maxCachedCheckouts} reached)`,

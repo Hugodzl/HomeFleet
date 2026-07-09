@@ -5,7 +5,15 @@
  * malformed / undelivered-commit rejection, per-repo serialization, and the
  * checkout retention cap.
  */
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
@@ -697,6 +705,102 @@ test("a pinned checkout dir holding the wrong commit is never removed: resolve f
     store.resolve({ repoId: "repo-a", headCommit: c1 }),
   ).rejects.toMatchObject({ code: "GIT_FAILED" });
   // The dir was NOT removed: its worktree gitlink is still on disk.
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  h1.release();
+}, 45_000);
+
+test("eviction backs off a victim that a queued-ahead resolve re-pinned", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 1,
+  });
+  // A full bundle of c2 contains c1 and c2.
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  // One unpinned checkout, exactly at the cap.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+
+  // Same tick: resolve(c2) queues on the repo lock first, then resolve(c1).
+  // c2's eviction pass picks the unpinned c1 entry as victim and queues its
+  // removal on the SAME lock — BEHIND the already-queued resolve(c1), which
+  // finds the dir still on disk, verifies it, and PINS it. The removal must
+  // then back off rather than delete a dir a job now holds.
+  const p2 = store.resolve({ repoId: "repo-a", headCommit: c2 });
+  const p1 = store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const [h2, h1again] = await Promise.all([p2, p1]);
+
+  expect(h1again.dir).toBe(h1.dir);
+  expect((await stat(path.join(h1again.dir, ".git"))).isFile()).toBe(true);
+  expect(await readFile(path.join(h1again.dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+  h2.release();
+  h1again.release();
+}, 45_000);
+
+test("an unpinned checkout whose HEAD cannot be read is re-materialized (self-heal)", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+  // Corrupt the worktree gitlink so the checkout's HEAD can no longer be
+  // read. Delete-and-recreate (not overwrite): git marks the gitlink hidden
+  // on Windows, and truncating writes to hidden files fail with EPERM.
+  await chmod(path.join(h1.dir, ".git"), 0o666);
+  await rm(path.join(h1.dir, ".git"), { force: true });
+  await writeFile(path.join(h1.dir, ".git"), "not a gitlink\n");
+
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  expect(h2.dir).toBe(h1.dir);
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: h2.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  expect(await readFile(path.join(h2.dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+  h2.release();
+}, 45_000);
+
+test("a pinned checkout whose HEAD cannot be read fails with a read error, not a collision claim", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  // Hold the handle: the checkout stays PINNED.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  // Corrupt the worktree gitlink so the checkout's HEAD can no longer be
+  // read. Delete-and-recreate (not overwrite): git marks the gitlink hidden
+  // on Windows, and truncating writes to hidden files fail with EPERM.
+  await chmod(path.join(h1.dir, ".git"), 0o666);
+  await rm(path.join(h1.dir, ".git"), { force: true });
+  await writeFile(path.join(h1.dir, ".git"), "not a gitlink\n");
+
+  // A HEAD-read FAILURE is not evidence of a different commit: the error must
+  // say the HEAD could not be read, not allege a commit-key collision.
+  // (Assert on the captured error directly — toMatchObject does not reliably
+  // compare an Error's non-enumerable `message`.)
+  const rejection = await store
+    .resolve({ repoId: "repo-a", headCommit: c1 })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+  expect(rejection).toBeInstanceOf(WorkspaceError);
+  expect((rejection as WorkspaceError).code).toBe("GIT_FAILED");
+  expect((rejection as WorkspaceError).message).toMatch(
+    /could not read checkout HEAD/,
+  );
+  // The pinned dir was not removed.
   expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
   h1.release();
 }, 45_000);
