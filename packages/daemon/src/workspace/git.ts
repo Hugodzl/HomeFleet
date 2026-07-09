@@ -389,12 +389,23 @@ export interface WorkerGit {
  *   never triggers a recursive fetch (another program-execution / SSRF vector).
  * The exec-from-content vector is closed today by the empty hooksPath; the last
  * two flags keep it closed by construction against future changes.
+ * - `core.longpaths=true` — on Windows, `git worktree add` refuses to
+ *   materialize a working tree whose absolute paths exceed MAX_PATH (260 chars)
+ *   unless git is opted into long-path mode. The per-repo checkout cache lives
+ *   under a deep data dir, so real repos (e.g. our own `docs/adr/*.md`) tip past
+ *   260 and the checkout fails with exit 128 "Filename too long". This MUST be
+ *   set here, not left to ambient config: {@link runGit} deliberately points
+ *   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` at a nonexistent path, so the
+ *   operator's `git config --global core.longpaths` (and the OS LongPathsEnabled
+ *   registry key, which git's own path check ignores) never reach the worker.
+ *   Harmless on POSIX, where the limit does not exist. (M8 two-machine rig find.)
  */
 function workerConfig(worker: WorkerGit): string[] {
   return [
     `core.hooksPath=${worker.hooksPath}`,
     "protocol.ext.allow=never",
     "fetch.recurseSubmodules=false",
+    "core.longpaths=true",
   ];
 }
 

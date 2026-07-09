@@ -177,6 +177,63 @@ test("verifyBundle returns false for a garbage (non-bundle) file", async () => {
   expect(await verifyBundle(worker, garbage)).toBe(false);
 });
 
+test("addWorktree checks out a file whose absolute path exceeds Windows MAX_PATH (260)", async () => {
+  // MAX_PATH only bites on Windows; POSIX handles long paths natively, so this
+  // regression is win32-only. The M8 two-machine rig surfaced it: the worker
+  // git checkout fails with exit 128 "Filename too long" on deep repo files
+  // (e.g. docs/adr/*.md) once the checkout-base + relative path crosses 260.
+  // The daemon isolates git from ambient config (runGit points
+  // GIT_CONFIG_GLOBAL/SYSTEM at a nonexistent path), so a user/registry-level
+  // long-path setting can't reach the worker — the flag must come from
+  // workerConfig(). NB: this is the *file-too-long* mode, distinct from the
+  // separate "$GIT_DIR too big" limit that a >260 *checkout dir itself* hits;
+  // core.longpaths fixes this mode, which is the one real repos actually hit.
+  if (process.platform !== "win32") return;
+
+  // Source repo with a deep file. Keep the SOURCE absolute path < 255 so it can
+  // be created/committed without long-path support; the WORKER checkout base is
+  // deeper, tipping the same file past 260 on checkout.
+  const repoPath = await tempDir("homefleet-git-longsrc-");
+  const run = async (args: string[]): Promise<void> => {
+    const r = await runGit(args, { cwd: repoPath, timeoutMs: 30_000 });
+    if (!ok(r)) throw new Error(`setup git ${args.join(" ")}: ${r.stderr}`);
+  };
+  await run(["init", "--quiet"]);
+  await run(["config", "user.email", "t@example.com"]);
+  await run(["config", "user.name", "Test"]);
+  await run(["config", "commit.gpgsign", "false"]);
+  const seg = "d".repeat(40);
+  const rel = path.join("deep", seg, seg, seg, "leaf.txt");
+  const srcAbs = path.join(repoPath, rel);
+  expect(srcAbs.length).toBeLessThan(255); // source creation stays under the limit
+  await mkdir(path.dirname(srcAbs), { recursive: true });
+  await writeFile(srcAbs, "hello from a very long path\n");
+  await run(["add", "-A"]);
+  await run(["commit", "--quiet", "-m", "deep file"]);
+  const head = await resolveHeadCommit(repoPath, 30_000);
+
+  const bundleDir = await tempDir("homefleet-bundle-long-");
+  const bundlePath = path.join(bundleDir, "full.bundle");
+  await createBundle({ repoPath, bundlePath, headCommit: head });
+  const worker = await makeWorker();
+  const fetched = await fetchBundleHead(worker, bundlePath, "refs/hf/incoming");
+  expect(ok(fetched)).toBe(true);
+
+  // Moderate checkout DIR (avoids the separate "$GIT_DIR too big" limit) whose
+  // materialized file path nonetheless exceeds 260.
+  const coRoot = await tempDir("homefleet-co-");
+  const checkoutDir = path.join(coRoot, "e".repeat(70), "wt");
+  expect(checkoutDir.length).toBeLessThan(250);
+  expect(path.join(checkoutDir, rel).length).toBeGreaterThan(260);
+
+  // Without core.longpaths this fails with git exit 128 "Filename too long";
+  // a clean exit means git materialized the >260-char file. (We assert on git's
+  // exit rather than reading the file back, to avoid depending on Node's own
+  // long-path support on machines without the OS LongPathsEnabled key.)
+  const added = await addWorktree(worker, checkoutDir, head);
+  expect(ok(added)).toBe(true);
+});
+
 test("createBundle refuses an empty range (have === head)", async () => {
   const repo = await makeRepo();
   const head = await repo.commit("c1");
