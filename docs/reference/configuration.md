@@ -132,10 +132,10 @@ Cache layout (v0.1): under the cache root, each repo lives at
 `<repoKey>/co/<commitKey>`, where both keys are 16-hex truncations of
 SHA-256 — deliberately short so checkout paths stay well clear of Windows
 MAX_PATH. Pre-0.1 versions used full-hash directory names
-(`<64-hex>/checkouts/<40-hex>`); this version never resolves into those. A
-leftover pre-0.1 directory under the same cache root is left in place, and
-the daemon logs a one-line warning at startup ("legacy workspace cache
-layout ... not used by this version — safe to delete"). Deleting it is safe.
+(`<64-hex>/checkouts/<40-hex>`). A leftover pre-0.1 directory under the same
+cache root is left in place; the daemon just logs a one-line warning at
+startup ("legacy workspace cache layout ... not used by this version — safe
+to delete").
 
 ## `node`
 

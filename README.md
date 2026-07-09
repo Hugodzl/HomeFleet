@@ -94,14 +94,14 @@ itself):
 node packages/daemon/dist/bin/homefleet.js setup
 ```
 
-Run the printed `New-NetFirewallRule` commands (HFP — the daemon's LAN
-protocol — TCP, plus discovery UDP, scoped to the Private network profile)
+Run the printed `New-NetFirewallRule` commands (TCP for HFP — the daemon's
+LAN protocol — plus discovery UDP, scoped to the Private network profile)
 in an elevated PowerShell, and check the printed network-profile warning —
-the rules only take effect on a Private-profile adapter. The rules only
-matter once you pair a second machine; for this single-machine quickstart
-they're safe to defer.
+the rules only take effect on a Private-profile adapter. They only matter
+once you pair a second machine; for this single-machine quickstart they're
+safe to defer.
 
-Next, `config.json`, in the daemon's data directory (by default
+Then `config.json` goes in the daemon's data directory (by default
 `%LOCALAPPDATA%\homefleet` on Windows; override with `HOMEFLEET_DATA_DIR`).
 For this single-machine quickstart you can skip it and start the daemon
 bare — with no config file it runs no executors and syncs no repos;
