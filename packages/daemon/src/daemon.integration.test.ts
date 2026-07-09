@@ -9,7 +9,7 @@
  * agent would use). Real git, mTLS, sockets, executors; no fakes.
  */
 
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
 import path from "node:path";
@@ -248,6 +248,37 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
   await delegator.stop();
   await worker.stop();
 }, 90_000);
+
+test("a legacy pre-0.1 workspace cache dir surfaces its warning through onDiagnostic", async () => {
+  const dataDir = resolveDataDir({
+    HOMEFLEET_DATA_DIR: await tempDir("homefleet-daemon-legacy-"),
+  });
+  // A pre-0.1 cache layout leftover: a full-64-hex-named repo dir under the
+  // default cache root (<dataDir>/workspaces). The WorkspaceStore logs an
+  // operator-facing warning about it at init; the assembly must route that
+  // warning to the onDiagnostic sink — docs/reference/configuration.md
+  // promises the daemon logs it at startup, so it cannot be dropped.
+  const legacyDir = path.join(dataDir, "workspaces", "a".repeat(64));
+  await mkdir(legacyDir, { recursive: true });
+
+  const diagnostics: string[] = [];
+  const daemon = new Daemon({
+    dataDir,
+    config: testConfig("legacy"),
+    onDiagnostic: (message) => diagnostics.push(message),
+  });
+  await daemon.start();
+  cleanups.push(() => daemon.stop());
+
+  const legacyWarnings = diagnostics.filter((m) =>
+    m.includes("legacy workspace cache layout"),
+  );
+  expect(legacyWarnings).toHaveLength(1);
+  expect(legacyWarnings[0]).toContain(legacyDir);
+  expect(legacyWarnings[0]).toContain("safe to delete");
+
+  await daemon.stop();
+}, 30_000);
 
 test("partial start failure unwinds: MCP port in use rejects start() and releases the HFP port", async () => {
   // Occupy a loopback port with a dummy server: the daemon's MCP bind fails.

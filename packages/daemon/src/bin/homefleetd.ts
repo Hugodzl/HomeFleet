@@ -43,6 +43,12 @@ async function main(): Promise<void> {
         }\n`,
       );
     },
+    // Informational component diagnostics (e.g. the WorkspaceStore's
+    // legacy-cache-layout warning) — operator-facing, so they go to stderr
+    // like every other line this bin emits.
+    onDiagnostic: (message) => {
+      process.stderr.write(`homefleetd: ${message}\n`);
+    },
   });
   await daemon.start();
 

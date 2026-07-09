@@ -59,12 +59,20 @@ export interface DaemonOptions {
    *
    * Known v0 limitation: NodeServer and the MCP front's post-listen async
    * socket errors are NOT routed here — those servers swallow their own
-   * post-listen errors and take no onError param yet. The WorkspaceStore is
-   * also not wired to this sink: it's built without its `logger`, and its
-   * diagnostics are informational strings rather than errors, so routing
-   * them here would be a category mismatch.
+   * post-listen errors and take no onError param yet. The WorkspaceStore's
+   * diagnostics are informational strings rather than errors, so they go to
+   * {@link onDiagnostic} instead of here.
    */
   onError?: (error: unknown) => void;
+  /**
+   * Receives informational component diagnostics — operator-facing one-line
+   * strings that are not failures (so they don't belong in {@link onError}).
+   * Currently this is the WorkspaceStore's `logger` sink: eviction/gc notes
+   * and the startup warning about a legacy pre-0.1 workspace cache layout
+   * (which docs/reference/configuration.md promises the daemon logs).
+   * Defaults to a no-op.
+   */
+  onDiagnostic?: (message: string) => void;
 }
 
 /**
@@ -232,6 +240,7 @@ export class Daemon {
   private readonly dataDir: string;
   private readonly config: DaemonConfig;
   private readonly onError: (error: unknown) => void;
+  private readonly onDiagnostic: (message: string) => void;
 
   private state: "new" | "started" | "stopped" = "new";
   private runtime: DaemonRuntime | null = null;
@@ -248,6 +257,7 @@ export class Daemon {
     this.dataDir = options.dataDir;
     this.config = options.config;
     this.onError = options.onError ?? (() => {});
+    this.onDiagnostic = options.onDiagnostic ?? (() => {});
   }
 
   /**
@@ -298,6 +308,7 @@ export class Daemon {
       maxCachedCheckouts: config.workspace.maxCachedCheckouts,
       gcAfterFetches: config.workspace.gcAfterFetches,
       gitTimeoutMs: config.workspace.gitTimeoutMs,
+      logger: this.onDiagnostic,
     });
     await workspaceStore.init();
     this.teardown.push(() => workspaceStore.stop());
