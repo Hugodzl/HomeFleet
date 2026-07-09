@@ -12,6 +12,15 @@ import { UdpDiscovery } from "./udp.js";
 const deviceIdA = "aa".repeat(32);
 const deviceIdB = "bb".repeat(32);
 
+/**
+ * Generous timeout for assertions that wait on real UDP socket delivery or
+ * interval re-announces. These tests assert protocol BEHAVIOR, not latency;
+ * vi.waitFor's 1s default is too tight when the event loop is starved by the
+ * parallel test suite (the source of prior flakes), so we give delivery real
+ * headroom without depending on any particular timing.
+ */
+const DELIVERY_TIMEOUT_MS = 5_000;
+
 function announcement(
   deviceId: string,
   overrides: Partial<DiscoveryAnnouncement> = {},
@@ -120,7 +129,7 @@ test("announce -> response: both sides learn each other", async () => {
       source: "udp",
       lastSeenAt: expect.any(Number),
     });
-  });
+  }, DELIVERY_TIMEOUT_MS);
   // ...and B hears A's response.
   await vi.waitFor(() => {
     expect(b.candidates).toContainEqual({
@@ -131,7 +140,7 @@ test("announce -> response: both sides learn each other", async () => {
       source: "udp",
       lastSeenAt: expect.any(Number),
     });
-  });
+  }, DELIVERY_TIMEOUT_MS);
 });
 
 test("replies to an announce with a response, unicast to the sender", async () => {
@@ -146,7 +155,7 @@ test("replies to an announce with a response, unicast to the sender", async () =
 
   await vi.waitFor(() => {
     expect(peer.received).toHaveLength(1);
-  });
+  }, DELIVERY_TIMEOUT_MS);
   const reply = JSON.parse((peer.received[0] ?? Buffer.of()).toString("utf8"));
   expect(reply).toEqual({
     kind: "response",
@@ -170,7 +179,7 @@ test("never replies to a response (reply-storm guard)", async () => {
   // The response itself still surfaces B as a candidate...
   await vi.waitFor(() => {
     expect(a.candidates.some((c) => c.deviceId === deviceIdB)).toBe(true);
-  });
+  }, DELIVERY_TIMEOUT_MS);
   // ...but no datagram goes back to the sender.
   await new Promise((resolve) => setTimeout(resolve, 150));
   expect(peer.received).toEqual([]);
@@ -224,7 +233,7 @@ test("drops garbage, schema-invalid, and oversized datagrams silently", async ()
   );
   await vi.waitFor(() => {
     expect(a.candidates.some((c) => c.deviceId === deviceIdB)).toBe(true);
-  });
+  }, DELIVERY_TIMEOUT_MS);
 });
 
 test("re-announces on the configured interval", async () => {
@@ -237,7 +246,7 @@ test("re-announces on the configured interval", async () => {
   // Startup announce plus at least two interval re-announces.
   await vi.waitFor(() => {
     expect(peer.received.length).toBeGreaterThanOrEqual(3);
-  });
+  }, DELIVERY_TIMEOUT_MS);
   for (const message of peer.received) {
     expect(JSON.parse(message.toString("utf8")).kind).toBe("announce");
   }
@@ -251,7 +260,7 @@ test("stop closes the socket and halts re-announcing", async () => {
   });
   await vi.waitFor(() => {
     expect(peer.received.length).toBeGreaterThanOrEqual(1);
-  });
+  }, DELIVERY_TIMEOUT_MS);
 
   await a.discovery.stop();
   const seen = peer.received.length;

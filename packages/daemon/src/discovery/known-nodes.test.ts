@@ -202,3 +202,25 @@ test("caps the registry at MAX_KNOWN_NODES, evicting the oldest sighting", async
   const reloaded = await KnownNodesRegistry.load(dir);
   expect(reloaded.list()).toHaveLength(MAX_KNOWN_NODES);
 });
+
+test("a burst of concurrent records coalesces into a bounded number of writes", async () => {
+  const registry = await KnownNodesRegistry.load(await newDataDir());
+  // Fire many records without awaiting between them (a discovery flood).
+  await Promise.all(
+    Array.from({ length: 60 }, (_, i) =>
+      registry.record({
+        deviceId: i.toString(16).padStart(64, "0"),
+        name: "flood",
+        host: "192.168.1.30",
+        port: 47113,
+        lastSeenAt: new Date(1_751_800_000_000 + i * 1_000).toISOString(),
+        source: "udp",
+      }),
+    ),
+  );
+  // Naively this would be 60 writes (one per record); coalescing collapses a
+  // burst into the in-flight write plus a single follow-up — the property that
+  // keeps a discovery flood from amplifying into O(n) disk writes.
+  expect(registry.writeCount).toBeLessThanOrEqual(2);
+  expect(registry.list()).toHaveLength(60);
+});

@@ -58,8 +58,10 @@ function isEnoent(error: unknown): boolean {
 export class KnownNodesRegistry {
   private readonly filePath: string;
   private readonly entries: Map<string, KnownNode>;
-  /** Serializes persists; see {@link KnownNodesRegistry.persist}. */
-  private persistQueue: Promise<unknown> = Promise.resolve();
+  /** The write currently in flight, or null when idle; see {@link persist}. */
+  private writing: Promise<void> | null = null;
+  /** The single coalesced follow-up write, or null; see {@link persist}. */
+  private pending: Promise<void> | null = null;
   private tempCounter = 0;
 
   private constructor(filePath: string, entries: Map<string, KnownNode>) {
@@ -114,6 +116,14 @@ export class KnownNodesRegistry {
   }
 
   /**
+   * Number of file writes performed so far. Exposed so tests can assert that a
+   * burst of concurrent record() calls coalesces into few writes (see persist).
+   */
+  get writeCount(): number {
+    return this.tempCounter;
+  }
+
+  /**
    * Records (or replaces, keyed by `deviceId`) a sighting and persists.
    * Rejects entries that do not validate. Past {@link MAX_KNOWN_NODES}
    * entries, the oldest sighting is evicted (spoofed-deviceId flood guard).
@@ -143,22 +153,57 @@ export class KnownNodesRegistry {
   }
 
   /**
-   * Atomic persist: write to a temp file, then rename over the real one.
+   * Atomic persist (write a temp file, then rename over the real one),
+   * COALESCING concurrent calls. A burst of record() calls — e.g. a discovery
+   * flood, which MAX_KNOWN_NODES caps in memory — collapses into at most two
+   * writes: the one already in flight, plus a single follow-up that snapshots
+   * the final state. The naive "one write per record" would be an O(n) disk-
+   * write amplification of the very flood the cap defends against (and it made
+   * the cap test flaky under load).
    *
-   * Persists are chained through {@link KnownNodesRegistry.persistQueue} so
-   * concurrent record() calls execute their writes strictly one after
-   * another (each write snapshots the entries at execution time, so the
-   * final file always reflects the final in-memory state). The temp path is
-   * unique per write as a second line of defense.
+   * Durability is preserved: every returned promise resolves only after a
+   * write that reflects this call's mutation. A caller arriving while a write
+   * is in flight gets the follow-up, which snapshots entries when it RUNS
+   * (strictly after the in-flight write), so it necessarily includes that
+   * mutation. Writes still never interleave — the follow-up is chained off the
+   * in-flight write, not started concurrently.
    */
   private persist(): Promise<void> {
-    const task = this.persistQueue.then(() => this.writeSnapshot());
-    // Keep the queue alive even when a write fails; the failure still
-    // propagates to this persist's caller via `task`.
-    this.persistQueue = task.catch(() => {});
-    return task;
+    if (this.writing === null) {
+      this.writing = this.runWrite();
+      return this.writing;
+    }
+    // A write is in flight; this mutation must land in a follow-up write.
+    // Every caller during the current write shares ONE coalesced follow-up.
+    this.pending ??= this.writing
+      .catch(() => {}) // a failed in-flight write must not skip the follow-up
+      .then(() => this.runWrite());
+    return this.pending;
   }
 
+  /**
+   * Runs one atomic write and, when it settles, promotes any coalesced
+   * follow-up to be the write in flight (it is already running — `pending`
+   * was chained off this write), keeping {@link persist}'s bookkeeping
+   * consistent whether the write succeeded or failed.
+   */
+  private runWrite(): Promise<void> {
+    const done = this.writeSnapshot();
+    void done
+      .catch(() => {})
+      .finally(() => {
+        this.writing = this.pending;
+        this.pending = null;
+      });
+    return done;
+  }
+
+  /**
+   * Atomic write: serialize entries to a unique temp file, then rename over
+   * the real file (the rename is the atomic commit; a crash mid-write leaves
+   * the previous file intact). The temp path is unique per write so a
+   * coalesced follow-up can never collide with the write it chains off.
+   */
   private async writeSnapshot(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     this.tempCounter += 1;
