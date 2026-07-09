@@ -55,19 +55,43 @@ test("config node.name wins over the hostname", () => {
   expect(info.name).toBe("study-pc");
 });
 
-test("without a configured name, the hostname is used", () => {
+test("without a configured name, the hostname gets a deviceId suffix", () => {
+  // The suffix disambiguates two machines that share a hostname — it prevents
+  // an mDNS same-service-name collision (see resolveNodeName).
   const info = makeProvider({ hostname: "my-host" })();
-  expect(info.name).toBe("my-host");
+  expect(info.name).toBe(`my-host-${DEVICE_ID.slice(0, 8)}`);
 });
 
-test("an empty hostname falls back to the fixed name 'homefleet'", () => {
+test("an empty hostname falls back to 'homefleet' plus the deviceId suffix", () => {
   const info = makeProvider({ hostname: "" })();
-  expect(info.name).toBe("homefleet");
+  expect(info.name).toBe(`homefleet-${DEVICE_ID.slice(0, 8)}`);
 });
 
-test("an over-long hostname is truncated to the 64-char name limit", () => {
+test("an over-long hostname is truncated so base+suffix fits the 64-char cap", () => {
   const info = makeProvider({ hostname: "h".repeat(80) })();
-  expect(info.name).toBe("h".repeat(64));
+  const suffix = DEVICE_ID.slice(0, 8);
+  // 55 h's + "-" + 8 hex = 64 chars exactly.
+  expect(info.name).toBe(`${"h".repeat(64 - suffix.length - 1)}-${suffix}`);
+  expect(info.name.length).toBe(64);
+});
+
+test("same hostname + different deviceIds yield distinct names (mDNS de-collision)", () => {
+  const config = DaemonConfigSchema.parse({});
+  const a = createNodeInfoProvider({
+    deviceId: "aa".repeat(32),
+    config,
+    daemonVersion: "0.1.0",
+    hostname: "sharedhost",
+  })();
+  const b = createNodeInfoProvider({
+    deviceId: "bb".repeat(32),
+    config,
+    daemonVersion: "0.1.0",
+    hostname: "sharedhost",
+  })();
+  expect(a.name).toBe("sharedhost-aaaaaaaa");
+  expect(b.name).toBe("sharedhost-bbbbbbbb");
+  expect(a.name).not.toBe(b.name);
 });
 
 test("with no hostname override the real os.hostname() yields a valid name", () => {

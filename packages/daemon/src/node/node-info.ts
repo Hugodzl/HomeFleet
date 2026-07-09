@@ -59,21 +59,40 @@ export function currentPlatform(): NodeInfo["platform"] {
   return platform === "win32" || platform === "darwin" ? platform : "linux";
 }
 
+/** The schema's maximum advertised-name length, in characters. */
+const MAX_NODE_NAME_LENGTH = 64;
+
 /**
- * Resolves the advertised node name: a configured name wins; otherwise the
- * hostname, truncated to the schema's 64-char cap. A machine can report an
- * empty hostname, and `NodeNameSchema` requires at least one character, so
- * that case falls back to a fixed name rather than emit an invalid profile.
+ * Resolves the advertised node name.
+ *
+ * A configured `node.name` wins verbatim — the operator owns its uniqueness.
+ * Otherwise the DEFAULT is the hostname with a short deviceId suffix appended
+ * (e.g. `tower-3f9a1c2b`). The suffix is load-bearing, not cosmetic: two
+ * machines that share a hostname (a real risk on a home LAN) would otherwise
+ * announce the SAME mDNS service name and hit a probe-time collision where the
+ * loser's publication dies silently (see the discovery backlog). Disambiguating
+ * the name at the source prevents the collision entirely, and doubles as a
+ * readable way to tell same-hostname machines apart in `homefleet nodes`.
+ *
+ * A machine can report an empty hostname, and `NodeNameSchema` requires at
+ * least one character, so that case uses a fixed base ("homefleet") — still
+ * suffixed, so two no-hostname machines also stay distinct. The base is
+ * truncated so base + suffix never exceeds the schema's 64-char cap.
  */
 function resolveNodeName(
   configuredName: string | undefined,
   hostnameOverride: string | undefined,
+  deviceId: string,
 ): string {
   if (configuredName !== undefined) {
     return configuredName;
   }
-  const hostname = (hostnameOverride ?? os.hostname()).slice(0, 64);
-  return hostname === "" ? "homefleet" : hostname;
+  const rawHostname = hostnameOverride ?? os.hostname();
+  const base = rawHostname === "" ? "homefleet" : rawHostname;
+  const suffix = deviceId.slice(0, 8);
+  // Reserve suffix.length + 1 (the "-" join) so base + suffix fits the cap.
+  const maxBase = MAX_NODE_NAME_LENGTH - suffix.length - 1;
+  return `${base.slice(0, maxBase)}-${suffix}`;
 }
 
 /**
@@ -96,7 +115,7 @@ export function createNodeInfoProvider(
   options: NodeInfoProviderOptions,
 ): () => NodeInfo {
   const { deviceId, config, daemonVersion, jobs } = options;
-  const name = resolveNodeName(config.node.name, options.hostname);
+  const name = resolveNodeName(config.node.name, options.hostname, deviceId);
 
   const executors: ExecutorKind[] = [];
   const roles: NodeRole[] = [];
