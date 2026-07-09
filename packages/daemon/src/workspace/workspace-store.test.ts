@@ -5,21 +5,23 @@
  * malformed / undelivered-commit rejection, per-repo serialization, and the
  * checkout retention cap.
  */
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
 import {
+  addWorktree,
   commitPresent,
   countObjects,
   createBundle,
   ok,
+  removeWorktree,
   resolveHeadCommit,
   runGit,
   type WorkerGit,
 } from "./git.js";
 import {
-  repoHash,
+  repoKey,
   WorkspaceError,
   WorkspaceStore,
   type WorkspaceStoreOptions,
@@ -98,7 +100,7 @@ async function fullBundle(src: Src, headCommit: string): Promise<string> {
 /** A WorkerGit pointing at the store's on-disk bare cache repo for `repoId`. */
 function workerFor(cacheDir: string, repoId: string): WorkerGit {
   return {
-    repoDir: path.join(cacheDir, repoHash(repoId), "repo.git"),
+    repoDir: path.join(cacheDir, repoKey(repoId), "repo.git"),
     hooksPath: path.join(cacheDir, ".no-hooks"),
     timeoutMs: 30_000,
   };
@@ -265,14 +267,14 @@ test("repoId path-traversal attempts are neutralized by hashing", async () => {
     // The materialized dir is inside the cache root, under the hashed name.
     const resolved = path.resolve(dir);
     expect(resolved.startsWith(path.resolve(cacheDir) + path.sep)).toBe(true);
-    expect(resolved).toContain(repoHash(repoId));
+    expect(resolved).toContain(repoKey(repoId));
   }
 
-  // Every top-level cache entry is either `.no-hooks` or a 64-hex hash dir —
-  // no traversal produced a path segment outside the cache root.
+  // Every top-level cache entry is either `.no-hooks` or a 16-hex repoKey dir
+  // — no traversal produced a path segment outside the cache root.
   const entries = await readdir(cacheDir);
   for (const entry of entries) {
-    expect(entry === ".no-hooks" || /^[0-9a-f]{64}$/.test(entry)).toBe(true);
+    expect(entry === ".no-hooks" || /^[0-9a-f]{16}$/.test(entry)).toBe(true);
   }
   // And no stray "x" leaked next to the cache root.
   await expect(stat(path.join(parentOfCache, "x"))).rejects.toThrow();
@@ -422,9 +424,7 @@ test("checkout cap survives across store instances (init re-registers on-disk ch
   // A new store over the same cacheDir with a tighter cap must evict on init.
   const store2 = new WorkspaceStore({ ...opts, maxCachedCheckouts: 1 });
   await store2.init();
-  const remaining = await readdir(
-    path.join(cacheDir, repoHash("repo-a"), "checkouts"),
-  );
+  const remaining = await readdir(path.join(cacheDir, repoKey("repo-a"), "co"));
   expect(remaining).toHaveLength(1);
 }, 45_000);
 
@@ -533,14 +533,14 @@ test("stop() aborts the controller and that signal is threaded into worker git",
     abort: AbortController;
     worker(hash: string): WorkerGit;
   };
-  const hash = repoHash("repo-a");
+  const rKey = repoKey("repo-a");
   expect(internals.abort.signal.aborted).toBe(false);
-  expect(internals.worker(hash).signal).toBe(internals.abort.signal);
+  expect(internals.worker(rKey).signal).toBe(internals.abort.signal);
 
   await store.stop();
   expect(internals.abort.signal.aborted).toBe(true);
   // Still the same signal, now aborted — an in-flight op observing it is killed.
-  expect(internals.worker(hash).signal?.aborted).toBe(true);
+  expect(internals.worker(rKey).signal?.aborted).toBe(true);
 }, 30_000);
 
 test("stop() cancels an in-flight worker git op so it settles well before the git timeout", async () => {
@@ -624,3 +624,105 @@ test("an in-use checkout survives a gc triggered by a later sync", async () => {
   expect(await readFile(path.join(dir, "data.txt"), "utf8")).toBe(content);
   expect(await commitPresent(worker, a.head)).toBe(true);
 }, 45_000);
+
+test("checkout paths are short: <cacheDir>/<16-hex>/co/<16-hex>, 37 chars past the cache root", async () => {
+  const src = await makeSrc();
+  const head = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, head), head);
+
+  const { dir, release } = await store.resolve({
+    repoId: "repo-a",
+    headCommit: head,
+  });
+  // Windows MAX_PATH defense-in-depth: the cache's own overhead past the cache
+  // root is exactly `\<16-hex repoKey>\co\<16-hex commitKey>` = 37 chars.
+  const suffix = path.resolve(dir).slice(path.resolve(cacheDir).length);
+  expect(suffix).toMatch(/^[\\/][0-9a-f]{16}[\\/]co[\\/][0-9a-f]{16}$/);
+  expect(suffix).toHaveLength(37);
+  release();
+}, 30_000);
+
+test("verify-on-reuse: a checkout dir holding the wrong commit is re-materialized", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  // A full bundle of c2 contains c1 and c2.
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+
+  // Tamper: swap the worktree under c1's dir NAME to actually hold c2 — the
+  // on-disk analogue of a truncated-commit-key collision.
+  const worker = workerFor(cacheDir, "repo-a");
+  await removeWorktree(worker, h1.dir);
+  expect(ok(await addWorktree(worker, h1.dir, c2))).toBe(true);
+
+  // Resolving c1 again must detect the mismatch (dir names no longer encode
+  // the full commit) and re-materialize c1, not hand out c2's content.
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  expect(h2.dir).toBe(h1.dir);
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: h2.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  expect(await readFile(path.join(h2.dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+  h2.release();
+}, 45_000);
+
+test("a pinned checkout dir holding the wrong commit is never removed: resolve fails instead", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  // Hold the handle: the checkout stays PINNED (a running job is reading it).
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const worker = workerFor(cacheDir, "repo-a");
+  await removeWorktree(worker, h1.dir);
+  expect(ok(await addWorktree(worker, h1.dir, c2))).toBe(true);
+
+  // A mismatching pinned dir must fail the resolve rather than yank the dir
+  // out from under the job holding it.
+  await expect(
+    store.resolve({ repoId: "repo-a", headCommit: c1 }),
+  ).rejects.toMatchObject({ code: "GIT_FAILED" });
+  // The dir was NOT removed: its worktree gitlink is still on disk.
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  h1.release();
+}, 45_000);
+
+test("legacy pre-0.1 cache dirs (64-hex) are warned about once and left in place", async () => {
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const legacyDir = path.join(cacheDir, "f".repeat(64));
+  await mkdir(path.join(legacyDir, "checkouts", "a".repeat(40)), {
+    recursive: true,
+  });
+  const logs: string[] = [];
+  const store = new WorkspaceStore({
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 32,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+    logger: (message) => logs.push(message),
+  });
+  await store.init();
+
+  // Exactly ONE warning per legacy dir; the dir is neither registered for
+  // eviction nor deleted (destroying data on startup is not the store's call).
+  expect(
+    logs.filter((m) => m.includes("legacy workspace cache layout")),
+  ).toHaveLength(1);
+  expect((await stat(legacyDir)).isDirectory()).toBe(true);
+});

@@ -242,7 +242,7 @@ export {
   registerWorkspaceRoutes,
 } from "./workspace/routes.js";
 export {
-  repoHash,
+  repoKey,
   WorkspaceError,
   type WorkspaceErrorCode,
   WorkspaceStore,

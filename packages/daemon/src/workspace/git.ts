@@ -553,6 +553,32 @@ export async function revParse(
   return COMMIT_HASH_RE.test(value) ? value : null;
 }
 
+/**
+ * WORKER side: the commit a materialized checkout worktree currently has
+ * checked out, or `null` if the directory is missing or not a usable worktree.
+ * Runs IN `checkoutDir` (its `.git` gitlink resolves to the cache repo's
+ * per-worktree metadata) rather than against the bare `repoDir` — a bare
+ * repo's own HEAD says nothing about any worktree. Used by the store to
+ * verify a reused checkout dir really holds the requested commit: checkout
+ * dir names carry only a truncated commit key, so reuse must be verified.
+ */
+export async function worktreeHead(
+  worker: WorkerGit,
+  checkoutDir: string,
+): Promise<string | null> {
+  const result = await runGit(["rev-parse", "--verify", "--quiet", "HEAD"], {
+    cwd: checkoutDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+    signal: worker.signal,
+  });
+  if (!ok(result)) {
+    return null;
+  }
+  const value = result.stdout.trim();
+  return COMMIT_HASH_RE.test(value) ? value : null;
+}
+
 /** WORKER side: whether `commit` exists as a commit object in the cache repo. */
 export async function commitPresent(
   worker: WorkerGit,

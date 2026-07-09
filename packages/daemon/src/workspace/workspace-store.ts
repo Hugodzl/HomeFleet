@@ -2,21 +2,44 @@
  * Worker-side workspace store + resolver (M7, ADR-0005).
  *
  * Turns received git bundles into materialized checkouts a job executor can
- * read, under three security invariants:
+ * read. On-disk layout (kept deliberately short — Windows MAX_PATH (260)
+ * defense-in-depth; everything past the cache root is exactly 37 chars, so
+ * checkout file paths rarely approach the limit regardless of git's
+ * `core.longpaths` mode):
+ *
+ *   <cacheDir>\<repoKey>\repo.git        bare cache repo
+ *   <cacheDir>\<repoKey>\co\<commitKey>  checkout worktrees
+ *   <cacheDir>\.no-hooks                 empty hooks dir (disables hooks)
+ *
+ * where `repoKey` is the first 16 hex chars of SHA-256(repoId) and `commitKey`
+ * is the first 16 hex chars of the 40-hex commit. Four security invariants:
  *
  * 1. **Allowlist, fail-closed.** Only repoIds in `allowedRepoIds` are accepted.
  *    An empty allowlist accepts nothing. A non-allowlisted repoId is rejected
  *    BEFORE any directory is created, so a probe leaves no trace on disk.
  * 2. **repoId never forms a path.** The per-repo cache directory is named by
- *    the SHA-256 of the repoId (hex only), so a repoId like `../../x`,
+ *    a truncated SHA-256 of the repoId (hex only), so a repoId like `../../x`,
  *    `C:\evil`, or `..\\..` cannot escape the cache root — traversal is
- *    structurally impossible, not filtered.
+ *    structurally impossible, not filtered. 16 hex chars (2^64) are enough:
+ *    repoIds are operator-configured allowlist entries, not attacker-chosen
+ *    names. The repoKey is the per-repo identity EVERYWHERE — dir name, lock
+ *    key, checkout-map key prefix — so even a colliding pair of repoIds would
+ *    merely share one cache dir with all its git ops still serialized through
+ *    the one per-key lock, never interleaved.
  * 3. **Only check out what was delivered.** `applyBundle` verifies the bundle,
  *    rejects (before importing any object) a bundle whose advertised `HEAD`
  *    ref does not match the claimed `headCommit`, fetches into a scratch ref,
  *    and refuses to advance the repo's tip unless the fetched commit equals the
  *    claimed `headCommit`. The resolver refuses to materialize a commit the
  *    cache does not actually contain.
+ * 4. **Verify before reuse.** A checkout dir's truncated name no longer proves
+ *    which commit it holds, so the resolver re-checks an existing worktree's
+ *    HEAD against the requested FULL 40-hex commit before handing it out. An
+ *    unpinned mismatch is removed and re-materialized; a PINNED mismatch (a
+ *    running job is reading that dir — reachable if a paired peer grinds two
+ *    of its own commits to a shared 16-hex prefix, ~2^32 work) fails the
+ *    resolve instead of yanking the dir out from under the job: correctness
+ *    over availability.
  *
  * Git is not concurrency-safe on one repository, so every operation for a given
  * repoId is serialized through a per-repo promise chain: two syncs, or a sync
@@ -55,6 +78,7 @@ import {
   updateRef,
   verifyBundle,
   type WorkerGit,
+  worktreeHead,
 } from "./git.js";
 
 /** The single ref the worker maintains per repo: its current known head. */
@@ -104,7 +128,7 @@ export class WorkspaceError extends Error {
 }
 
 export interface WorkspaceStoreOptions {
-  /** Absolute cache root; per-repo dirs live under it, named by repoId hash. */
+  /** Absolute cache root; per-repo dirs live under it, named by {@link repoKey}. */
   cacheDir: string;
   /** Fail-closed allowlist. Empty = accept nothing. */
   allowedRepoIds: string[];
@@ -119,8 +143,14 @@ export interface WorkspaceStoreOptions {
 
 /** A materialized checkout tracked for LRU eviction. */
 interface CheckoutEntry {
-  repoHash: string;
-  headCommit: string;
+  repoKey: string;
+  /**
+   * The checkout's dir name (truncated commit key), NOT the full commit — the
+   * full commit is not recoverable from a dir found on restart. Identity for
+   * map keys and eviction only; content correctness is enforced by the
+   * resolver's verify-on-reuse against the requested full commit.
+   */
+  commitKey: string;
   dir: string;
   /** Monotonic last-use tick; higher = more recently used. */
   usedAt: number;
@@ -142,11 +172,11 @@ export class WorkspaceStore {
   private readonly gitTimeoutMs: number;
   private readonly log: (message: string) => void;
 
-  /** Per-repo (by hash) promise chain: serializes all git ops for that repo. */
+  /** Per-repo (by {@link repoKey}) promise chain: serializes its git ops. */
   private readonly locks = new Map<string, Promise<unknown>>();
-  /** Live checkouts, keyed `${repoHash}:${headCommit}`, for LRU eviction. */
+  /** Live checkouts, keyed `${repoKey}:${commitKey}`, for LRU eviction. */
   private readonly checkouts = new Map<string, CheckoutEntry>();
-  /** Fetches applied per repo hash since its last gc (gc-gating counter). */
+  /** Fetches applied per repoKey since its last gc (gc-gating counter). */
   private readonly fetchesSinceGc = new Map<string, number>();
   private useTick = 0;
   private initialized = false;
@@ -205,13 +235,13 @@ export class WorkspaceStore {
   async haveTip(repoId: string): Promise<string | null> {
     this.requireNotStopped();
     this.requireAllowed(repoId);
-    const hash = repoHash(repoId);
-    return this.withRepoLock(hash, async () => {
-      const repoDir = this.repoDir(hash);
+    const rKey = repoKey(repoId);
+    return this.withRepoLock(rKey, async () => {
+      const repoDir = this.repoDir(rKey);
       if (!(await pathExists(repoDir))) {
         return null;
       }
-      return revParse(this.worker(hash), TIP_REF);
+      return revParse(this.worker(rKey), TIP_REF);
     });
   }
 
@@ -238,13 +268,13 @@ export class WorkspaceStore {
         { headCommit },
       );
     }
-    const hash = repoHash(repoId);
-    await this.withRepoLock(hash, async () => {
+    const rKey = repoKey(repoId);
+    await this.withRepoLock(rKey, async () => {
       // Normalize the one raw throw on this path: initBareRepo throws GitError
       // (e.g. when a shutdown aborts a first-ever sync), but applyBundle's
       // contract is "throws WorkspaceError on any failure".
       try {
-        await this.ensureRepo(hash);
+        await this.ensureRepo(rKey);
       } catch (error) {
         if (error instanceof GitError) {
           throw new WorkspaceError(
@@ -255,7 +285,7 @@ export class WorkspaceStore {
         }
         throw error;
       }
-      const worker = this.worker(hash);
+      const worker = this.worker(rKey);
 
       if (!(await verifyBundle(worker, bundlePath))) {
         throw new WorkspaceError(
@@ -322,7 +352,7 @@ export class WorkspaceStore {
       // every `gcAfterFetches` fetches. Still under the per-repo lock, so gc
       // cannot race a fetch or a checkout; the tip ref + live worktrees anchor
       // everything in use, so nothing needed is pruned.
-      await this.maybeGc(hash, worker);
+      await this.maybeGc(rKey, worker);
     });
   }
 
@@ -343,11 +373,12 @@ export class WorkspaceStore {
   ): Promise<{ dir: string; release: () => void }> {
     this.requireNotStopped();
     this.requireAllowed(ref.repoId);
-    const hash = repoHash(ref.repoId);
+    const rKey = repoKey(ref.repoId);
     const { headCommit } = ref;
-    const key = checkoutKey(hash, headCommit);
-    const dir = await this.withRepoLock(hash, async () => {
-      const repoDir = this.repoDir(hash);
+    const cKey = commitKey(headCommit);
+    const key = checkoutKey(rKey, cKey);
+    const dir = await this.withRepoLock(rKey, async () => {
+      const repoDir = this.repoDir(rKey);
       if (!(await pathExists(repoDir))) {
         throw new WorkspaceError(
           "NOT_SYNCED",
@@ -355,7 +386,7 @@ export class WorkspaceStore {
           { repoId: ref.repoId },
         );
       }
-      const worker = this.worker(hash);
+      const worker = this.worker(rKey);
       if (!(await commitPresent(worker, headCommit))) {
         throw new WorkspaceError(
           "NOT_SYNCED",
@@ -363,7 +394,31 @@ export class WorkspaceStore {
           { repoId: ref.repoId, headCommit },
         );
       }
-      const checkoutDir = this.checkoutDir(hash, headCommit);
+      const checkoutDir = this.checkoutDir(rKey, cKey);
+      if (await isPopulatedCheckout(checkoutDir)) {
+        // Verify-on-reuse (invariant 4): the dir name is a truncated commit
+        // key, so an existing worktree MUST prove it holds the requested FULL
+        // commit before it is handed out.
+        const actual = await worktreeHead(worker, checkoutDir);
+        if (actual !== headCommit) {
+          const existing = this.checkouts.get(key);
+          if (existing !== undefined && existing.refcount > 0) {
+            // PINNED mismatch: a running job is reading this dir. Removing it
+            // would be exactly the yank pinning exists to prevent, so fail
+            // this resolve instead (correctness over availability).
+            throw new WorkspaceError(
+              "GIT_FAILED",
+              "checkout dir holds a different commit and is pinned by a " +
+                "running job (truncated commit-key conflict); retry later",
+              { repoId: ref.repoId, headCommit, checkedOut: actual },
+            );
+          }
+          // Unpinned mismatch: this is a REGISTERED worktree, so remove it
+          // properly (like eviction does), then fall through to re-add.
+          await removeWorktree(worker, checkoutDir);
+          await rm(checkoutDir, { recursive: true, force: true });
+        }
+      }
       if (!(await isPopulatedCheckout(checkoutDir))) {
         // Remove any stale/partial dir before re-adding the worktree.
         await rm(checkoutDir, { recursive: true, force: true });
@@ -379,7 +434,7 @@ export class WorkspaceStore {
       // Track the checkout (bumping last-use) and PIN it before we release the
       // lock, so the eviction pass below — and any concurrent resolve's pass —
       // cannot pick it as a victim while this handle is outstanding.
-      this.touch(key, hash, headCommit, checkoutDir);
+      this.touch(key, rKey, cKey, checkoutDir);
       this.pin(key);
       return checkoutDir;
     });
@@ -470,21 +525,22 @@ export class WorkspaceStore {
     return path.join(this.cacheDir, ".no-hooks");
   }
 
-  private repoRoot(hash: string): string {
-    return path.join(this.cacheDir, hash);
+  private repoRoot(rKey: string): string {
+    return path.join(this.cacheDir, rKey);
   }
 
-  private repoDir(hash: string): string {
-    return path.join(this.repoRoot(hash), "repo.git");
+  private repoDir(rKey: string): string {
+    return path.join(this.repoRoot(rKey), "repo.git");
   }
 
-  private checkoutDir(hash: string, headCommit: string): string {
-    return path.join(this.repoRoot(hash), "checkouts", headCommit);
+  /** `co`, not `checkouts`: every char here recurs in every checkout file path. */
+  private checkoutDir(rKey: string, cKey: string): string {
+    return path.join(this.repoRoot(rKey), "co", cKey);
   }
 
-  private worker(hash: string): WorkerGit {
+  private worker(rKey: string): WorkerGit {
     return {
-      repoDir: this.repoDir(hash),
+      repoDir: this.repoDir(rKey),
       hooksPath: this.hooksPath(),
       timeoutMs: this.gitTimeoutMs,
       // Threads the store's cancellation into every worker-side git call, so a
@@ -494,46 +550,46 @@ export class WorkspaceStore {
   }
 
   /** Creates the per-repo bare cache repo on first use. */
-  private async ensureRepo(hash: string): Promise<void> {
-    const repoDir = this.repoDir(hash);
+  private async ensureRepo(rKey: string): Promise<void> {
+    const repoDir = this.repoDir(rKey);
     if (await pathExists(repoDir)) {
       return;
     }
-    await mkdir(this.repoRoot(hash), { recursive: true });
+    await mkdir(this.repoRoot(rKey), { recursive: true });
     await initBareRepo(repoDir, this.gitTimeoutMs, this.abort.signal);
   }
 
   /**
-   * Counts one fetch for `hash` and, every `gcAfterFetches`, reclaims
+   * Counts one fetch for `rKey` and, every `gcAfterFetches`, reclaims
    * unreachable objects. MUST be called under the repo's lock (it is, from
    * `applyBundle`), so gc never races a fetch/checkout. A gc failure is logged,
    * not thrown — it must never fail an otherwise-successful sync.
    */
-  private async maybeGc(hash: string, worker: WorkerGit): Promise<void> {
-    const count = (this.fetchesSinceGc.get(hash) ?? 0) + 1;
+  private async maybeGc(rKey: string, worker: WorkerGit): Promise<void> {
+    const count = (this.fetchesSinceGc.get(rKey) ?? 0) + 1;
     if (count < this.gcAfterFetches) {
-      this.fetchesSinceGc.set(hash, count);
+      this.fetchesSinceGc.set(rKey, count);
       return;
     }
-    this.fetchesSinceGc.set(hash, 0);
+    this.fetchesSinceGc.set(rKey, 0);
     const result = await gc(worker);
     if (ok(result)) {
-      this.log(`gc'd workspace cache ${hash} after ${count} fetches`);
+      this.log(`gc'd workspace cache ${rKey} after ${count} fetches`);
     } else {
       this.log(
-        `gc of workspace cache ${hash} failed: ${describeGitFailure(result)}`,
+        `gc of workspace cache ${rKey} failed: ${describeGitFailure(result)}`,
       );
     }
   }
 
-  /** Serializes work for one repo hash onto a single promise chain. */
-  private withRepoLock<T>(hash: string, fn: () => Promise<T>): Promise<T> {
-    const prior = this.locks.get(hash) ?? Promise.resolve();
+  /** Serializes work for one repoKey onto a single promise chain. */
+  private withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T> {
+    const prior = this.locks.get(rKey) ?? Promise.resolve();
     const next = prior.then(fn, fn);
     // Keep the chain alive but swallow rejections so one failure does not
     // poison the next caller (each caller sees its own result/throw).
     this.locks.set(
-      hash,
+      rKey,
       next.then(
         () => undefined,
         () => undefined,
@@ -551,8 +607,8 @@ export class WorkspaceStore {
    */
   private touch(
     key: string,
-    repoHashValue: string,
-    headCommit: string,
+    repoKeyValue: string,
+    commitKeyValue: string,
     dir: string,
   ): void {
     this.useTick += 1;
@@ -562,8 +618,8 @@ export class WorkspaceStore {
       return;
     }
     this.checkouts.set(key, {
-      repoHash: repoHashValue,
-      headCommit,
+      repoKey: repoKeyValue,
+      commitKey: commitKeyValue,
       dir,
       usedAt: this.useTick,
       refcount: 0,
@@ -625,9 +681,9 @@ export class WorkspaceStore {
       // reuse target while we are removing it.
       this.checkouts.delete(victimKey);
       const evicted = victim;
-      await this.withRepoLock(evicted.repoHash, async () => {
+      await this.withRepoLock(evicted.repoKey, async () => {
         try {
-          await removeWorktree(this.worker(evicted.repoHash), evicted.dir);
+          await removeWorktree(this.worker(evicted.repoKey), evicted.dir);
           await rm(evicted.dir, { recursive: true, force: true });
         } catch (error) {
           this.log(
@@ -644,29 +700,40 @@ export class WorkspaceStore {
 
   /** Registers checkouts present on disk (from a prior run) for the LRU cap. */
   private async registerExistingCheckouts(): Promise<void> {
-    let repoHashes: string[];
+    let names: string[];
     try {
-      repoHashes = await readdir(this.cacheDir);
+      names = await readdir(this.cacheDir);
     } catch {
       return;
     }
     const found: Array<{ entry: CheckoutEntry; mtimeMs: number }> = [];
-    for (const hash of repoHashes) {
-      if (!/^[0-9a-f]{64}$/.test(hash)) {
-        continue; // skip .no-hooks and anything not a repo-hash dir
+    for (const name of names) {
+      if (LEGACY_REPO_DIR_RE.test(name)) {
+        // A pre-0.1 cache dir (64-hex repo hash, `checkouts/<40-hex>` layout).
+        // Neither registered nor deleted: this version never resolves into
+        // it, and destroying an operator's data on startup is not this
+        // store's call to make.
+        this.log(
+          `legacy workspace cache layout at ${path.join(this.cacheDir, name)}` +
+            " (pre-0.1); not used by this version — safe to delete",
+        );
+        continue;
       }
-      const checkoutsRoot = path.join(this.repoRoot(hash), "checkouts");
-      let commits: string[];
+      if (!KEY_RE.test(name)) {
+        continue; // skip .no-hooks and anything not a repoKey dir
+      }
+      const checkoutsRoot = path.join(this.repoRoot(name), "co");
+      let commitKeys: string[];
       try {
-        commits = await readdir(checkoutsRoot);
+        commitKeys = await readdir(checkoutsRoot);
       } catch {
         continue;
       }
-      for (const headCommit of commits) {
-        if (!COMMIT_HASH_RE.test(headCommit)) {
+      for (const cKey of commitKeys) {
+        if (!KEY_RE.test(cKey)) {
           continue;
         }
-        const dir = path.join(checkoutsRoot, headCommit);
+        const dir = path.join(checkoutsRoot, cKey);
         try {
           const info = await stat(dir);
           if (!info.isDirectory()) {
@@ -674,8 +741,8 @@ export class WorkspaceStore {
           }
           found.push({
             entry: {
-              repoHash: hash,
-              headCommit,
+              repoKey: name,
+              commitKey: cKey,
               dir,
               usedAt: 0,
               refcount: 0,
@@ -692,7 +759,7 @@ export class WorkspaceStore {
     found.sort((a, b) => a.mtimeMs - b.mtimeMs);
     for (const { entry } of found) {
       this.useTick += 1;
-      this.checkouts.set(checkoutKey(entry.repoHash, entry.headCommit), {
+      this.checkouts.set(checkoutKey(entry.repoKey, entry.commitKey), {
         ...entry,
         usedAt: this.useTick,
       });
@@ -701,13 +768,42 @@ export class WorkspaceStore {
   }
 }
 
-/** SHA-256 hex of the repoId — the per-repo cache dir name (hex only). */
-export function repoHash(repoId: string): string {
-  return createHash("sha256").update(repoId, "utf8").digest("hex");
+/** repoKey/commitKey length. 16 hex chars = 64 bits; see {@link repoKey}. */
+const KEY_HEX_CHARS = 16;
+/** A repoKey or commitKey directory name. */
+const KEY_RE = /^[0-9a-f]{16}$/;
+/** A pre-0.1 per-repo cache dir name (full 64-hex SHA-256 of the repoId). */
+const LEGACY_REPO_DIR_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The per-repo cache key: the first 16 hex chars of SHA-256(repoId). One
+ * function produces the ONE identity used everywhere — the cache dir name,
+ * the per-repo lock key, and the checkout-map key prefix — so even a
+ * hypothetical prefix collision between two allowlisted repoIds shares a
+ * single lock (git ops on the shared dir never interleave). 16 hex chars
+ * (2^64) are enough because repoIds are operator-configured allowlist
+ * entries, not attacker-chosen names; kept short so checkout file paths stay
+ * well under Windows MAX_PATH (see the file doc).
+ */
+export function repoKey(repoId: string): string {
+  return createHash("sha256")
+    .update(repoId, "utf8")
+    .digest("hex")
+    .slice(0, KEY_HEX_CHARS);
 }
 
-function checkoutKey(hash: string, headCommit: string): string {
-  return `${hash}:${headCommit}`;
+/**
+ * The checkout dir name: the first 16 hex chars of the full 40-hex commit.
+ * Truncation is safe ONLY because the resolver verifies an existing dir's
+ * worktree HEAD against the requested full commit before reuse (invariant 4).
+ */
+function commitKey(headCommit: string): string {
+  return headCommit.slice(0, KEY_HEX_CHARS);
+}
+
+/** Checkout-map key: dir-derived identity, so one directory = one LRU entry. */
+function checkoutKey(rKey: string, cKey: string): string {
+  return `${rKey}:${cKey}`;
 }
 
 async function pathExists(target: string): Promise<boolean> {
