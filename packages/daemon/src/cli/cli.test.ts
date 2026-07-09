@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from "vitest";
 import type { DaemonConfig } from "../config/config.js";
+import { DAEMON_VERSION } from "../version.js";
 import { type CliDeps, type CliIdentity, runCli } from "./cli.js";
 import type {
   ControlClientLike,
@@ -139,6 +140,7 @@ describe("usage / unknown", () => {
     const code = await runCli(["--help"], deps);
     expect(code).toBe(0);
     expect(stdoutLines.join("\n")).toContain("Usage:");
+    expect(stdoutLines.join("\n")).toContain("--version");
   });
 
   test("no subcommand prints usage to STDERR and returns 2", async () => {
@@ -156,6 +158,19 @@ describe("usage / unknown", () => {
     expect(code).toBe(2);
     expect(stderrLines.join("\n")).toContain("Usage:");
     expect(stdoutLines).toEqual([]);
+  });
+});
+
+describe("--version", () => {
+  test("prints 'homefleet <DAEMON_VERSION>' and returns 0, touching neither config nor the network", async () => {
+    const { deps, stdoutLines, makeControlClientCalls } = makeHarness();
+    deps.loadConfig = async () => {
+      throw new Error("--version must not load config");
+    };
+    const code = await runCli(["--version"], deps);
+    expect(code).toBe(0);
+    expect(stdoutLines).toEqual([`homefleet ${DAEMON_VERSION}`]);
+    expect(makeControlClientCalls).toEqual([]);
   });
 });
 

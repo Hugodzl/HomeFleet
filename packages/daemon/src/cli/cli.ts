@@ -18,6 +18,7 @@
  */
 import { fileURLToPath } from "node:url";
 import type { DaemonConfig } from "../config/config.js";
+import { DAEMON_VERSION } from "../version.js";
 import {
   type ControlClientLike,
   ControlRequestError,
@@ -89,6 +90,9 @@ Usage:
 
   homefleet --help
       Show this usage text.
+
+  homefleet --version
+      Print the CLI version and exit.
 `;
 
 /**
@@ -381,6 +385,10 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
   if (command === "--help" || command === "-h") {
     deps.stdout(USAGE);
+    return 0;
+  }
+  if (command === "--version") {
+    deps.stdout(`homefleet ${DAEMON_VERSION}`);
     return 0;
   }
   if (command === undefined) {

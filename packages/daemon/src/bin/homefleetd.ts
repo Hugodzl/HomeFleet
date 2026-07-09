@@ -11,6 +11,22 @@ import { fileURLToPath } from "node:url";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { Daemon } from "../daemon.js";
+import { DAEMON_VERSION } from "../version.js";
+
+/**
+ * `--version`'s exact stdout line, if `argv` requests it — `undefined`
+ * otherwise (the normal case, where the daemon starts as usual). Checked as
+ * the very first thing at startup, before `resolveDataDir`/`loadDaemonConfig`/
+ * `Daemon` assembly, so it never depends on a data dir or config existing and
+ * never starts the daemon. Exported (rather than inlined in the
+ * invoked-directly guard below) so homefleetd.test.ts can verify the string
+ * without spawning the built bin.
+ */
+export function versionOutput(argv: string[]): string | undefined {
+  return argv.includes("--version")
+    ? `homefleetd ${DAEMON_VERSION}`
+    : undefined;
+}
 
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
@@ -70,12 +86,17 @@ if (
   invokedPath !== undefined &&
   fileURLToPath(import.meta.url) === invokedPath
 ) {
-  main().catch((error: unknown) => {
-    process.stderr.write(
-      `homefleetd failed to start: ${
-        error instanceof Error ? error.message : String(error)
-      }\n`,
-    );
-    process.exit(1);
-  });
+  const version = versionOutput(process.argv.slice(2));
+  if (version !== undefined) {
+    process.stdout.write(`${version}\n`);
+  } else {
+    main().catch((error: unknown) => {
+      process.stderr.write(
+        `homefleetd failed to start: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+      process.exit(1);
+    });
+  }
 }
