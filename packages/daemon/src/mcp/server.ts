@@ -8,11 +8,13 @@
  * Roots, nor MCP Logging (all deprecated in the 2026-07-28 revision).
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { DAEMON_VERSION } from "../version.js";
 import { type McpToolCollaborators, registerHomeFleetTools } from "./tools.js";
 
 /** Advertised MCP server identity. */
 export const MCP_SERVER_NAME = "homefleet";
-export const MCP_SERVER_VERSION = "0.1.0";
+/** Not an independent version: the MCP-advertised version tracks the daemon's. */
+export const MCP_SERVER_VERSION = DAEMON_VERSION;
 
 /**
  * Creates an `McpServer` with the HomeFleet tools registered against the given
