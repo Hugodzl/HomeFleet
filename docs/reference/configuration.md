@@ -83,7 +83,7 @@ A realistic **delegator** config: maps a local repoId to its checkout path so
 ```json
 {
   "node": { "name": "laptop" },
-  "repos": [{ "repoId": "homefleet", "path": "D:\\Git\\LocalAgentCoordinator" }]
+  "repos": [{ "repoId": "homefleet", "path": "D:\\Git\\HomeFleet" }]
 }
 ```
 
@@ -126,6 +126,15 @@ over HFP). See [ADR-0005](../adr/0005-git-bundle-workspace-sync.md).
 | `maxCachedCheckouts` | integer ≥ 1             | `32`                            | Cap on the *count* of materialized checkout working trees kept across all repos; the least-recently-used one is evicted past this. |
 | `gcAfterFetches`     | integer ≥ 1             | `20`                            | Successful bundle fetches into a repo's bare cache before `git gc --prune=now` runs on it (bounds bare object-store growth). |
 | `gitTimeoutMs`       | integer ≥ 1000          | `120000`                        | Per-invocation timeout for workspace git operations (bundle/fetch/checkout). |
+
+Cache layout (v0.1): under the cache root, each repo lives at
+`<repoKey>/repo.git` (bare cache) with checkouts at
+`<repoKey>/co/<commitKey>`, where both keys are 16-hex truncations of
+SHA-256 — deliberately short so checkout paths stay well clear of Windows
+MAX_PATH. Pre-0.1 versions used full-hash directory names
+(`<64-hex>/checkouts/<40-hex>`); this version never resolves into those. A
+leftover pre-0.1 directory is left in place, logs a one-line warning at
+daemon startup, and is safe to delete.
 
 ## `node`
 

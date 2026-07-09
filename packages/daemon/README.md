@@ -105,7 +105,7 @@ If your MCP client only speaks stdio, use the shim instead (after `pnpm
 build`; adjust the path and `HOMEFLEET_DATA_DIR` to your checkout/OS):
 
 ```sh
-claude mcp add --env HOMEFLEET_DATA_DIR=C:\Users\<you>\AppData\Local\homefleet --transport stdio homefleet -- node D:\Git\LocalAgentCoordinator\packages\daemon\dist\bin\homefleet-mcp-stdio.js
+claude mcp add --env HOMEFLEET_DATA_DIR=C:\Users\<you>\AppData\Local\homefleet --transport stdio homefleet -- node D:\Git\HomeFleet\packages\daemon\dist\bin\homefleet-mcp-stdio.js
 ```
 
 or as `.mcp.json`:
@@ -116,7 +116,7 @@ or as `.mcp.json`:
     "homefleet": {
       "type": "stdio",
       "command": "node",
-      "args": ["D:\\Git\\LocalAgentCoordinator\\packages\\daemon\\dist\\bin\\homefleet-mcp-stdio.js"],
+      "args": ["D:\\Git\\HomeFleet\\packages\\daemon\\dist\\bin\\homefleet-mcp-stdio.js"],
       "env": {
         "HOMEFLEET_DATA_DIR": "C:\\Users\\<you>\\AppData\\Local\\homefleet"
       }

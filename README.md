@@ -4,14 +4,17 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — powered entirely by **local models**, entirely on **your LAN**, with no cloud in the loop.
 
-> **Status: pre-alpha.** The product spine is complete and tested on one
-> machine: identity, mTLS transport, LAN discovery, executors, job dispatch,
-> the MCP front door, workspace (git bundle) sync, the single-process daemon
-> assembly, and the `homefleet` operator CLI all work end to end. What's left
-> before v0.1: bringing up the reference two-machine rig for real (see the
-> [demo](#two-machine-demo) below — the mechanics are written, the hands-on
-> rig bring-up isn't done yet) and publishing packages. The [Quickstart](#quickstart)
-> below runs today, on a single machine.
+> **Status: v0.1 — pre-alpha.** The product spine is complete — identity,
+> mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
+> workspace (git bundle) sync, the single-process daemon assembly, and the
+> `homefleet` operator CLI — and the two-machine acceptance demo has run on
+> real hardware: recon delegated laptop → tower against a local
+> Qwen3.6-35B-A3B returned an accurate architecture summary in ~105 s end to
+> end, and a repeat delegation re-synced in 129 ms vs ~6 s cold (details in
+> the [rig devlog](devlog/2026-07-09-m8-rig-bringup.md)). v0.1 is a tagged
+> release you install from source, Windows-first; npm packages come later.
+> The [Quickstart](#quickstart) below runs today on a single machine;
+> pairing two real machines is the [two-machine demo](#two-machine-demo).
 
 ## Why
 
@@ -56,8 +59,8 @@ point an MCP client at it — pairing a second real machine is the
 [two-machine demo](#two-machine-demo) below.
 
 ```bash
-git clone <this repo>
-cd LocalAgentCoordinator
+git clone https://github.com/Hugodzl/HomeFleet.git
+cd HomeFleet
 pnpm install
 pnpm build        # tsup bundles packages/daemon's three bins to dist/bin/*.js
 ```
@@ -115,7 +118,7 @@ sync it to a worker:
 
 ```json
 {
-  "repos": [{ "repoId": "homefleet", "path": "D:\\Git\\LocalAgentCoordinator" }]
+  "repos": [{ "repoId": "homefleet", "path": "D:\\Git\\HomeFleet" }]
 }
 ```
 
@@ -143,7 +146,10 @@ for the exact `.mcp.json` form and the stdio-shim alternative.
 ## Two-machine demo
 
 This is the M8 acceptance path: two physical machines, each running
-`homefleetd`, paired, delegating a real job to a real local model. Follow the
+`homefleetd`, paired, delegating a real job to a real local model. This
+exact path ran for real on the reference rig on 2026-07-09 — timings, token
+rates, and the Windows MAX_PATH lesson it surfaced are in the
+[rig devlog](devlog/2026-07-09-m8-rig-bringup.md). Follow the
 [Quickstart](#quickstart) above through `pnpm build` **on both machines**
 first, then:
 
@@ -176,8 +182,9 @@ first, then:
    automatically before the job runs on B's local model. Poll with
    `job_status`/`job_result`; `cancel_job` to abort mid-run.
 
-This needs two machines each serving a local OpenAI-compatible endpoint
-(llama.cpp `llama-server`, Ollama, LM Studio, ...) — the design doc's
+Recon needs the worker machine to serve a local OpenAI-compatible endpoint
+(llama.cpp `llama-server`, Ollama, LM Studio, ...); command jobs need no
+model. The design doc's
 [reference rig](docs/specs/2026-07-06-homefleet-design.md#reference-rig)
 describes the two-machine setup this project develops against (a Vulkan
 `llama-server` box and a CUDA Ollama box) if you want a concrete starting
