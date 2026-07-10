@@ -1,5 +1,7 @@
 # HomeFleet
 
+![HomeFleet — the computers in your home working as one fleet](docs/assets/homefleet-banner.png)
+
 **Your coding agent, but your other PCs do the heavy lifting.**
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
