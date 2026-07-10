@@ -233,6 +233,8 @@ Everything is testable on a single machine — integration tests run multiple da
 
 v0.1 (recon + command delegation) → code-writing delegation (diffs/branches back) → tray app + web dashboard → macOS/Linux polish → multi-node fan-out → model-pool orchestration on the same fabric.
 
+Unordered ideas and known follow-ups live in the [backlog](docs/backlog.md).
+
 ## License
 
 [Apache-2.0](LICENSE) — © 2026 Hugo Deziel
