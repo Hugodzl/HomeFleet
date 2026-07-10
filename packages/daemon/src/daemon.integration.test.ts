@@ -276,8 +276,6 @@ test("a legacy pre-0.1 workspace cache dir surfaces its warning through onDiagno
   expect(legacyWarnings).toHaveLength(1);
   expect(legacyWarnings[0]).toContain(legacyDir);
   expect(legacyWarnings[0]).toContain("safe to delete");
-
-  await daemon.stop();
 }, 30_000);
 
 test("partial start failure unwinds: MCP port in use rejects start() and releases the HFP port", async () => {

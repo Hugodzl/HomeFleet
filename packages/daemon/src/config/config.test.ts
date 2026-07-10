@@ -210,7 +210,7 @@ test("a full valid config round-trips every M9 section", async () => {
     },
     models: [{ id: "qwen3-coder", contextWindow: 65536 }, { id: "llama3" }],
     jobs: { maxConcurrentJobs: 2, maxQueuedJobs: 8, maxRetainedJobs: 100 },
-    repos: [{ repoId: "homefleet", path: "D:/Git/LocalAgentCoordinator" }],
+    repos: [{ repoId: "homefleet", path: "D:/Git/HomeFleet" }],
   };
   await writeConfig(dir, JSON.stringify(full));
   const config = await loadDaemonConfig(dir);
