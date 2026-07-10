@@ -80,8 +80,7 @@ function startDiscovery(
     announcement: own,
     onCandidate: (candidate) => candidates.push(candidate),
     now,
-    schedule: timers?.schedule,
-    cancel: timers?.cancel,
+    timers,
   });
   discovery.start();
   return { discovery, candidates };
@@ -490,6 +489,45 @@ test("watchdog renames stay bounded when self-echo never arrives", async () => {
   expect(backend.activePublications().map((p) => p.request.name)).toEqual([
     "tower (10)",
   ]);
+  await a.discovery.stop();
+});
+
+test("a watchdog fired by a leaky scheduler after stop renames nothing", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // A misbehaving injected scheduler: cancellation does not remove the
+  // callback, so stop() cannot prevent the deadline from firing late.
+  const leakyTimers: FakeTimers = { ...timers, cancel: () => {} };
+  backend.suppressDelivery = () => true;
+  const a = startDiscovery(
+    backend,
+    announcement(deviceIdA),
+    undefined,
+    leakyTimers,
+  );
+
+  await a.discovery.stop();
+  timers.fire();
+  expect(backend.publications).toHaveLength(1);
+});
+
+test("a watchdog fired by a leaky scheduler after confirmation renames nothing", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // Same leaky scheduler, but the discovery is still running: the echo
+  // confirmed the publication, so the lingering callback is stale and must
+  // not rename.
+  const leakyTimers: FakeTimers = { ...timers, cancel: () => {} };
+  const a = startDiscovery(
+    backend,
+    announcement(deviceIdA),
+    undefined,
+    leakyTimers,
+  );
+
+  timers.fire();
+  expect(backend.publications).toHaveLength(1);
+  expect(backend.publications[0]?.request.name).toBe("tower");
   await a.discovery.stop();
 });
 

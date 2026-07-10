@@ -180,10 +180,14 @@ export interface MdnsDiscoveryOptions {
   /**
    * Injectable timers for the self-echo watchdog; default
    * `setTimeout`/`clearTimeout`. Tests drive the deadline manually — real
-   * timers are not exercisable deterministically.
+   * timers are not exercisable deterministically. A single pair so schedule
+   * and cancel cannot be injected mismatched (an injected schedule with the
+   * default cancel would never cancel anything).
    */
-  schedule?: (callback: () => void, delayMs: number) => unknown;
-  cancel?: (handle: unknown) => void;
+  timers?: {
+    schedule: (callback: () => void, delayMs: number) => unknown;
+    cancel: (handle: unknown) => void;
+  };
 }
 
 /**
@@ -195,13 +199,16 @@ export class MdnsDiscovery {
   private readonly announcement: DiscoveryAnnouncement;
   private readonly onCandidate: (candidate: DiscoveryCandidate) => void;
   private readonly now: () => number;
-  private readonly schedule: (callback: () => void, delayMs: number) => unknown;
-  private readonly cancel: (handle: unknown) => void;
+  private readonly timers: Required<MdnsDiscoveryOptions>["timers"];
   private publication: MdnsPublication | null = null;
   private browser: MdnsBrowser | null = null;
   private currentName = "";
   private renameAttempt = 1;
-  /** Wrapped so a scheduler may return any handle value, `null` included. */
+  /**
+   * The live watchdog's identity token — its callback renames only while
+   * this still points at its own wrapper. Wrapping also keeps any scheduler
+   * return value (`null` included) usable as a handle.
+   */
   private echoWatchdog: { handle: unknown } | null = null;
   private state: "new" | "started" | "stopped" = "new";
 
@@ -210,11 +217,10 @@ export class MdnsDiscovery {
     this.announcement = options.announcement;
     this.onCandidate = options.onCandidate;
     this.now = options.now ?? Date.now;
-    this.schedule =
-      options.schedule ??
-      ((callback, delayMs) => setTimeout(callback, delayMs));
-    this.cancel =
-      options.cancel ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
+    this.timers = options.timers ?? {
+      schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+      cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+    };
   }
 
   start(): void {
@@ -338,21 +344,25 @@ export class MdnsDiscovery {
    */
   private armEchoWatchdog(): void {
     this.cancelEchoWatchdog();
-    this.echoWatchdog = {
-      handle: this.schedule(() => {
-        this.echoWatchdog = null;
-        // An injected scheduler may fire after stop(); the built-in cannot
-        // (stop() cancels synchronously).
-        if (this.state === "started") {
-          this.rename();
-        }
-      }, SELF_ECHO_DEADLINE_MS),
-    };
+    const wrapper: { handle: unknown } = { handle: null };
+    wrapper.handle = this.timers.schedule(() => {
+      // Only the live watchdog may rename. Every invalidation — stop(), a
+      // confirming echo, supersession by a newer watchdog — moves
+      // `echoWatchdog` off this wrapper, so the identity check makes a
+      // late fire from a misbehaving injected scheduler a no-op (the
+      // built-in timers never fire after clearTimeout).
+      if (this.echoWatchdog !== wrapper) {
+        return;
+      }
+      this.echoWatchdog = null;
+      this.rename();
+    }, SELF_ECHO_DEADLINE_MS);
+    this.echoWatchdog = wrapper;
   }
 
   private cancelEchoWatchdog(): void {
     if (this.echoWatchdog !== null) {
-      this.cancel(this.echoWatchdog.handle);
+      this.timers.cancel(this.echoWatchdog.handle);
       this.echoWatchdog = null;
     }
   }
