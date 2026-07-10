@@ -45,6 +45,20 @@ install is a privileged management operation — it needs a deliberate story in
 the Syncthing-style trust model (ADR 0004) rather than riding the existing
 job-dispatch channel.
 
+### Painless install and fleet expansion
+
+Getting HomeFleet running for the first time is complicated today (clone,
+pnpm, build, run bins with bare `node`), and so is managing the fleet and
+expanding it onto new machines. Goal: someone should be able to install and
+get up and running quickly, with as few CLI steps as possible — ideally
+"run an installer, see the other machines, enter a pair code." Brainstorm
+threads: real packaging (npm global install is already in the debt list
+below; a single binary or winget/platform installers go further), a guided
+first-run experience instead of hand-edited config, and making
+add-a-new-machine a one-step flow on both ends (install on the new box,
+approve from an existing one — the fleet GUI above is the natural surface
+for the approval side).
+
 ## Known technical debt (from v0.1)
 
 Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md):
