@@ -70,7 +70,11 @@ test("the daemon threads its onDiagnostic sink into the DiscoveryAggregator", as
   const options = captured.options[0] as DiscoveryAggregatorOptions;
   expect(options.onDiagnostic).toBeDefined();
   // Behavioral identity, not mere presence: a message emitted into the
-  // aggregator's sink must come out of the daemon's.
+  // aggregator's sink must come out of the daemon's. Substring, not
+  // equality — a future daemon-side prefixing wrapper would still pass
+  // the message through, which is all this seam promises.
   options.onDiagnostic?.("assembly-check: discovery diagnostic");
-  expect(diagnostics).toContain("assembly-check: discovery diagnostic");
+  expect(
+    diagnostics.some((m) => m.includes("assembly-check: discovery diagnostic")),
+  ).toBe(true);
 }, 30_000);

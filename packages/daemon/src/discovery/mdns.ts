@@ -338,9 +338,13 @@ export class MdnsDiscovery {
     if (this.renameAttempt >= MAX_RENAME_ATTEMPTS) {
       if (!this.exhaustionReported) {
         this.exhaustionReported = true;
+        // "after N renames" counts what the log above actually shows: the
+        // budget allows MAX_RENAME_ATTEMPTS - 1 renames past the bare name,
+        // one "renamed to" line each.
         this.onDiagnostic(
-          `mDNS rename budget exhausted (${MAX_RENAME_ATTEMPTS} attempts); ` +
-            `staying on "${this.currentName}" — mDNS discovery may be degraded`,
+          `mDNS rename budget exhausted after ${MAX_RENAME_ATTEMPTS - 1} ` +
+            `renames; staying on "${this.currentName}" — mDNS discovery ` +
+            `may be degraded`,
         );
       }
       return;

@@ -437,9 +437,10 @@ test("mdns rename diagnostics surface through the aggregator's onDiagnostic", as
     addresses: ["192.168.1.30"],
   });
 
-  expect(diagnostics).toEqual([
-    'mDNS name collision on "tower": renamed to "tower (2)"',
-  ]);
+  // Threading is this test's subject, not prose: the exact wording is
+  // mdns.test.ts's deliverable, so assert only that the rename surfaced.
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]).toContain('renamed to "tower (2)"');
 });
 
 test("dedup: a stale identified sighting does not drop a fresh anonymous entry", async () => {

@@ -618,10 +618,13 @@ test("rename-budget exhaustion is reported exactly once, then declines stay quie
     timers.fire();
   }
   expect(b.diagnostics.filter((m) => m.includes("renamed to"))).toHaveLength(9);
+  // "after 9 renames" reads truthfully beside the log it summarizes: the
+  // budget allows nine renames past the bare name, so exactly nine
+  // "renamed to" lines precede this notice.
   expect(
     b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
   ).toEqual([
-    'mDNS rename budget exhausted (10 attempts); staying on "tower (10)" ' +
+    'mDNS rename budget exhausted after 9 renames; staying on "tower (10)" ' +
       "— mDNS discovery may be degraded",
   ]);
 
@@ -634,6 +637,43 @@ test("rename-budget exhaustion is reported exactly once, then declines stay quie
     txt: { id: deviceIdA, pv: "0.1.0" },
     addresses: ["192.168.1.30"],
   });
+  expect(
+    b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
+  ).toHaveLength(1);
+  await b.discovery.stop();
+});
+
+test("a collision decline reports exhaustion first; the pending watchdog then stays quiet", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  backend.suppressDelivery = () => true;
+  const b = startDiscovery(backend, announcement(deviceIdB), undefined, timers);
+
+  // Nine watchdog renames park the node on "tower (10)" with a watchdog
+  // still pending for it — the budget is spent but not yet reported.
+  for (let i = 0; i < 9; i += 1) {
+    timers.fire();
+  }
+  expect(timers.pendingCount()).toBe(1);
+  expect(
+    b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
+  ).toHaveLength(0);
+
+  // The reverse ordering of the test above: a colliding browse result on
+  // the new name declines FIRST, reporting the exhaustion…
+  backend.deliver({
+    type: "homefleet",
+    name: "tower (10)",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  expect(
+    b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
+  ).toHaveLength(1);
+
+  // …and the still-pending attempt-10 watchdog then declines silently.
+  timers.fire();
   expect(
     b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
   ).toHaveLength(1);
