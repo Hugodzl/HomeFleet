@@ -737,7 +737,18 @@ export class WorkspaceStore {
       this.checkouts.delete(victimKey);
       const evicted = victim;
       let reused = false;
+      let halted = false;
       await this.withRepoLock(evicted.repoKey, async () => {
+        if (this.stopped) {
+          // stop() landed while this removal waited on the lock. Post-stop the
+          // no-mutation rule holds at OP granularity, not just per iteration:
+          // the aborted worktree remove/prune could leave a stale admin entry
+          // and the rm would still delete the dir. Back off; the dir stays on
+          // disk unregistered — the same state as any on-disk checkout after a
+          // restart, which the next init() re-registers.
+          halted = true;
+          return;
+        }
         if (this.checkouts.has(victimKey)) {
           // Re-minted while our removal waited on the lock: a queued-ahead
           // resolve reused the dir. It is live (and pinned) again; leave it.
@@ -753,6 +764,9 @@ export class WorkspaceStore {
           );
         }
       });
+      if (halted) {
+        return;
+      }
       if (reused) {
         // Re-scan: the survivor is back in the map (pinned, so not a victim).
         continue;

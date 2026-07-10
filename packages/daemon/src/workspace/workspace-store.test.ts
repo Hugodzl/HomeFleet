@@ -656,9 +656,12 @@ test("stop() during an eviction pass halts it: no further worktree removals are 
   openGate();
   await Promise.all([blocker, stopping, evicting]);
 
-  // The already-in-flight first removal (c1) may complete, but the pass must
-  // not issue ANOTHER worktree removal after stop(): c2 (the would-be second
-  // victim) and c3 both survive on disk.
+  // No post-stop disk mutation at all: the parked first removal (c1) reached
+  // its locked callback only after stop(), so it must back off — and the pass
+  // must not issue ANOTHER removal either. All three checkouts survive on
+  // disk; c1 is merely unregistered from the LRU map, the same state as any
+  // on-disk checkout after a restart (a next init() re-registers it).
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
   expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
   expect((await stat(path.join(h3.dir, ".git"))).isFile()).toBe(true);
 }, 45_000);
