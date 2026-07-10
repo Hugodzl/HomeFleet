@@ -119,6 +119,30 @@ test("read_file accepts an absolute path INSIDE the workspace", async () => {
   expect(result.content).toContain("# HomeFleet");
 });
 
+test("read_file resolves an absolute path when the root's form differs from its realpath", async () => {
+  // Regression for the CI failure on the Windows runner (user "runneradmin"):
+  // os.tmpdir() hands back an 8.3 short name (RUNNER~1) while realpath()
+  // expands it to the long form, so the workspaceDir handed in differs
+  // lexically from its realpath. Containment must be checked in one namespace,
+  // not by comparing a realpath'd root against a raw absolute path. A
+  // symlinked root reproduces the same divergence cross-platform.
+  const real = await makeWorkspace();
+  const link = path.join(await tempDir(), "ws-link");
+  try {
+    await symlink(real, link, "dir");
+  } catch {
+    // Windows without developer mode/elevation refuses dir symlinks; the
+    // runner's 8.3 divergence still exercises this path in CI.
+    return;
+  }
+  const result = await tool("read_file").execute(
+    { path: path.join(link, "README.md") },
+    context(link),
+  );
+  expect(result.isError).toBe(false);
+  expect(result.content).toContain("# HomeFleet");
+});
+
 test("read_file caps content at MAX_READ_FILE_BYTES with a marker", async () => {
   const ws = await makeWorkspace();
   await writeFile(

@@ -109,6 +109,16 @@ function isContained(root: string, target: string): boolean {
  * throws. Lexical containment is checked BEFORE any filesystem access, so
  * an outside path never even learns whether its target exists; the
  * realpath re-check then keeps symlinks from smuggling reads outside.
+ *
+ * The lexical check resolves and compares in the workspace's OWN namespace
+ * (the path as handed in), never against its realpath. On win32 the two
+ * forms can differ — e.g. an 8.3 short name like `RUNNER~1` (what
+ * `os.tmpdir()` returns for a long user name) versus the long name
+ * `realpath()` expands it to. Comparing a realpath'd root against a raw
+ * absolute path then makes `path.relative` read an in-workspace path as an
+ * escape. Resolving both sides in one namespace keeps the check consistent;
+ * the realpath re-check below is what actually enforces the boundary against
+ * symlink escapes, and it compares realpath-to-realpath.
  */
 async function resolveInWorkspace(
   workspaceDir: string,
@@ -117,11 +127,11 @@ async function resolveInWorkspace(
   if (requested.includes("\0")) {
     throw new SandboxViolationError(requested);
   }
-  const realRoot = await realpath(workspaceDir);
-  const resolved = path.resolve(realRoot, requested);
-  if (!isContained(realRoot, resolved)) {
+  const resolved = path.resolve(workspaceDir, requested);
+  if (!isContained(workspaceDir, resolved)) {
     throw new SandboxViolationError(requested);
   }
+  const realRoot = await realpath(workspaceDir);
   // Throws ENOENT for a missing entry — reported as a normal tool error.
   const real = await realpath(resolved);
   if (!isContained(realRoot, real)) {
