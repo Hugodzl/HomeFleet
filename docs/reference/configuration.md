@@ -113,6 +113,18 @@ Each `staticNodes` entry:
 | `port`             | integer, 1–65535             | *(required)* | The peer's HFP port. |
 | `expectedDeviceId` | 64-char lowercase hex, optional | *(none)*  | A hint only — trust still comes from pairing + the mTLS fingerprint pin, never from this field. |
 
+mDNS name trouble is reported on stderr, one line per event. A name collision
+logs `mDNS name collision on "tower": renamed to "tower (2)"`; a publication
+that is never echoed back to the daemon's own browser (a probe conflict the
+mDNS library loses silently) logs `mDNS publication "tower" never confirmed by
+its own echo (probe conflict?): renamed to "tower (2)"`. Renames are bounded:
+after the budget is spent the daemon logs `mDNS rename budget exhausted after
+9 renames; staying on "tower (10)" — mDNS discovery may be degraded` once and
+stops renaming. Seeing the exhaustion line usually means multicast itself is
+broken on that interface (the VPN/virtual-adapter case `bindAddress` exists
+for) — peers can still find the node over UDP, remembered known-nodes, or
+`staticNodes`.
+
 ## `workspace`
 
 Worker-side settings for accepting synced repository content (git bundles

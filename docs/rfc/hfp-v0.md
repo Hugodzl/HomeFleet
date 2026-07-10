@@ -512,7 +512,13 @@ Nodes advertise a DNS-SD service of type `_homefleet._tcp`:
 - The **instance name** is the node's name. mDNS instance labels are limited
   to 63 bytes; longer names are truncated, and implementations SHOULD resolve
   instance-name collisions by renaming (e.g. appending `" (2)"`), keeping the
-  result within the 63-byte limit.
+  result within the 63-byte limit. A probe-time conflict can also kill a
+  publication silently (the loser never announces, so browse-based collision
+  detection cannot see it); implementations SHOULD treat a publication that is
+  never observed back on their own browser within a short deadline as such a
+  loss and rename the same way. Peers may therefore observe a node re-announce
+  under a new name with no collision visible on the wire; renames SHOULD be
+  bounded so two misbehaving nodes cannot rename-storm each other.
 - The **SRV port** is the announcement's `port` (the HFP HTTPS port).
 - The **TXT record** carries the remaining announcement fields:
   key `id` = `deviceId`, key `pv` = `protocolVersion`.
