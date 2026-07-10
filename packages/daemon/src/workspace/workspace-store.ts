@@ -696,11 +696,13 @@ export class WorkspaceStore {
     // microtask AFTER its repo lock resolved, so an eviction here could register
     // a new lock chain past stop()'s Promise.allSettled snapshot and escape the
     // shutdown await. Short-circuiting keeps that `git worktree` op class from
-    // ever starting post-stop (the EBUSY-avoidance target).
-    if (this.stopped) {
-      return;
-    }
+    // ever starting post-stop (the EBUSY-avoidance target). Re-checked EVERY
+    // iteration, not just on entry: each iteration awaits the repo lock, so
+    // stop() can land mid-pass and the remaining removals must not be issued.
     while (this.checkouts.size > this.maxCachedCheckouts) {
+      if (this.stopped) {
+        return;
+      }
       // Pick the LRU victim among UNPINNED checkouts only: a pinned checkout
       // (refcount > 0) is being read by a running job and must never be
       // `git worktree remove`d out from under it.
@@ -801,6 +803,13 @@ export class WorkspaceStore {
         try {
           const info = await stat(dir);
           if (!info.isDirectory()) {
+            continue;
+          }
+          if (!(await isPopulatedCheckout(dir))) {
+            // No `.git` gitlink (e.g. a checkout creation that died partway):
+            // not a usable checkout — the same judgment resolve() applies —
+            // so it must not count against the cap and evict real checkouts.
+            // Left on disk: a resolve() for this repo/commit repairs it.
             continue;
           }
           found.push({

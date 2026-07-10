@@ -12,6 +12,7 @@ import {
   readFile,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -436,6 +437,40 @@ test("checkout cap survives across store instances (init re-registers on-disk ch
   expect(remaining).toHaveLength(1);
 }, 45_000);
 
+test("init does not register an unpopulated checkout dir against the retention cap", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 1,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+  };
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const h1 = await store1.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+
+  // An unpopulated checkout dir (no `.git` gitlink) — e.g. left by a checkout
+  // creation that died partway. Forced to the newest mtime so that, were it
+  // registered, the REAL checkout would be the next init's LRU victim.
+  const strayDir = path.join(cacheDir, repoKey("repo-a"), "co", "0".repeat(16));
+  await mkdir(strayDir, { recursive: true });
+  await utimes(strayDir, new Date(), new Date(Date.now() + 60_000));
+
+  const store2 = new WorkspaceStore(opts);
+  await store2.init();
+
+  // Cap 1: only the populated checkout counts, so it was NOT evicted; the
+  // stray dir is left in place (a later resolve repairs/reuses it from disk).
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  expect((await stat(strayDir)).isDirectory()).toBe(true);
+}, 45_000);
+
 test("resolver injects into the WorkspaceResolver contract", async () => {
   const src = await makeSrc();
   const head = await src.commit("c1");
@@ -579,6 +614,54 @@ test("stop() cancels an in-flight worker git op so it settles well before the gi
   await expect(applying).rejects.toBeInstanceOf(WorkspaceError);
   expect(Date.now() - started).toBeLessThan(15_000);
 }, 30_000);
+
+test("stop() during an eviction pass halts it: no further worktree removals are issued", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const c3 = await src.commit("c3");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 1,
+  });
+  // A full bundle of c3 contains c1, c2, c3.
+  await store.applyBundle("repo-a", await fullBundle(src, c3), c3);
+
+  // Hold all three handles while resolving (pinned checkouts block each
+  // resolve's eviction pass), then release: three unpinned checkouts on disk,
+  // two over the cap — a subsequent eviction pass has two removals to issue.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  const h3 = await store.resolve({ repoId: "repo-a", headCommit: c3 });
+  h1.release();
+  h2.release();
+  h3.release();
+
+  const internals = store as unknown as {
+    withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T>;
+    evictToCapacity(): Promise<void>;
+  };
+  const rKey = repoKey("repo-a");
+
+  // Park the repo lock so the pass's FIRST removal (LRU victim c1) queues
+  // behind the gate, then start the pass: it suspends awaiting that removal.
+  // stop() lands mid-pass; opening the gate lets the pass resume.
+  let openGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const blocker = internals.withRepoLock(rKey, () => gate);
+  const evicting = internals.evictToCapacity();
+  const stopping = store.stop();
+  openGate();
+  await Promise.all([blocker, stopping, evicting]);
+
+  // The already-in-flight first removal (c1) may complete, but the pass must
+  // not issue ANOTHER worktree removal after stop(): c2 (the would-be second
+  // victim) and c3 both survive on disk.
+  expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
+  expect((await stat(path.join(h3.dir, ".git"))).isFile()).toBe(true);
+}, 45_000);
 
 test("aborting a first-ever sync surfaces a WorkspaceError, not a raw GitError", async () => {
   const src = await makeSrc();
