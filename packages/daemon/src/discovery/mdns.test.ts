@@ -7,6 +7,7 @@ import {
   encodeAnnouncementTxt,
   MAX_INSTANCE_LABEL_BYTES,
   MdnsDiscovery,
+  SELF_ECHO_DEADLINE_MS,
   truncateInstanceLabel,
 } from "./mdns.js";
 
@@ -26,10 +27,52 @@ function announcement(
   };
 }
 
+/**
+ * Manual timers for the self-echo watchdog: `fire()` runs (and clears)
+ * every pending callback, standing in for the deadline elapsing.
+ */
+interface FakeTimers {
+  schedule: (callback: () => void, delayMs: number) => unknown;
+  cancel: (handle: unknown) => void;
+  fire(): void;
+  pendingCount(): number;
+  lastDelayMs: number | null;
+}
+
+function fakeTimers(): FakeTimers {
+  const pending = new Map<number, () => void>();
+  let nextId = 1;
+  const timers: FakeTimers = {
+    lastDelayMs: null,
+    schedule(callback, delayMs) {
+      timers.lastDelayMs = delayMs;
+      const id = nextId;
+      nextId += 1;
+      pending.set(id, callback);
+      return id;
+    },
+    cancel(handle) {
+      pending.delete(handle as number);
+    },
+    fire() {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      for (const callback of callbacks) {
+        callback();
+      }
+    },
+    pendingCount() {
+      return pending.size;
+    },
+  };
+  return timers;
+}
+
 function startDiscovery(
   backend: FakeMdnsBackend,
   own: DiscoveryAnnouncement,
   now = () => 1_751_800_000_000,
+  timers?: FakeTimers,
 ): { discovery: MdnsDiscovery; candidates: DiscoveryCandidate[] } {
   const candidates: DiscoveryCandidate[] = [];
   const discovery = new MdnsDiscovery({
@@ -37,6 +80,8 @@ function startDiscovery(
     announcement: own,
     onCandidate: (candidate) => candidates.push(candidate),
     now,
+    schedule: timers?.schedule,
+    cancel: timers?.cancel,
   });
   discovery.start();
   return { discovery, candidates };
@@ -293,6 +338,170 @@ test("encodeAnnouncementTxt / decodeFoundService round-trip", () => {
       addresses: [],
     }),
   ).toBeNull();
+});
+
+test("renames when its own echo never confirms the publication", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // Probe-death: the "tower" publication silently loses its probe and is
+  // never announced, so no browser (ours included) ever sees it.
+  backend.suppressDelivery = (request) => request.name === "tower";
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  expect(timers.pendingCount()).toBe(1);
+  expect(timers.lastDelayMs).toBe(SELF_ECHO_DEADLINE_MS);
+  timers.fire();
+
+  // The dead publication was stopped and republished under the next label;
+  // the new label's echo did arrive, confirming it (no timer left).
+  expect(backend.publications[0]?.stopped).toBe(true);
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (2)",
+  ]);
+  expect(timers.pendingCount()).toBe(0);
+  await a.discovery.stop();
+});
+
+test("its own echo confirms the publication and no watchdog rename happens", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  // The fake echoed the publication back during start(): confirmed, timer
+  // cancelled, and firing what's left (nothing) renames nothing.
+  expect(timers.pendingCount()).toBe(0);
+  timers.fire();
+  expect(backend.publications).toHaveLength(1);
+  expect(backend.publications[0]?.request.name).toBe("tower");
+  await a.discovery.stop();
+});
+
+test("a stale echo of a pre-rename name does not confirm the current publication", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  backend.suppressDelivery = () => true;
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+  timers.fire(); // probe-death rename: now "tower (2)", watchdog re-armed
+
+  // A late echo of the OLD name arrives — it proves nothing about the
+  // current publication and must not confirm it.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.20"],
+  });
+  expect(timers.pendingCount()).toBe(1);
+
+  // The current name's echo is what confirms.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower (2)",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.20"],
+  });
+  expect(timers.pendingCount()).toBe(0);
+  timers.fire();
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (2)",
+  ]);
+  await a.discovery.stop();
+});
+
+test("a collision rename supersedes the watchdog and re-arms it for the new name", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // B's "tower" publication dies at probe time; the peer's same-name
+  // publication won that probe race and is alive.
+  backend.suppressDelivery = (request) => request.name === "tower";
+  const b = startDiscovery(backend, announcement(deviceIdB), undefined, timers);
+  expect(timers.pendingCount()).toBe(1);
+
+  // The peer's browse result arrives; B loses the tie-break and renames
+  // through the collision path before the watchdog ever fires.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  // The rename re-armed the watchdog for "tower (2)", whose echo (not
+  // suppressed) confirmed it — so no timer is left to fire a second rename.
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (2)",
+  ]);
+  expect(timers.pendingCount()).toBe(0);
+  timers.fire();
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (2)",
+  ]);
+  await b.discovery.stop();
+});
+
+test("watchdog recovers when we win the tie-break but our publication died probing", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // The probe race the collision path cannot fix: A wins the tie-break
+  // (smaller deviceId) so it never renames off browse results, yet its own
+  // "tower" publication is the one that silently died.
+  backend.suppressDelivery = (request) =>
+    request.txt.id === deviceIdA && request.name === "tower";
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  // The peer's live same-name publication shows up: no collision rename
+  // (the peer loses the tie-break), and a peer service is not our echo —
+  // the watchdog stays armed.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: deviceIdB, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower",
+  ]);
+  expect(timers.pendingCount()).toBe(1);
+
+  timers.fire();
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (2)",
+  ]);
+  await a.discovery.stop();
+});
+
+test("watchdog renames stay bounded when self-echo never arrives", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // No publication ever echoes (e.g. multicast loopback disabled): the
+  // watchdog must burn its bounded attempts and then go quiet.
+  backend.suppressDelivery = () => true;
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  while (timers.pendingCount() > 0) {
+    timers.fire();
+  }
+  // MAX_RENAME_ATTEMPTS = 10: the initial publication plus nine renames,
+  // then the node stays on its last name with no timer re-armed.
+  expect(backend.publications).toHaveLength(10);
+  expect(backend.activePublications().map((p) => p.request.name)).toEqual([
+    "tower (10)",
+  ]);
+  await a.discovery.stop();
+});
+
+test("stop cancels a pending watchdog", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  backend.suppressDelivery = () => true;
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+  expect(timers.pendingCount()).toBe(1);
+
+  await a.discovery.stop();
+  expect(timers.pendingCount()).toBe(0);
 });
 
 test("stop tears down the publication, browser, and backend", async () => {

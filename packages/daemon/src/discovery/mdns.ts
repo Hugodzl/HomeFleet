@@ -13,6 +13,11 @@
  * collisions from browse results instead. The tie-break is deterministic —
  * the node with the lexicographically larger deviceId renames — so exactly
  * one side of a collision moves and a pair cannot rename-storm each other.
+ * Browse results cannot see a publication that lost the probe race before
+ * ever announcing, though, so each publication also arms a self-echo
+ * watchdog: if our own browser has not echoed the current name back within
+ * {@link SELF_ECHO_DEADLINE_MS}, the publication is presumed silently dead
+ * and renamed through the same machinery.
  */
 import {
   DISCOVERY_MDNS_SERVICE_TYPE,
@@ -38,6 +43,16 @@ export const MAX_INSTANCE_LABEL_BYTES = 63;
  * continuing would spam the network.
  */
 const MAX_RENAME_ATTEMPTS = 10;
+
+/**
+ * How long a publication may go without our own browser echoing it back
+ * before it is presumed killed at probe time (bonjour-service v1.4.x loses
+ * a probe conflict silently — no announce, no error event). A healthy stack
+ * completes probe + announce well under 2 s (RFC 6762: three probes 250 ms
+ * apart, then announce), so 5 s clears slow networks with margin while
+ * still recovering within seconds of the race.
+ */
+export const SELF_ECHO_DEADLINE_MS = 5_000;
 
 export interface MdnsPublishRequest {
   name: string;
@@ -162,6 +177,13 @@ export interface MdnsDiscoveryOptions {
   onCandidate: (candidate: DiscoveryCandidate) => void;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Injectable timers for the self-echo watchdog; default
+   * `setTimeout`/`clearTimeout`. Tests drive the deadline manually — real
+   * timers are not exercisable deterministically.
+   */
+  schedule?: (callback: () => void, delayMs: number) => unknown;
+  cancel?: (handle: unknown) => void;
 }
 
 /**
@@ -173,10 +195,14 @@ export class MdnsDiscovery {
   private readonly announcement: DiscoveryAnnouncement;
   private readonly onCandidate: (candidate: DiscoveryCandidate) => void;
   private readonly now: () => number;
+  private readonly schedule: (callback: () => void, delayMs: number) => unknown;
+  private readonly cancel: (handle: unknown) => void;
   private publication: MdnsPublication | null = null;
   private browser: MdnsBrowser | null = null;
   private currentName = "";
   private renameAttempt = 1;
+  /** Wrapped so a scheduler may return any handle value, `null` included. */
+  private echoWatchdog: { handle: unknown } | null = null;
   private state: "new" | "started" | "stopped" = "new";
 
   constructor(options: MdnsDiscoveryOptions) {
@@ -184,6 +210,11 @@ export class MdnsDiscovery {
     this.announcement = options.announcement;
     this.onCandidate = options.onCandidate;
     this.now = options.now ?? Date.now;
+    this.schedule =
+      options.schedule ??
+      ((callback, delayMs) => setTimeout(callback, delayMs));
+    this.cancel =
+      options.cancel ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   }
 
   start(): void {
@@ -192,6 +223,9 @@ export class MdnsDiscovery {
     }
     this.state = "started";
     this.currentName = instanceLabel(this.announcement.name, 1);
+    // Armed before publishing: a backend may deliver the echo synchronously
+    // from publish(), and it must find the watchdog there to confirm.
+    this.armEchoWatchdog();
     this.publication = this.publish();
     this.browser = this.backend.browse(DISCOVERY_MDNS_SERVICE_TYPE, (service) =>
       this.handleServiceUp(service),
@@ -203,6 +237,7 @@ export class MdnsDiscovery {
       return;
     }
     this.state = "stopped";
+    this.cancelEchoWatchdog();
     this.browser?.stop();
     this.browser = null;
     const publication = this.publication;
@@ -228,7 +263,12 @@ export class MdnsDiscovery {
     }
     const decoded = decodeFoundService(service);
     if (decoded !== null && decoded.deviceId === this.announcement.deviceId) {
-      // Our own announcement echoed back.
+      // Our own announcement echoed back. Only an echo of the CURRENT name
+      // proves the live publication survived probing — a stale echo of a
+      // pre-rename name says nothing about it and must not confirm.
+      if (labelsEqual(service.name, this.currentName)) {
+        this.cancelEchoWatchdog();
+      }
       return;
     }
     if (
@@ -282,6 +322,38 @@ export class MdnsDiscovery {
       this.announcement.name,
       this.renameAttempt,
     );
+    // Re-armed (superseding any watchdog on the old name) before publishing
+    // — see start() for why arming must precede publish().
+    this.armEchoWatchdog();
     this.publication = this.publish();
+  }
+
+  /**
+   * Arms (or re-arms) the watchdog for the publication about to be made: an
+   * unconfirmed deadline means the publication was killed at probe time and
+   * it renames like a browsed collision. Where self-echo never arrives at
+   * all (e.g. multicast loopback disabled), this burns at most
+   * {@link MAX_RENAME_ATTEMPTS} renames — `rename()` then declines and the
+   * node stays on its last name, unconfirmed but quiet.
+   */
+  private armEchoWatchdog(): void {
+    this.cancelEchoWatchdog();
+    this.echoWatchdog = {
+      handle: this.schedule(() => {
+        this.echoWatchdog = null;
+        // An injected scheduler may fire after stop(); the built-in cannot
+        // (stop() cancels synchronously).
+        if (this.state === "started") {
+          this.rename();
+        }
+      }, SELF_ECHO_DEADLINE_MS),
+    };
+  }
+
+  private cancelEchoWatchdog(): void {
+    if (this.echoWatchdog !== null) {
+      this.cancel(this.echoWatchdog.handle);
+      this.echoWatchdog = null;
+    }
   }
 }

@@ -73,6 +73,13 @@ export class FakeMdnsBackend implements MdnsBackend {
   destroyed = false;
   /** Addresses attached to delivered services. */
   addresses: string[] = ["192.168.1.20"];
+  /**
+   * Opt-in probe-death modeling: a publication matching this predicate is
+   * never delivered to any browser — like a bonjour-service publication
+   * that silently lost its probe race (no announce, no error event).
+   * Defaults to delivering everything.
+   */
+  suppressDelivery: (request: MdnsPublishRequest) => boolean = () => false;
 
   publish(request: MdnsPublishRequest): FakePublication {
     const publication: FakePublication = {
@@ -124,6 +131,9 @@ export class FakeMdnsBackend implements MdnsBackend {
 
   private deliverTo(browser: FakeBrowser, publication: FakePublication): void {
     if (browser.stopped || publication.stopped) {
+      return;
+    }
+    if (this.suppressDelivery(publication.request)) {
       return;
     }
     if (browser.type !== publication.request.type) {
