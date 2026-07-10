@@ -54,6 +54,13 @@ export interface DiscoveryAggregatorOptions {
    * swallowing them — discovery is best-effort by design.
    */
   onError?: (error: unknown) => void;
+  /**
+   * Receives operator-facing one-line diagnostics from the channels —
+   * currently the mDNS rename and rename-budget-exhaustion notices (see
+   * `MdnsDiscoveryOptions.onDiagnostic` in mdns.ts). Informational, not
+   * failures (those go to {@link onError}). Defaults to swallowing them.
+   */
+  onDiagnostic?: (message: string) => void;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
   /**
@@ -105,6 +112,7 @@ export class DiscoveryAggregator {
   private readonly knownNodes: KnownNodesRegistry;
   private readonly onCandidate: ((c: DiscoveryCandidate) => void) | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly onDiagnostic: ((message: string) => void) | undefined;
   private readonly now: () => number;
   private readonly injectedMdnsBackend: MdnsBackend | undefined;
   private readonly udpSendTarget: UdpSendTarget | undefined;
@@ -134,6 +142,7 @@ export class DiscoveryAggregator {
     this.knownNodes = options.knownNodes;
     this.onCandidate = options.onCandidate;
     this.onError = options.onError;
+    this.onDiagnostic = options.onDiagnostic;
     this.now = options.now ?? Date.now;
     this.injectedMdnsBackend = options.mdnsBackend;
     this.udpSendTarget = options.udpSendTarget;
@@ -184,6 +193,7 @@ export class DiscoveryAggregator {
         backend,
         announcement: this.announcement,
         onCandidate: (candidate) => this.ingest(candidate, { persist: true }),
+        onDiagnostic: this.onDiagnostic,
         now: this.now,
       });
       this.mdns.start();

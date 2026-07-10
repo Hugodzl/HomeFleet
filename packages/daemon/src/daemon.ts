@@ -67,10 +67,11 @@ export interface DaemonOptions {
   /**
    * Receives informational component diagnostics — operator-facing one-line
    * strings that are not failures (so they don't belong in {@link onError}).
-   * Currently this is the WorkspaceStore's `logger` sink: eviction/gc notes
-   * and the startup warning about a legacy pre-0.1 workspace cache layout
-   * (which docs/reference/configuration.md promises the daemon logs).
-   * Defaults to a no-op.
+   * Current sources: the WorkspaceStore's `logger` sink (eviction/gc notes
+   * and the startup warning about a legacy pre-0.1 workspace cache layout,
+   * which docs/reference/configuration.md promises the daemon logs) and the
+   * DiscoveryAggregator's mDNS notices (collision- and watchdog-triggered
+   * renames, rename-budget exhaustion). Defaults to a no-op.
    */
   onDiagnostic?: (message: string) => void;
 }
@@ -370,6 +371,7 @@ export class Daemon {
       },
       knownNodes,
       onError: this.onError,
+      onDiagnostic: this.onDiagnostic,
     });
     await aggregator.start();
     this.teardown.push(() => aggregator.stop());

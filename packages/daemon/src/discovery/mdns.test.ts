@@ -73,17 +73,23 @@ function startDiscovery(
   own: DiscoveryAnnouncement,
   now = () => 1_751_800_000_000,
   timers?: FakeTimers,
-): { discovery: MdnsDiscovery; candidates: DiscoveryCandidate[] } {
+): {
+  discovery: MdnsDiscovery;
+  candidates: DiscoveryCandidate[];
+  diagnostics: string[];
+} {
   const candidates: DiscoveryCandidate[] = [];
+  const diagnostics: string[] = [];
   const discovery = new MdnsDiscovery({
     backend,
     announcement: own,
     onCandidate: (candidate) => candidates.push(candidate),
+    onDiagnostic: (message) => diagnostics.push(message),
     now,
     timers,
   });
   discovery.start();
-  return { discovery, candidates };
+  return { discovery, candidates, diagnostics };
 }
 
 test("advertises the announcement as a homefleet service with TXT records", () => {
@@ -561,4 +567,96 @@ test("stop tears down the publication, browser, and backend", async () => {
     addresses: ["192.168.1.30"],
   });
   expect(a.candidates).toEqual([]);
+});
+
+test("a collision rename emits an operator diagnostic naming both labels", async () => {
+  const backend = new FakeMdnsBackend();
+  const b = startDiscovery(backend, announcement(deviceIdB));
+
+  // A peer with the same name and a smaller deviceId: B loses the tie-break
+  // and renames. The diagnostic is the only operator-visible signal.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+
+  expect(b.diagnostics).toEqual([
+    'mDNS name collision on "tower": renamed to "tower (2)"',
+  ]);
+  await b.discovery.stop();
+});
+
+test("a watchdog rename emits an operator diagnostic naming both labels", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // The "tower" publication silently dies at probe time and never echoes.
+  backend.suppressDelivery = (request) => request.name === "tower";
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  timers.fire();
+
+  expect(a.diagnostics).toEqual([
+    'mDNS publication "tower" never confirmed by its own echo ' +
+      '(probe conflict?): renamed to "tower (2)"',
+  ]);
+  await a.discovery.stop();
+});
+
+test("rename-budget exhaustion is reported exactly once, then declines stay quiet", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  // No publication ever echoes (e.g. multicast loopback disabled): the
+  // watchdog burns all attempts and the final deadline finds the budget
+  // spent — the operator must hear about the degraded state, once.
+  backend.suppressDelivery = () => true;
+  const b = startDiscovery(backend, announcement(deviceIdB), undefined, timers);
+
+  while (timers.pendingCount() > 0) {
+    timers.fire();
+  }
+  expect(b.diagnostics.filter((m) => m.includes("renamed to"))).toHaveLength(9);
+  expect(
+    b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
+  ).toEqual([
+    'mDNS rename budget exhausted (10 attempts); staying on "tower (10)" ' +
+      "— mDNS discovery may be degraded",
+  ]);
+
+  // A colliding browse result while exhausted also declines the rename —
+  // but that says nothing new, so it must not repeat the message.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower (10)",
+    port: 47113,
+    txt: { id: deviceIdA, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  expect(
+    b.diagnostics.filter((m) => m.includes("rename budget exhausted")),
+  ).toHaveLength(1);
+  await b.discovery.stop();
+});
+
+test("the happy path emits no diagnostics", async () => {
+  const backend = new FakeMdnsBackend();
+  const timers = fakeTimers();
+  const a = startDiscovery(backend, announcement(deviceIdA), undefined, timers);
+
+  // Our publication is confirmed by its own echo, and a peer under a
+  // different name is not rename-worthy: the operator hears nothing.
+  backend.deliver({
+    type: "homefleet",
+    name: "laptop",
+    port: 47999,
+    txt: { id: deviceIdB, pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+  timers.fire();
+
+  expect(a.diagnostics).toEqual([]);
+  expect(a.candidates).toHaveLength(1);
+  await a.discovery.stop();
 });

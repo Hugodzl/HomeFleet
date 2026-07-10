@@ -175,6 +175,16 @@ export interface MdnsDiscoveryOptions {
   /** What this node advertises about itself. */
   announcement: DiscoveryAnnouncement;
   onCandidate: (candidate: DiscoveryCandidate) => void;
+  /**
+   * Receives operator-facing one-line diagnostics: every collision- or
+   * watchdog-triggered rename, and (once, on the first declined rename) the
+   * exhaustion of the rename budget. Renames are the protocol working as
+   * designed, not failures — but a rename storm ending in a parked,
+   * unconfirmed name is the only observable signature of a degraded mDNS
+   * environment (e.g. multicast loopback disabled), so it must be
+   * surfaceable. Defaults to a no-op.
+   */
+  onDiagnostic?: (message: string) => void;
   /** Injectable wall clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
   /**
@@ -198,6 +208,7 @@ export class MdnsDiscovery {
   private readonly backend: MdnsBackend;
   private readonly announcement: DiscoveryAnnouncement;
   private readonly onCandidate: (candidate: DiscoveryCandidate) => void;
+  private readonly onDiagnostic: (message: string) => void;
   private readonly now: () => number;
   private readonly timers: Required<MdnsDiscoveryOptions>["timers"];
   private publication: MdnsPublication | null = null;
@@ -210,12 +221,21 @@ export class MdnsDiscovery {
    * return value (`null` included) usable as a handle.
    */
   private echoWatchdog: { handle: unknown } | null = null;
+  /**
+   * Whether the budget-exhausted diagnostic has been emitted. The budget is
+   * monotonic (renameAttempt never decreases), so the transition into
+   * exhaustion happens once — but rename() can DECLINE many times after it
+   * (every colliding browse result while parked calls it), and repeating
+   * the message on each no-op call would spam the operator's log.
+   */
+  private exhaustionReported = false;
   private state: "new" | "started" | "stopped" = "new";
 
   constructor(options: MdnsDiscoveryOptions) {
     this.backend = options.backend;
     this.announcement = options.announcement;
     this.onCandidate = options.onCandidate;
+    this.onDiagnostic = options.onDiagnostic ?? (() => {});
     this.now = options.now ?? Date.now;
     this.timers = options.timers ?? {
       schedule: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -281,7 +301,7 @@ export class MdnsDiscovery {
       labelsEqual(service.name, this.currentName) &&
       this.losesTieBreak(decoded)
     ) {
-      this.rename();
+      this.rename("collision");
     }
     if (decoded === null) {
       // Untrusted input that failed validation: drop silently.
@@ -314,8 +334,15 @@ export class MdnsDiscovery {
     return peer !== null && peer.deviceId < this.announcement.deviceId;
   }
 
-  private rename(): void {
+  private rename(trigger: "collision" | "watchdog"): void {
     if (this.renameAttempt >= MAX_RENAME_ATTEMPTS) {
+      if (!this.exhaustionReported) {
+        this.exhaustionReported = true;
+        this.onDiagnostic(
+          `mDNS rename budget exhausted (${MAX_RENAME_ATTEMPTS} attempts); ` +
+            `staying on "${this.currentName}" — mDNS discovery may be degraded`,
+        );
+      }
       return;
     }
     this.renameAttempt += 1;
@@ -324,9 +351,19 @@ export class MdnsDiscovery {
       // Best-effort teardown of the colliding advertisement.
       void previous.stop().catch(() => {});
     }
+    const oldName = this.currentName;
     this.currentName = instanceLabel(
       this.announcement.name,
       this.renameAttempt,
+    );
+    // Emitted before publish(): a backend may cascade synchronously from
+    // publish (echoes, further collisions), and the diagnostics must read
+    // in chronological order.
+    this.onDiagnostic(
+      trigger === "collision"
+        ? `mDNS name collision on "${oldName}": renamed to "${this.currentName}"`
+        : `mDNS publication "${oldName}" never confirmed by its own echo ` +
+            `(probe conflict?): renamed to "${this.currentName}"`,
     );
     // Re-armed (superseding any watchdog on the old name) before publishing
     // — see start() for why arming must precede publish().
@@ -339,8 +376,9 @@ export class MdnsDiscovery {
    * unconfirmed deadline means the publication was killed at probe time and
    * it renames like a browsed collision. Where self-echo never arrives at
    * all (e.g. multicast loopback disabled), this burns at most
-   * {@link MAX_RENAME_ATTEMPTS} renames — `rename()` then declines and the
-   * node stays on its last name, unconfirmed but quiet.
+   * {@link MAX_RENAME_ATTEMPTS} renames — `rename()` then declines
+   * (reporting the exhaustion once through `onDiagnostic`) and the node
+   * stays on its last name, unconfirmed but quiet on the network.
    */
   private armEchoWatchdog(): void {
     this.cancelEchoWatchdog();
@@ -355,7 +393,7 @@ export class MdnsDiscovery {
         return;
       }
       this.echoWatchdog = null;
-      this.rename();
+      this.rename("watchdog");
     }, SELF_ECHO_DEADLINE_MS);
     this.echoWatchdog = wrapper;
   }

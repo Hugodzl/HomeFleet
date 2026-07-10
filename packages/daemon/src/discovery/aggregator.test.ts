@@ -62,6 +62,7 @@ interface Harness {
   registry: KnownNodesRegistry;
   seen: DiscoveryCandidate[];
   errors: unknown[];
+  diagnostics: string[];
   dataDir: string;
 }
 
@@ -78,18 +79,20 @@ async function startAggregator(
   const registry = options.registry ?? (await KnownNodesRegistry.load(dataDir));
   const seen: DiscoveryCandidate[] = [];
   const errors: unknown[] = [];
+  const diagnostics: string[] = [];
   const aggregator = new DiscoveryAggregator({
     config: config(options.configOverrides),
     announcement: announcement(deviceIdA),
     knownNodes: registry,
     onCandidate: (candidate) => seen.push(candidate),
     onError: (error) => errors.push(error),
+    onDiagnostic: (message) => diagnostics.push(message),
     now: options.now ?? (() => T0),
     mdnsBackend: backend,
   });
   await aggregator.start();
   cleanups.push(() => aggregator.stop());
-  return { aggregator, backend, registry, seen, errors, dataDir };
+  return { aggregator, backend, registry, seen, errors, diagnostics, dataDir };
 }
 
 function deliverPeer(
@@ -418,6 +421,25 @@ test("udp socket errors reach the aggregator's onError", async () => {
 
   expect(errors).toHaveLength(1);
   expect((errors[0] as Error).message).toBe("boom");
+});
+
+test("mdns rename diagnostics surface through the aggregator's onDiagnostic", async () => {
+  const { backend, diagnostics } = await startAggregator();
+
+  // A peer under our own name ("tower") with a smaller deviceId: our mDNS
+  // channel loses the tie-break and renames. The diagnostic must ride the
+  // aggregator's onDiagnostic — the channel has no other outlet.
+  backend.deliver({
+    type: "homefleet",
+    name: "tower",
+    port: 47113,
+    txt: { id: "00".repeat(32), pv: "0.1.0" },
+    addresses: ["192.168.1.30"],
+  });
+
+  expect(diagnostics).toEqual([
+    'mDNS name collision on "tower": renamed to "tower (2)"',
+  ]);
 });
 
 test("dedup: a stale identified sighting does not drop a fresh anonymous entry", async () => {
