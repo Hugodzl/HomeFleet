@@ -45,6 +45,15 @@ export {
   buildToolset,
 } from "./agent/toolset.js";
 export {
+  FINISH_TASK_TOOL_NAME,
+  type FinalizeWriteFn,
+  MAX_COMMIT_MESSAGE_CHARS,
+  MIN_VERIFY_TIMEOUT_MS,
+  VERIFY_OUTPUT_TAIL_CHARS,
+  WriteExecutor,
+  type WriteExecutorOptions,
+} from "./agent/write-executor.js";
+export {
   editFileTool,
   MAX_EDIT_TEXT_CHARS,
   MAX_WRITE_FILE_BYTES,

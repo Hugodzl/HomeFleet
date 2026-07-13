@@ -61,9 +61,10 @@ export const SUMMARY_TRUNCATION_MARKER = `\n[summary truncated: exceeded ${MAX_S
  * Caps the model's final content to {@link MAX_SUMMARY_BYTES}, cutting on a
  * UTF-8 character boundary (no split multi-byte char) and appending the
  * marker on overflow. Reuses the same byte-capping machinery as the spawn
- * capture and read_file.
+ * capture and read_file. Exported for the write executor, which caps its
+ * summaries (final content or finish_task's summary) identically.
  */
-function capSummary(content: string): string {
+export function capSummary(content: string): string {
   const { text, truncated } = decodeUtf8Capped(
     Buffer.from(content, "utf8"),
     MAX_SUMMARY_BYTES,
