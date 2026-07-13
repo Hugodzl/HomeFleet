@@ -273,7 +273,21 @@ export const AgentExecutorConfigSchema = z.strictObject({
 export type AgentExecutorConfig = z.infer<typeof AgentExecutorConfigSchema>;
 
 /**
- * Which executors this node offers. Both sub-keys OPTIONAL and absent by
+ * Write-executor config (code-writing jobs that produce commits). The shape
+ * is coincidentally IDENTICAL to `AgentExecutorConfigSchema` today — an
+ * OpenAI-compatible endpoint plus an optional command allowlist — but
+ * declared separately on purpose: the two may diverge (e.g. a future
+ * write-specific budget cap), so this is NOT an alias.
+ */
+export const WriteExecutorConfigSchema = z.strictObject({
+  endpoint: AgentEndpointConfigSchema,
+  /** Allowlist for the write agent's run_command tool; absent disables the tool. */
+  commandAllowlist: CommandAllowlistConfigSchema.optional(),
+});
+export type WriteExecutorConfig = z.infer<typeof WriteExecutorConfigSchema>;
+
+/**
+ * Which executors this node offers. All sub-keys OPTIONAL and absent by
  * default — fail closed: a fresh install runs NO executors (accepts no
  * jobs) until one is explicitly configured, the same posture as the
  * workspace allowlist.
@@ -281,6 +295,7 @@ export type AgentExecutorConfig = z.infer<typeof AgentExecutorConfigSchema>;
 export const ExecutorsConfigSchema = z.strictObject({
   command: CommandExecutorConfigSchema.optional(),
   agent: AgentExecutorConfigSchema.optional(),
+  write: WriteExecutorConfigSchema.optional(),
 });
 export type ExecutorsConfig = z.infer<typeof ExecutorsConfigSchema>;
 

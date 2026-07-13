@@ -101,9 +101,12 @@ function resolveNodeName(
  *
  * Roles are DERIVED from the configured executors, one honest mapping each:
  * `command` -> "execution" (the node runs command jobs), `agent` ->
- * "inference" (the node runs recon/agent jobs, which are inference work).
- * An agent executor does NOT imply the "execution" role: a node with only an
- * agent executor is inference-only — it accepts no plain command jobs.
+ * "inference" (the node runs recon/agent jobs, which are inference work),
+ * `write` -> "inference" (write jobs are the same agentic-inference work,
+ * pointed at code-writing). A role implied by two executors (agent + write)
+ * is advertised once. An agent or write executor does NOT imply the
+ * "execution" role: a node with only those is inference-only — it accepts
+ * no plain command jobs.
  *
  * Every call validates its output with `NodeInfoSchema.parse` — fail closed:
  * a bad config value or hostname can never emit an invalid profile to peers.
@@ -126,6 +129,13 @@ export function createNodeInfoProvider(
   if (config.executors.agent !== undefined) {
     executors.push("agent");
     roles.push("inference");
+  }
+  if (config.executors.write !== undefined) {
+    executors.push("write");
+    // agent + write both imply "inference"; a role is advertised only once.
+    if (!roles.includes("inference")) {
+      roles.push("inference");
+    }
   }
 
   // Static hardware facts, computed once. GPU detection is deliberately out

@@ -26,6 +26,15 @@ const AGENT_EXECUTOR = {
   },
 };
 
+/** Minimal valid write-executor config (same endpoint shape as agent today). */
+const WRITE_EXECUTOR = {
+  endpoint: {
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "test-write-model",
+    contextWindow: MIN_AGENT_CONTEXT_WINDOW,
+  },
+};
+
 /**
  * Builds a provider from a RAW config object (run through the real
  * DaemonConfigSchema, so tests exercise the exact shapes the daemon loads).
@@ -129,6 +138,25 @@ test("both executors -> both roles", () => {
     config: { executors: { command: {}, agent: AGENT_EXECUTOR } },
   })();
   expect(info.executors).toEqual(["command", "agent"]);
+  expect(info.roles).toEqual(["execution", "inference"]);
+});
+
+test("write executor only -> inference role only", () => {
+  const info = makeProvider({
+    config: { executors: { write: WRITE_EXECUTOR } },
+  })();
+  expect(info.executors).toEqual(["write"]);
+  expect(info.roles).toEqual(["inference"]);
+});
+
+test("all three executors -> all kinds advertised, roles deduplicated", () => {
+  const info = makeProvider({
+    config: {
+      executors: { command: {}, agent: AGENT_EXECUTOR, write: WRITE_EXECUTOR },
+    },
+  })();
+  expect(info.executors).toEqual(["command", "agent", "write"]);
+  // agent and write BOTH map to "inference"; the role is advertised once.
   expect(info.roles).toEqual(["execution", "inference"]);
 });
 

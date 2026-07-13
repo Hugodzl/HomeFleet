@@ -69,6 +69,7 @@ test("a missing config file yields all defaults", async () => {
   // No executors by default: a fresh install offers nothing (fail closed).
   expect(config.executors.command).toBeUndefined();
   expect(config.executors.agent).toBeUndefined();
+  expect(config.executors.write).toBeUndefined();
   // No job limits by default: the JobManager's own defaults apply.
   expect(config.jobs.maxConcurrentJobs).toBeUndefined();
   expect(config.jobs.maxQueuedJobs).toBeUndefined();
@@ -215,6 +216,10 @@ test("a full valid config round-trips every M9 section", async () => {
   await writeConfig(dir, JSON.stringify(full));
   const config = await loadDaemonConfig(dir);
   expect(config).toMatchObject(full);
+  // The full config above deliberately omits `executors.write`: a fully
+  // configured node still runs NO write executor until one is explicitly
+  // added (fail closed, same posture as the other executors).
+  expect(config.executors.write).toBeUndefined();
 });
 
 test("partial hfp/mcp/control configs merge with defaults", async () => {
@@ -279,6 +284,50 @@ test("an agent endpoint contextWindow below the floor throws", async () => {
 test("an agent executor without an endpoint throws", async () => {
   const dir = await newDataDir();
   await writeConfig(dir, JSON.stringify({ executors: { agent: {} } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a write executor parses endpoint + commandAllowlist (same shapes as agent)", async () => {
+  const dir = await newDataDir();
+  const write = {
+    endpoint: {
+      baseUrl: "http://192.168.1.9:1234/v1",
+      apiKey: "sk-local",
+      model: "qwen3-coder",
+      contextWindow: 65536,
+    },
+    commandAllowlist: { pnpm: { executable: "pnpm.cmd" } },
+  };
+  await writeConfig(dir, JSON.stringify({ executors: { write } }));
+  const config = await loadDaemonConfig(dir);
+  expect(config.executors.write).toEqual(write);
+  // Configuring write does not implicitly enable the other executors.
+  expect(config.executors.command).toBeUndefined();
+  expect(config.executors.agent).toBeUndefined();
+});
+
+test("a write executor without an endpoint throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ executors: { write: {} } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a write endpoint contextWindow below the floor throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: {
+        write: {
+          endpoint: {
+            baseUrl: "http://localhost:1234/v1",
+            model: "m",
+            contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
+          },
+        },
+      },
+    }),
+  );
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
