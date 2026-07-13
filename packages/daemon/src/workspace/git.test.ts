@@ -3,18 +3,22 @@
  * created in temp dirs — no faking of git. The timeout/kill path is exercised
  * via the `binary` test seam (a long-lived `node` child).
  */
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
 import {
   addWorktree,
   COMMIT_HASH_RE,
+  commitAllInWorktree,
   commitPresent,
   createBundle,
+  createWorkerBundle,
+  diffStat,
   fetchBundleHead,
   initBareRepo,
   isAncestor,
+  listBundleHeads,
   ok,
   removeWorktree,
   resolveHeadCommit,
@@ -293,4 +297,253 @@ test("updateRef advances a tip that revParse reads back", async () => {
   await updateRef(worker, "refs/homefleet/tip", head);
   expect(await revParse(worker, "refs/homefleet/tip")).toBe(head);
   expect(await revParse(worker, "refs/homefleet/missing")).toBeNull();
+});
+
+// --- write-job finalize helpers (v0.2) --------------------------------------
+
+/**
+ * Source commit -> worker cache -> detached worktree: the shape a write job's
+ * ephemeral worktree has when finalize runs. The base commit carries TWO
+ * files (`file.txt` = "line 0\n", `extra.txt`) so a deletion can be staged.
+ */
+async function makeWorkerWorktree(): Promise<{
+  worker: WorkerGit;
+  worktreeDir: string;
+  base: string;
+}> {
+  const repo = await makeRepo();
+  await writeFile(path.join(repo.repoPath, "extra.txt"), "delete me\n");
+  const base = await repo.commit("c1"); // commit() stages -A: both files
+  const bundlePath = path.join(await tempDir("homefleet-bundle-"), "b.bundle");
+  await createBundle({ repoPath: repo.repoPath, bundlePath, headCommit: base });
+  const worker = await makeWorker();
+  const fetched = await fetchBundleHead(
+    worker,
+    bundlePath,
+    "refs/homefleet/tip",
+  );
+  if (!ok(fetched)) {
+    throw new Error(`fixture fetch failed: ${fetched.stderr}`);
+  }
+  const worktreeDir = path.join(await tempDir("homefleet-wt-"), "wt");
+  const added = await addWorktree(worker, worktreeDir, base);
+  if (!ok(added)) {
+    throw new Error(`fixture worktree failed: ${added.stderr}`);
+  }
+  return { worker, worktreeDir, base };
+}
+
+const JOB_IDENTITY = {
+  authorName: "HomeFleet Worker",
+  authorEmail: "worker@abcd1234.invalid",
+};
+const JOB_SIGNATURE =
+  "HomeFleet Worker <worker@abcd1234.invalid> " +
+  "HomeFleet Worker <worker@abcd1234.invalid>";
+
+test("commitAllInWorktree stages new/modified/deleted files in ONE commit with author AND committer identity", async () => {
+  const { worker, worktreeDir, base } = await makeWorkerWorktree();
+  await writeFile(path.join(worktreeDir, "new.txt"), "brand new\n");
+  await writeFile(path.join(worktreeDir, "file.txt"), "line 0\nmodified\n");
+  await rm(path.join(worktreeDir, "extra.txt"));
+
+  const head = await commitAllInWorktree(worker, worktreeDir, {
+    message: "job: apply the requested change",
+    ...JOB_IDENTITY,
+  });
+
+  if (head === null) {
+    throw new Error("expected a commit on a dirtied tree");
+  }
+  expect(head).toMatch(COMMIT_HASH_RE);
+  expect(head).not.toBe(base);
+  // Author AND committer are the passed identity (design doc §2, "Commit").
+  const identity = await runGit(
+    ["log", "-1", "--format=%an <%ae> %cn <%ce>", head],
+    { cwd: worktreeDir, timeoutMs: 30_000 },
+  );
+  expect(identity.stdout.trim()).toBe(JOB_SIGNATURE);
+  const subject = await runGit(["log", "-1", "--format=%s", head], {
+    cwd: worktreeDir,
+    timeoutMs: 30_000,
+  });
+  expect(subject.stdout.trim()).toBe("job: apply the requested change");
+  // All three change kinds landed in the one commit (`git add -A` semantics).
+  const status = await runGit(
+    ["diff", "--name-status", "--no-renames", base, head],
+    { cwd: worktreeDir, timeoutMs: 30_000 },
+  );
+  const lines = status.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " "))
+    .sort();
+  expect(lines).toEqual(["A new.txt", "D extra.txt", "M file.txt"]);
+}, 30_000);
+
+test("commitAllInWorktree returns null on a clean tree and does not move HEAD", async () => {
+  const { worker, worktreeDir, base } = await makeWorkerWorktree();
+
+  const head = await commitAllInWorktree(worker, worktreeDir, {
+    message: "nothing to commit",
+    ...JOB_IDENTITY,
+  });
+
+  expect(head).toBeNull();
+  const current = await runGit(["rev-parse", "HEAD"], {
+    cwd: worktreeDir,
+    timeoutMs: 30_000,
+  });
+  expect(current.stdout.trim()).toBe(base);
+}, 30_000);
+
+test("ambient GIT_AUTHOR_*/GIT_COMMITTER_* env cannot override the passed commit identity", async () => {
+  // Git resolves identity from GIT_AUTHOR_*/GIT_COMMITTER_* env vars ABOVE
+  // `-c user.*` config, so runGit must strip them from the child env the
+  // same way it neutralizes ambient config files.
+  const { worker, worktreeDir } = await makeWorkerWorktree();
+  await writeFile(path.join(worktreeDir, "new.txt"), "x\n");
+  const keys = [
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+  ] as const;
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  process.env.GIT_AUTHOR_NAME = "Ambient Author";
+  process.env.GIT_AUTHOR_EMAIL = "ambient-author@example.com";
+  process.env.GIT_COMMITTER_NAME = "Ambient Committer";
+  process.env.GIT_COMMITTER_EMAIL = "ambient-committer@example.com";
+  try {
+    const head = await commitAllInWorktree(worker, worktreeDir, {
+      message: "identity pin",
+      ...JOB_IDENTITY,
+    });
+    if (head === null) {
+      throw new Error("expected a commit on a dirtied tree");
+    }
+    const identity = await runGit(
+      ["log", "-1", "--format=%an <%ae> %cn <%ce>", head],
+      { cwd: worktreeDir, timeoutMs: 30_000 },
+    );
+    expect(identity.stdout.trim()).toBe(JOB_SIGNATURE);
+  } finally {
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}, 30_000);
+
+test("diffStat parses zero-change, insertions-only, deletions-only, and mixed ranges", async () => {
+  const repo = await makeRepo();
+  await writeFile(path.join(repo.repoPath, "extra.txt"), "one\ntwo\n");
+  const c1 = await repo.commit("c1"); // file.txt (1 line) + extra.txt (2 lines)
+  const c2 = await repo.commit("c2"); // appends one line to file.txt
+  const runIn = async (args: string[]): Promise<void> => {
+    const result = await runGit(args, {
+      cwd: repo.repoPath,
+      timeoutMs: 30_000,
+    });
+    if (!ok(result)) {
+      throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    }
+  };
+  await rm(path.join(repo.repoPath, "extra.txt"));
+  await runIn(["add", "-A"]);
+  await runIn(["commit", "--quiet", "-m", "c3: delete extra.txt"]);
+  const c3 = await resolveHeadCommit(repo.repoPath, 30_000);
+
+  const worker = await makeWorker(); // supplies timeout/config; cwd names the repo
+  expect(await diffStat(worker, repo.repoPath, c1, c1)).toEqual({
+    filesChanged: 0,
+    insertions: 0,
+    deletions: 0,
+  });
+  expect(await diffStat(worker, repo.repoPath, c1, c2)).toEqual({
+    filesChanged: 1,
+    insertions: 1,
+    deletions: 0,
+  });
+  expect(await diffStat(worker, repo.repoPath, c2, c3)).toEqual({
+    filesChanged: 1,
+    insertions: 0,
+    deletions: 2,
+  });
+  expect(await diffStat(worker, repo.repoPath, c1, c3)).toEqual({
+    filesChanged: 2,
+    insertions: 1,
+    deletions: 2,
+  });
+}, 30_000);
+
+test("diffStat pins a rename-only commit as changed-with-zero-churn", async () => {
+  const repo = await makeRepo();
+  const c1 = await repo.commit("c1");
+  const runIn = async (args: string[]): Promise<void> => {
+    const result = await runGit(args, {
+      cwd: repo.repoPath,
+      timeoutMs: 30_000,
+    });
+    if (!ok(result)) {
+      throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    }
+  };
+  await runIn(["mv", "file.txt", "renamed.txt"]);
+  await runIn(["commit", "--quiet", "-m", "rename only"]);
+  const c2 = await resolveHeadCommit(repo.repoPath, 30_000);
+
+  const worker = await makeWorker();
+  const stat = await diffStat(worker, repo.repoPath, c1, c2);
+  expect(stat.filesChanged).toBeGreaterThanOrEqual(1);
+  expect(stat.insertions).toBe(0);
+  expect(stat.deletions).toBe(0);
+}, 30_000);
+
+test("createWorkerBundle bundles ref --not base from the bare repo; heads and verify line up", async () => {
+  const { worker, worktreeDir, base } = await makeWorkerWorktree();
+  await writeFile(path.join(worktreeDir, "new.txt"), "artifact content\n");
+  const head = await commitAllInWorktree(worker, worktreeDir, {
+    message: "artifact commit",
+    ...JOB_IDENTITY,
+  });
+  if (head === null) {
+    throw new Error("expected a commit on a dirtied tree");
+  }
+  // The worktree shares the bare repo's object store: the new commit is
+  // already visible there, so the result ref can be minted in the bare repo.
+  const ref = "refs/heads/homefleet/aaaaaaaaaaaa";
+  expect(ok(await updateRef(worker, ref, head))).toBe(true);
+
+  const bundlePath = path.join(
+    await tempDir("homefleet-bundle-"),
+    "artifact.bundle",
+  );
+  const created = await createWorkerBundle(worker, { bundlePath, ref, base });
+  expect(ok(created)).toBe(true);
+  expect((await stat(bundlePath)).size).toBeGreaterThan(0);
+
+  // Exactly one advertised ref: the result branch at the new head.
+  const heads = await listBundleHeads(worker, bundlePath);
+  expect([...heads.entries()]).toEqual([[ref, head]]);
+  // The bare repo holds the prerequisite (base), so verify accepts it...
+  expect(await verifyBundle(worker, bundlePath)).toBe(true);
+  // ...while a fresh cache without base rejects it (a real incremental).
+  const fresh = await makeWorker();
+  expect(await verifyBundle(fresh, bundlePath)).toBe(false);
+}, 30_000);
+
+test("createWorkerBundle refuses a malformed base commit", async () => {
+  const worker = await makeWorker();
+  await expect(
+    createWorkerBundle(worker, {
+      bundlePath: path.join(await tempDir("homefleet-bundle-"), "x.bundle"),
+      ref: "refs/heads/homefleet/aaaaaaaaaaaa",
+      base: "not-a-commit",
+    }),
+  ).rejects.toThrow(/invalid/);
 });

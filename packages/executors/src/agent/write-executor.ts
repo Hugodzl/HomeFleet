@@ -205,10 +205,14 @@ function tailChars(text: string, maxChars: number): string {
  * The injected finalize step: stages and commits the workspace's changes
  * under `commitMessage` and returns the resulting artifact, or `null` for a
  * clean tree (the model declared done without changing anything worth
- * keeping). The real implementation (ephemeral worktree commit, branch and
- * bundle bookkeeping) arrives with the workspace tasks; injecting it keeps
- * this executor free of git plumbing. A rejection here fails the job with
- * INTERNAL — the work may be committed, but it cannot be delivered.
+ * keeping). The real implementation is `WorkspaceStore.finalizeWriteJob`
+ * (worktree commit, branch and bundle bookkeeping), wired via closure at
+ * daemon assembly; injecting it keeps this executor free of git plumbing.
+ * A rejection here fails the job with INTERNAL — the work may be committed,
+ * but it cannot be delivered — UNLESS the job's signal is aborted, in which
+ * case the rejection is the cancellation surfacing (the store rejects with
+ * an AbortError-named error once its git ops are killed) and the job maps
+ * to canceled.
  */
 export type FinalizeWriteFn = (input: {
   jobId: JobId;
@@ -433,6 +437,20 @@ export class WriteExecutor implements Executor<"write"> {
         signal: context.signal,
       });
     } catch (error) {
+      if (context.signal.aborted) {
+        // The rejection IS the cancellation surfacing: the job's signal
+        // kills finalize's git ops (the workspace store rejects with an
+        // AbortError-named error), so this is a canceled job, not an
+        // internal failure. Any committed-but-undelivered work is discarded
+        // with the worktree, like every other cancellation.
+        return {
+          jobId: context.jobId,
+          type: this.type,
+          status: "canceled",
+          stats: stats(),
+          error: { code: "CANCELED", message: "job canceled during finalize" },
+        };
+      }
       return {
         jobId: context.jobId,
         type: this.type,

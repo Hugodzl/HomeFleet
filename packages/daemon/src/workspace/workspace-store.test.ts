@@ -17,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { WriteArtifactSchema } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
 import {
@@ -24,10 +25,12 @@ import {
   commitPresent,
   countObjects,
   createBundle,
+  listBundleHeads,
   ok,
   removeWorktree,
   resolveHeadCommit,
   runGit,
+  verifyBundle,
   type WorkerGit,
 } from "./git.js";
 import {
@@ -1262,3 +1265,253 @@ test("legacy pre-0.1 cache dirs (64-hex) are warned about once and left in place
   ).toHaveLength(1);
   expect((await stat(legacyDir)).isDirectory()).toBe(true);
 });
+
+// --- write-job finalize: commit -> branch -> diffstat -> bundle (Task 6) ----
+
+test("finalizeWriteJob commits, bundles, and returns a schema-valid artifact; the branch ref is transient", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  // The model's work: one new file, one modified file.
+  await writeFile(path.join(handle.dir, "new.txt"), "created by the job\n");
+  await writeFile(
+    path.join(handle.dir, "file.txt"),
+    "content 0\nplus a new line\n",
+  );
+
+  const artifact = await store.finalizeWriteJob({
+    jobId: JOB_A,
+    commitMessage: "Add new.txt and extend file.txt",
+    deviceId8: "abcd1234",
+  });
+
+  // Shape-exact under the wire schema (the executor's JobResultSchema.parse
+  // backstop makes any deviation a job-rejecting programmer error).
+  if (artifact === null) {
+    throw new Error("expected an artifact for a dirtied worktree");
+  }
+  const parsed = WriteArtifactSchema.parse(artifact);
+  expect(parsed.branchName).toBe("homefleet/aaaaaaaaaaaa");
+  expect(parsed.baseCommit).toBe(c1);
+  expect(parsed.headCommit).not.toBe(c1);
+  expect(parsed.diffStat).toEqual({
+    filesChanged: 2,
+    insertions: 2,
+    deletions: 0,
+  });
+  expect(parsed.commitMessage).toBe("Add new.txt and extend file.txt");
+
+  // Author AND committer identity (design doc §2, "Commit").
+  const worker = workerFor(cacheDir, "repo-a");
+  const identity = await runGit(
+    ["log", "-1", "--format=%an <%ae> %cn <%ce>", parsed.headCommit],
+    { cwd: worker.repoDir, timeoutMs: 30_000 },
+  );
+  expect(identity.stdout.trim()).toBe(
+    "HomeFleet Worker <worker@abcd1234.invalid> " +
+      "HomeFleet Worker <worker@abcd1234.invalid>",
+  );
+
+  // The bundle sits at <repoRoot>/jobs/<jobId12>.bundle and advertises
+  // exactly the result branch at the new head; the bare repo (which holds
+  // the base) verifies it.
+  const bundlePath = path.join(
+    cacheDir,
+    repoKey("repo-a"),
+    "jobs",
+    "aaaaaaaaaaaa.bundle",
+  );
+  expect((await stat(bundlePath)).size).toBeGreaterThan(0);
+  const heads = await listBundleHeads(worker, bundlePath);
+  expect([...heads.entries()]).toEqual([
+    ["refs/heads/homefleet/aaaaaaaaaaaa", parsed.headCommit],
+  ]);
+  expect(await verifyBundle(worker, bundlePath)).toBe(true);
+
+  // The branch ref was deleted after bundling: the bundle is self-contained,
+  // and a lingering ref would leak into future have/gc decisions.
+  const refs = await runGit(["show-ref", "homefleet/aaaaaaaaaaaa"], {
+    cwd: worker.repoDir,
+    timeoutMs: 30_000,
+  });
+  expect(refs.code).not.toBe(0);
+  expect(refs.stdout.trim()).toBe("");
+
+  // release() removes the worktree but NEVER the bundle (a jobs/ SIBLING of
+  // the worktree dir): the artifact's lifetime is the job's, not the
+  // handle's — job eviction / the next init purge reap it.
+  await releaseSettled(handle);
+  await expect(stat(handle.dir)).rejects.toThrow();
+  expect((await stat(bundlePath)).size).toBeGreaterThan(0);
+}, 60_000);
+
+test("finalizeWriteJob returns null on a clean tree: no commit, no ref, no bundle", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+
+  const artifact = await store.finalizeWriteJob({
+    jobId: JOB_A,
+    commitMessage: "would-be message",
+    deviceId8: "abcd1234",
+  });
+
+  expect(artifact).toBeNull();
+  // The worktree still sits at the base commit.
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: handle.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  // No bundle, no ref.
+  const bundlePath = path.join(
+    cacheDir,
+    repoKey("repo-a"),
+    "jobs",
+    "aaaaaaaaaaaa.bundle",
+  );
+  await expect(stat(bundlePath)).rejects.toThrow();
+  const worker = workerFor(cacheDir, "repo-a");
+  const refs = await runGit(["show-ref", "homefleet/aaaaaaaaaaaa"], {
+    cwd: worker.repoDir,
+    timeoutMs: 30_000,
+  });
+  expect(refs.code).not.toBe(0);
+  await releaseSettled(handle);
+}, 45_000);
+
+test("finalizeWriteJob for a jobId without a live write worktree fails NO_WRITE_WORKSPACE", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const rejection = await store
+    .finalizeWriteJob({
+      jobId: JOB_A,
+      commitMessage: "m",
+      deviceId8: "abcd1234",
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+  expect(rejection).toBeInstanceOf(WorkspaceError);
+  expect((rejection as WorkspaceError).code).toBe("NO_WRITE_WORKSPACE");
+});
+
+test("a stopped store refuses finalizeWriteJob", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  await writeFile(path.join(handle.dir, "new.txt"), "too late\n");
+
+  await store.stop();
+
+  await expect(
+    store.finalizeWriteJob({
+      jobId: JOB_A,
+      commitMessage: "m",
+      deviceId8: "abcd1234",
+    }),
+  ).rejects.toMatchObject({ code: "GIT_FAILED", message: /stopped/i });
+}, 45_000);
+
+test("aborting the job signal mid-finalize rejects with an AbortError-named error and commits nothing", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  await writeFile(path.join(handle.dir, "new.txt"), "unfinished\n");
+
+  // Gated-lock pattern: park the repo lock so finalize queues behind the
+  // gate, abort the JOB signal while it waits, then open the gate — the
+  // finalize's locked callback observes the abort before any git op.
+  const internals = store as unknown as {
+    withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T>;
+  };
+  let openGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const blocker = internals.withRepoLock(repoKey("repo-a"), () => gate);
+  const controller = new AbortController();
+  const finalizing = store.finalizeWriteJob({
+    jobId: JOB_A,
+    commitMessage: "never lands",
+    deviceId8: "abcd1234",
+    signal: controller.signal,
+  });
+  controller.abort();
+  openGate();
+
+  const rejection = await finalizing.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).name).toBe("AbortError");
+  await blocker;
+
+  // Nothing was committed or bundled; the entry stays live for release().
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: handle.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  const bundlePath = path.join(
+    cacheDir,
+    repoKey("repo-a"),
+    "jobs",
+    "aaaaaaaaaaaa.bundle",
+  );
+  await expect(stat(bundlePath)).rejects.toThrow();
+  expect(store.writeJobWorkspace(JOB_A)).toBeDefined();
+  await releaseSettled(handle);
+}, 45_000);
+
+test("an already-aborted job signal rejects finalizeWriteJob before any git op", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  const controller = new AbortController();
+  controller.abort();
+
+  const rejection = await store
+    .finalizeWriteJob({
+      jobId: JOB_A,
+      commitMessage: "m",
+      deviceId8: "abcd1234",
+      signal: controller.signal,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).name).toBe("AbortError");
+  await releaseSettled(handle);
+}, 45_000);

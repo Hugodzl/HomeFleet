@@ -674,6 +674,39 @@ test("a throwing finalize fails the job with INTERNAL naming finalize, and verif
   expect(result.verify).toBeUndefined();
 });
 
+test("a finalize rejection under an aborted job signal maps to canceled, not INTERNAL", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([{ kind: "content", content: "done" }]);
+  const controller = new AbortController();
+  // The real finalize (workspace store) rejects with an AbortError-named
+  // error once the job's signal kills its git ops; this fake models a
+  // cancellation landing mid-finalize.
+  const finalize = fakeFinalize(async () => {
+    controller.abort();
+    const error = new Error("write-job finalize aborted");
+    error.name = "AbortError";
+    throw error;
+  });
+  const executor = makeExecutor(endpoint, finalize.fn, {
+    commandAllowlist: nodeAllowlist,
+  });
+  const { context } = harness(ws, { signal: controller.signal });
+
+  const result = await executor.execute(
+    params({ verifyCommand: { name: "node", args: ["-e", ""] } }),
+    context,
+  );
+
+  assertValid(result);
+  // A canceled job, not an internal failure: the rejection IS the abort
+  // surfacing. No artifact was produced, and verify must not run either.
+  expect(result.status).toBe("canceled");
+  expect(result.error?.code).toBe("CANCELED");
+  expect(result.artifact).toBeUndefined();
+  expect(result.verify).toBeUndefined();
+  expect(finalize.calls).toHaveLength(1);
+});
+
 // ---------------------------------------------------------------------------
 // 5. verify
 // ---------------------------------------------------------------------------

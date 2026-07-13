@@ -75,14 +75,20 @@ import {
   type JobId,
   jobId12,
   type WorkspaceRef,
+  type WriteArtifact,
+  writeBranchName,
 } from "@homefleet/protocol";
 import type { WorkspaceResolver } from "../jobs/job-manager.js";
 import {
   addWorktree,
   COMMIT_HASH_RE,
+  commitAllInWorktree,
   commitPresent,
+  createWorkerBundle,
+  type DiffStatCounts,
   deleteRef,
   describeGitFailure,
+  diffStat,
   fetchBundleHead,
   GitError,
   gc,
@@ -103,6 +109,8 @@ const TIP_REF = "refs/homefleet/tip";
 const INCOMING_REF = "refs/homefleet/incoming";
 /** The ref name our bundles advertise their head under (`git bundle create HEAD`). */
 const BUNDLE_HEAD_REF = "HEAD";
+/** Author/committer name on every write-job commit (design doc §2, "Commit"). */
+const WRITE_AUTHOR_NAME = "HomeFleet Worker";
 
 export type WorkspaceErrorCode =
   | "REPO_NOT_ALLOWED"
@@ -115,7 +123,15 @@ export type WorkspaceErrorCode =
    * or mid-materialization, not yet released). Maps to `INVALID_REQUEST` on
    * the wire: the request is invalid given the job's current state.
    */
-  | "WRITE_IN_PROGRESS";
+  | "WRITE_IN_PROGRESS"
+  /**
+   * `finalizeWriteJob` was called for a jobId with no live write worktree
+   * (never resolved, resolve failed, or already released). Reaching this
+   * means the write-job lifecycle (resolve -> execute -> finalize ->
+   * release) was broken by the caller; the WriteExecutor surfaces it as a
+   * failed/INTERNAL result. Maps to `INVALID_REQUEST` on the wire.
+   */
+  | "NO_WRITE_WORKSPACE";
 
 /** A typed workspace failure the sync routes/resolver map to HFP errors. */
 export class WorkspaceError extends Error {
@@ -600,7 +616,221 @@ export class WorkspaceStore {
     return entry === undefined ? undefined : { ...entry };
   }
 
+  /**
+   * Turns a finished write job's worktree into its deliverable artifact:
+   * commit everything, mint the result branch ref in the bare repo, measure
+   * the diffstat, bundle `branch --not base` to
+   * `<repoRoot>/jobs/<jobId12>.bundle`, delete the ref again (the bundle is
+   * self-contained; a lingering ref would leak into future have/gc
+   * decisions), and return the wire-schema-shaped artifact. Returns `null`
+   * on a clean tree — the model declared done without changing anything —
+   * with no commit, no ref, and no bundle.
+   *
+   * Runs post-executor, so the job's worktree is materialized; the registry
+   * entry (which exists from reservation time) is the jobId -> workspace
+   * bridge. ALL git here runs inside ONE per-repo locked callback
+   * ({@link withRepoLock} is non-reentrant), so a finalize can never
+   * interleave with a sync, gc, or checkout on the same repo.
+   *
+   * The bundle DELIBERATELY outlives the handle's `release()` (which
+   * removes only the worktree dir): as a `jobs/` SIBLING of the worktree it
+   * survives until job eviction (ArtifactStore.remove, Task 7) or the next
+   * {@link init}'s wholesale jobs purge deletes it.
+   *
+   * Cancellation: `input.signal` (the JOB's) is composed with the store's
+   * own stop signal into every git op here. A job abort surfaces as a
+   * rejection whose `name` is `"AbortError"` — the WriteExecutor maps that
+   * to a canceled result — while a store stop keeps the usual
+   * stopped/GIT_FAILED shape.
+   */
+  async finalizeWriteJob(input: {
+    jobId: JobId;
+    /** Already capped by the executor to WriteArtifactSchema's max length. */
+    commitMessage: string;
+    /** Short device id for the author email: `worker@<deviceId8>.invalid`. */
+    deviceId8: string;
+    /** The job's cancellation; the store's stop signal is composed in. */
+    signal?: AbortSignal;
+  }): Promise<WriteArtifact | null> {
+    this.requireNotStopped();
+    const { jobId, commitMessage, deviceId8, signal } = input;
+    throwIfJobAborted(signal);
+    const entry = this.writeWorkspaces.get(jobId);
+    if (entry === undefined) {
+      throw new WorkspaceError(
+        "NO_WRITE_WORKSPACE",
+        "no live write worktree for this job (never resolved, or already released)",
+        { jobId },
+      );
+    }
+    // Compose job + store cancellation for this finalize's git ops. By hand
+    // rather than AbortSignal.any, mirroring loop.ts: the listeners are
+    // deterministically removed when the finalize settles.
+    const controller = new AbortController();
+    const onAbort = (): void => controller.abort();
+    this.abort.signal.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (this.abort.signal.aborted || signal?.aborted === true) {
+      controller.abort();
+    }
+    try {
+      return await this.withRepoLock(entry.repoKey, () =>
+        this.finalizeWriteJobLocked(entry, {
+          jobId,
+          commitMessage,
+          deviceId8,
+          jobSignal: signal,
+          opSignal: controller.signal,
+        }),
+      );
+    } finally {
+      this.abort.signal.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   // --- internals -----------------------------------------------------------
+
+  /**
+   * The locked body of {@link finalizeWriteJob}. MUST be called under the
+   * repo's lock and must never re-acquire it (non-reentrancy). `opSignal`
+   * (job + store, composed) cancels the git ops; `jobSignal` alone decides
+   * whether a failure surfaces as the job's AbortError or as GIT_FAILED.
+   */
+  private async finalizeWriteJobLocked(
+    entry: WriteWorkspaceEntry,
+    input: {
+      jobId: JobId;
+      commitMessage: string;
+      deviceId8: string;
+      jobSignal: AbortSignal | undefined;
+      opSignal: AbortSignal;
+    },
+  ): Promise<WriteArtifact | null> {
+    // Queued behind the lock: a stop() or job abort may have landed since
+    // the public entry point's checks (the op-granularity discipline).
+    this.requireNotStopped();
+    const { jobId, jobSignal } = input;
+    throwIfJobAborted(jobSignal);
+    if (this.writeWorkspaces.get(jobId) !== entry) {
+      // A release queued ahead of this finalize deregistered the worktree
+      // (a lifecycle misuse — finalize runs before release): surface the
+      // typed error rather than letting the commit fail on a missing dir.
+      throw new WorkspaceError(
+        "NO_WRITE_WORKSPACE",
+        "the write worktree for this job was released before finalize ran",
+        { jobId },
+      );
+    }
+    const worker: WorkerGit = {
+      ...this.worker(entry.repoKey),
+      signal: input.opSignal,
+    };
+    const base = entry.baseCommit;
+
+    let head: string | null;
+    try {
+      head = await commitAllInWorktree(worker, entry.dir, {
+        message: input.commitMessage,
+        authorName: WRITE_AUTHOR_NAME,
+        authorEmail: `worker@${input.deviceId8}.invalid`,
+      });
+    } catch (error) {
+      throw this.finalizeFailure(
+        jobSignal,
+        jobId,
+        `could not commit write-job changes: ${describeError(error)}`,
+      );
+    }
+    if (head === null) {
+      return null; // clean tree: no commit, no ref, no bundle
+    }
+
+    const branchName = writeBranchName(jobId);
+    const branchRef = `refs/heads/${branchName}`;
+    // The worktree shares the bare repo's object store, so the new commit
+    // is already visible there; the ref exists only for `bundle create`.
+    const updated = await updateRef(worker, branchRef, head);
+    if (!ok(updated)) {
+      throw this.finalizeFailure(
+        jobSignal,
+        jobId,
+        `could not create the artifact branch ref: ${describeGitFailure(updated)}`,
+      );
+    }
+    try {
+      let stat: DiffStatCounts;
+      try {
+        stat = await diffStat(worker, worker.repoDir, base, head);
+      } catch (error) {
+        throw this.finalizeFailure(
+          jobSignal,
+          jobId,
+          `could not measure the artifact diffstat: ${describeError(error)}`,
+        );
+      }
+      const bundlePath = this.writeBundlePath(entry.repoKey, jobId);
+      const bundled = await createWorkerBundle(worker, {
+        bundlePath,
+        ref: branchRef,
+        base,
+      });
+      if (!ok(bundled)) {
+        // A failed `bundle create` can leave a partial file behind.
+        try {
+          await rm(bundlePath, { force: true });
+        } catch {
+          // Best effort; the next init()'s jobs purge is the backstop.
+        }
+        throw this.finalizeFailure(
+          jobSignal,
+          jobId,
+          `could not bundle the artifact: ${describeGitFailure(bundled)}`,
+        );
+      }
+      return {
+        branchName,
+        baseCommit: base,
+        headCommit: head,
+        diffStat: stat,
+        commitMessage: input.commitMessage,
+      };
+    } finally {
+      // The bundle is self-contained (its one prerequisite is baseCommit,
+      // which the delegator holds by construction); a lingering branch ref
+      // would anchor the job's objects into future gc and have/incremental
+      // decisions. Deleted via the STORE's own worker — no job signal — so
+      // a job abort cannot also kill the cleanup. Best effort by contract.
+      await deleteRef(this.worker(entry.repoKey), branchRef);
+    }
+  }
+
+  /**
+   * Failure shaping for the finalize path: a JOB abort surfaces as the
+   * AbortError the WriteExecutor maps to a canceled result (the failed git
+   * op was collateral of the kill, not a git problem); anything else is the
+   * usual typed GIT_FAILED.
+   */
+  private finalizeFailure(
+    jobSignal: AbortSignal | undefined,
+    jobId: JobId,
+    message: string,
+  ): Error {
+    if (jobSignal?.aborted === true) {
+      return writeAbortError();
+    }
+    return new WorkspaceError("GIT_FAILED", message, { jobId });
+  }
+
+  /**
+   * The write job's artifact bundle: `<repoRoot>/jobs/<jobId12>.bundle` — a
+   * SIBLING of the job's worktree dir, so the handle's `release()` (which
+   * removes only the worktree dir) never deletes a delivered artifact.
+   * Reaped by job eviction (Task 7) or {@link init}'s wholesale jobs purge.
+   */
+  private writeBundlePath(rKey: string, jobId: JobId): string {
+    return `${this.writeWorktreeDir(rKey, jobId)}.bundle`;
+  }
 
   /**
    * Fails closed once {@link stop} has run. Reuses the `GIT_FAILED` code (no new
@@ -1200,4 +1430,22 @@ async function isPopulatedCheckout(dir: string): Promise<boolean> {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The rejection a JOB abort surfaces as from {@link
+ * WorkspaceStore.finalizeWriteJob}: `name === "AbortError"` is the contract
+ * the WriteExecutor keys its canceled-not-INTERNAL mapping on.
+ */
+function writeAbortError(): Error {
+  const error = new Error("write-job finalize aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+/** Throws the {@link writeAbortError} iff the job's signal has fired. */
+function throwIfJobAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw writeAbortError();
+  }
 }

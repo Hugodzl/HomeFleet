@@ -21,7 +21,9 @@
  * `GIT_CONFIG_SYSTEM` are pointed at a path that does not exist (git treats an
  * unreadable config file as empty), so ambient user/system git config cannot
  * change behavior; `GIT_TERMINAL_PROMPT=0` guarantees git never blocks on a
- * prompt. Repo-LOCAL config is always the daemon's or the user's own and is
+ * prompt; the `GIT_AUTHOR_*` / `GIT_COMMITTER_*` identity vars are stripped
+ * so commit identity comes only from what a caller passes (they outrank `-c`
+ * config). Repo-LOCAL config is always the daemon's or the user's own and is
  * trusted; bundles carry only objects and refs, never config or hooks.
  */
 import { type ChildProcess, spawn } from "node:child_process";
@@ -57,6 +59,24 @@ const NONEXISTENT_CONFIG_PATH = path.join(
   os.tmpdir(),
   "homefleet-nonexistent-gitconfig-do-not-create",
 );
+
+/**
+ * Commit identity/date env vars stripped from every spawned git. Git resolves
+ * author/committer identity from these ABOVE any `-c user.*` config, so an
+ * ambient `GIT_AUTHOR_NAME` in the daemon's environment would silently
+ * override the deterministic identity {@link commitAllInWorktree} passes.
+ * Config files are already neutralized via `GIT_CONFIG_GLOBAL`/`_SYSTEM`;
+ * this closes the env-var channel of the same "ambient state changes git
+ * behavior" class.
+ */
+const STRIPPED_GIT_ENV_VARS = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+] as const;
 
 /** Every possible ending of a git invocation, as data (never thrown). */
 export interface GitCommandResult {
@@ -163,6 +183,19 @@ export function runGit(
   const binary = options.binary ?? "git";
   const configArgs = (options.config ?? []).flatMap((pair) => ["-c", pair]);
   const finalArgs = [...configArgs, ...args];
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    // Ignore ambient user/system git config (see file doc).
+    GIT_CONFIG_GLOBAL: NONEXISTENT_CONFIG_PATH,
+    GIT_CONFIG_SYSTEM: NONEXISTENT_CONFIG_PATH,
+    // Never block on a credential/other prompt.
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  // Ambient identity env vars outrank `-c user.*` config; strip them so the
+  // identity a caller passes is authoritative (see STRIPPED_GIT_ENV_VARS).
+  for (const name of STRIPPED_GIT_ENV_VARS) {
+    delete env[name];
+  }
 
   return new Promise((resolve) => {
     const child = spawn(binary, finalArgs, {
@@ -170,14 +203,7 @@ export function runGit(
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
-      env: {
-        ...process.env,
-        // Ignore ambient user/system git config (see file doc).
-        GIT_CONFIG_GLOBAL: NONEXISTENT_CONFIG_PATH,
-        GIT_CONFIG_SYSTEM: NONEXISTENT_CONFIG_PATH,
-        // Never block on a credential/other prompt.
-        GIT_TERMINAL_PROMPT: "0",
-      },
+      env,
     });
 
     const stdout = new CappedCollector();
@@ -618,6 +644,157 @@ export async function deleteRef(worker: WorkerGit, ref: string): Promise<void> {
     config: workerConfig(worker),
     signal: worker.signal,
   });
+}
+
+/**
+ * WORKER side (write-job finalize): stages EVERY working-tree change in
+ * `worktreeDir` (`git add -A` semantics — new, modified, AND deleted files)
+ * and commits it in one commit. Returns the new head's 40-hex hash, or
+ * `null` when the tree is clean (nothing to stage — the caller's signal that
+ * the job produced no changes). Throws {@link GitError} on any failure.
+ *
+ * The passed identity becomes BOTH author and committer: `-c user.name` /
+ * `-c user.email` feed both sides, and {@link runGit} strips the
+ * `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars (which would outrank `-c`
+ * config) from every spawned git, so ambient daemon environment can never
+ * override it. Hooks stay neutralized via {@link workerConfig}; signing is
+ * pinned off so a commit can never block on a signer.
+ */
+export async function commitAllInWorktree(
+  worker: WorkerGit,
+  worktreeDir: string,
+  options: { message: string; authorName: string; authorEmail: string },
+): Promise<string | null> {
+  const runOptions: RunGitOptions = {
+    cwd: worktreeDir,
+    timeoutMs: worker.timeoutMs,
+    config: [
+      ...workerConfig(worker),
+      `user.name=${options.authorName}`,
+      `user.email=${options.authorEmail}`,
+      "commit.gpgsign=false",
+    ],
+    signal: worker.signal,
+  };
+  const added = await runGit(["add", "-A"], runOptions);
+  if (!ok(added)) {
+    throw new GitError(`git add -A failed: ${describeGitFailure(added)}`);
+  }
+  // `--cached --quiet` compares the index against HEAD: exit 0 = nothing
+  // staged (clean tree), exit 1 = changes staged, anything else = failure.
+  const staged = await runGit(["diff", "--cached", "--quiet"], runOptions);
+  if (staged.code === 0) {
+    return null;
+  }
+  if (staged.code !== 1) {
+    throw new GitError(
+      `git diff --cached failed: ${describeGitFailure(staged)}`,
+    );
+  }
+  const committed = await runGit(
+    ["commit", "--quiet", "-m", options.message],
+    runOptions,
+  );
+  if (!ok(committed)) {
+    throw new GitError(`git commit failed: ${describeGitFailure(committed)}`);
+  }
+  const head = await runGit(
+    ["rev-parse", "--verify", "--quiet", "HEAD"],
+    runOptions,
+  );
+  const value = head.stdout.trim();
+  if (!ok(head) || !COMMIT_HASH_RE.test(value)) {
+    throw new GitError(
+      `could not read the committed head: ${describeGitFailure(head)}`,
+    );
+  }
+  return value;
+}
+
+/** Parsed `git diff --shortstat` accounting for a `base..head` range. */
+export interface DiffStatCounts {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+/**
+ * WORKER side (write-job finalize): `base..head` change accounting via
+ * `git diff --shortstat`, run in `cwd` (any repo or worktree that can see
+ * both commits). Rename detection is forced on (`--find-renames`) so a pure
+ * rename counts as one changed file with zero line churn regardless of
+ * config defaults. A zero-change range yields all zeros (shortstat prints
+ * nothing for it). Throws {@link GitError} on failure.
+ */
+export async function diffStat(
+  worker: WorkerGit,
+  cwd: string,
+  base: string,
+  head: string,
+): Promise<DiffStatCounts> {
+  const result = await runGit(
+    ["diff", "--shortstat", "--find-renames", base, head],
+    {
+      cwd,
+      timeoutMs: worker.timeoutMs,
+      config: workerConfig(worker),
+      signal: worker.signal,
+    },
+  );
+  if (!ok(result)) {
+    throw new GitError(
+      `git diff --shortstat failed: ${describeGitFailure(result)}`,
+    );
+  }
+  const match =
+    /(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/.exec(
+      result.stdout,
+    );
+  if (match === null) {
+    return { filesChanged: 0, insertions: 0, deletions: 0 };
+  }
+  return {
+    filesChanged: Number.parseInt(match[1] ?? "0", 10),
+    insertions: Number.parseInt(match[2] ?? "0", 10),
+    deletions: Number.parseInt(match[3] ?? "0", 10),
+  };
+}
+
+/**
+ * WORKER side (write-job finalize): writes an incremental bundle of
+ * `ref --not base` from the bare cache repo — the write job's artifact
+ * bundle. The bundle advertises exactly one ref (the job's result branch)
+ * and records `base` as a prerequisite, so the receiving side's
+ * `git bundle verify` refuses it unless it already holds the base commit
+ * (the delegator does by construction: it bundled that commit to us). The
+ * caller guarantees `base` is a strict ancestor of `ref`'s tip — an empty
+ * range makes `git bundle create` fail ("Refusing to create empty bundle").
+ * Throws {@link GitError} only on a malformed `base`; git-level failure is
+ * returned as data.
+ */
+export async function createWorkerBundle(
+  worker: WorkerGit,
+  options: { bundlePath: string; ref: string; base: string },
+): Promise<GitCommandResult> {
+  if (!COMMIT_HASH_RE.test(options.base)) {
+    throw new GitError(`invalid bundle base commit: ${options.base}`);
+  }
+  return runGit(
+    [
+      "bundle",
+      "create",
+      options.bundlePath,
+      options.ref,
+      "--not",
+      options.base,
+    ],
+    {
+      cwd: worker.repoDir,
+      timeoutMs: worker.timeoutMs,
+      config: workerConfig(worker),
+      signal: worker.signal,
+    },
+  );
 }
 
 /**
