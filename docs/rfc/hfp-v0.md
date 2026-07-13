@@ -18,7 +18,7 @@ disagree, the schemas win and this document has a bug.
 
 ## Status of This Document
 
-Draft. Describes protocol version **0.1.0** as implemented by the
+Draft. Describes protocol version **0.2.0** as implemented by the
 `@homefleet/protocol` package. Everything in a v0.x protocol version is
 subject to change until v1.
 
@@ -118,7 +118,7 @@ What a node advertises about itself during `hello` and pairing.
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
 | `name`              | string                                  | Human-readable, 1–64 chars, no control characters (C0 or DEL) |
 | `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
-| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document |
+| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.2.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
 | `executors`         | `("command" \| "agent" \| "write")[]`   | Executor kinds this node offers                |
@@ -135,7 +135,7 @@ What a node advertises about itself during `hello` and pairing.
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "daemonVersion": "0.1.0",
-  "protocolVersion": "0.1.0",
+  "protocolVersion": "0.2.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
   "executors": ["command", "agent"],
@@ -385,9 +385,12 @@ bundle, described by the `artifact` block on the job's `JobResult`.
 Write-job result branches live under `refs/heads/homefleet/`, on both sides:
 the worker creates the result branch there, and the delegator MUST create
 fetched refs only there. The branch name is `homefleet/<jobId12>`, where
-`jobId12` is the first 12 hex characters of the job UUID with hyphens
-stripped (job ID `0198c2f6-3c4d-7e88-a1b2-c3d4e5f60718` → branch
-`homefleet/0198c2f63c4d`). The namespace is reserved: nothing else in
+`jobId12` is the **last** 12 hex characters of the job UUID — its final
+hyphen-group (job ID `0198c2f6-3c4d-7e88-a1b2-c3d4e5f60718` → branch
+`homefleet/c3d4e5f60718`). The last 12, not the first: job IDs admit UUID
+v1–v8, and a v7's leading 48 bits are a millisecond timestamp, so two
+same-millisecond jobs would collide on the first 12 hex; the last 12 are
+random in both v4 and v7. The namespace is reserved: nothing else in
 HomeFleet writes refs under `refs/heads/homefleet/`, so a fetched artifact
 can never clobber a user branch.
 
@@ -405,8 +408,10 @@ Presence rules, enforced by `JobResultSchema`:
 
 - `artifact` and `verify` (even an explicit `artifact: null`) MUST only
   appear on results with `type: "write"`.
-- A `succeeded` write result carries `artifact: null` when the model
-  completed without producing changes, or a full `WriteArtifact` otherwise.
+- A `succeeded` write result MUST carry `artifact`: `null` when the model
+  completed without producing changes, a full `WriteArtifact` otherwise. An
+  absent `artifact` is invalid — it would be indistinguishable from "no
+  changes" and could silently drop completed work.
 - A `failed` or `canceled` write result MUST NOT carry a non-null
   `artifact`: budget exhaustion, failure, and cancellation discard the
   work — partial edits are never committed or delivered.
@@ -427,7 +432,7 @@ what a red verify run means.
   "summary": "Added a default-handling test for the config loader.",
   "stats": { "toolCalls": 23, "wallMs": 181204, "promptTokens": 21000, "completionTokens": 2400 },
   "artifact": {
-    "branchName": "homefleet/0b2945872342",
+    "branchName": "homefleet/2b3c837e2a9c",
     "baseCommit": "0123456789abcdef0123456789abcdef01234567",
     "headCommit": "89abcdef0123456789abcdef0123456789abcdef",
     "diffStat": { "filesChanged": 2, "insertions": 41, "deletions": 3 },
@@ -631,14 +636,14 @@ LocalSend ships); response rate-limiting is a possible future hardening.
 | `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
 | `name`            | string  | Human-readable, 1–64 chars, no control characters (same constraints as `NodeInfo.name`) |
 | `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
-| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document            |
+| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.2.0"` for this document            |
 
 ```json
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "port": 47113,
-  "protocolVersion": "0.1.0"
+  "protocolVersion": "0.2.0"
 }
 ```
 
@@ -685,7 +690,7 @@ as one JSON document per datagram, at most 4096 bytes.
 | `kind` | `"announce" \| "response"`  | See exchange rules below     |
 
 ```json
-{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.1.0" }
+{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.2.0" }
 ```
 
 Exchange rules:
@@ -729,7 +734,7 @@ queued ---> running +-----------> failed
 
 ## Versioning
 
-- The protocol version is a semver string (this document: **0.1.0**),
+- The protocol version is a semver string (this document: **0.2.0**),
   exported as `HFP_PROTOCOL_VERSION`; the HTTP path prefix carries the major
   version (`/hfp/v0`, exported as `HFP_PATH_PREFIX` and derived from the
   protocol version so the two cannot drift).

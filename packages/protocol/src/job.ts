@@ -105,9 +105,15 @@ export type WriteJobParams = z.infer<typeof WriteJobParamsSchema>;
  */
 export const WRITE_BRANCH_PREFIX = "homefleet/";
 
-/** First 12 hex of the job UUID, hyphens stripped. */
+/**
+ * Last 12 hex of the job UUID — its final hyphen-group, so no hyphen
+ * stripping is needed. The LAST 12, not the first: `JobIdSchema` admits
+ * UUID v1–v8, and a v7's leading 48 bits are a millisecond timestamp, so
+ * two same-ms jobs would deterministically collide on the first 12 hex.
+ * The last 12 are random in both v4 and v7.
+ */
 export function jobId12(jobId: JobId): string {
-  return jobId.replaceAll("-", "").slice(0, 12);
+  return jobId.slice(-12);
 }
 
 /** The branch a write job's artifact is delivered on: `homefleet/<jobId12>`. */
@@ -275,6 +281,22 @@ export const JobResultSchema = z
         code: "custom",
         path: ["artifact"],
         message: `artifact must be absent or null when status is ${result.status}`,
+      });
+    }
+    // A succeeded write result must state its outcome explicitly: `null` for
+    // "no changes", a full artifact otherwise. An ABSENT artifact would be
+    // indistinguishable from "no changes", letting a finalize bug silently
+    // drop completed work.
+    if (
+      result.type === "write" &&
+      result.status === "succeeded" &&
+      result.artifact === undefined
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["artifact"],
+        message:
+          "artifact (or explicit null) is required on succeeded write results",
       });
     }
   });

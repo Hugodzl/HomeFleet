@@ -27,7 +27,7 @@ function announcement(
     deviceId,
     name: "tower",
     port: 47113,
-    protocolVersion: "0.1.0",
+    protocolVersion: "0.2.0",
     ...overrides,
   };
 }
@@ -104,7 +104,7 @@ function deliverPeer(
     type: "homefleet",
     name: overrides.name ?? "peer",
     port: overrides.port ?? 47200,
-    txt: { id: deviceId, pv: "0.1.0" },
+    txt: { id: deviceId, pv: "0.2.0" },
     addresses: overrides.addresses ?? ["192.168.1.30"],
   });
 }
@@ -433,7 +433,7 @@ test("mdns rename diagnostics surface through the aggregator's onDiagnostic", as
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: "00".repeat(32), pv: "0.1.0" },
+    txt: { id: "00".repeat(32), pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
 

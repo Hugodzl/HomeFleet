@@ -141,7 +141,7 @@ test("NodeInfoSchema requires semver version strings", () => {
       .success,
   ).toBe(false);
   expect(
-    NodeInfoSchema.safeParse({ ...validNodeInfo, protocolVersion: "v0.1.0" })
+    NodeInfoSchema.safeParse({ ...validNodeInfo, protocolVersion: "v0.2.0" })
       .success,
   ).toBe(false);
 });

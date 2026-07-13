@@ -15,7 +15,9 @@ import {
   TERMINAL_JOB_STATUSES,
   TerminalJobStatusSchema,
   WorkspaceRefSchema,
+  WriteArtifactSchema,
   WriteBranchNameSchema,
+  WriteBudgetsSchema,
   WriteJobParamsSchema,
   writeBranchName,
 } from "./job.js";
@@ -237,6 +239,45 @@ test("WriteJobParamsSchema rejects empty or oversized instructions", () => {
   ).toBe(false);
 });
 
+test("WriteJobParamsSchema accepts instructions of exactly 16384 chars", () => {
+  const parsed = WriteJobParamsSchema.parse({
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "x".repeat(16384),
+  });
+  expect(parsed.instructions).toHaveLength(16384);
+});
+
+test("WriteBudgetsSchema applies defaults for omitted fields", () => {
+  expect(WriteBudgetsSchema.parse({})).toEqual({
+    maxToolCalls: 100,
+    maxWallMs: 600000,
+  });
+  expect(WriteBudgetsSchema.parse({ maxToolCalls: 10 })).toEqual({
+    maxToolCalls: 10,
+    maxWallMs: 600000,
+  });
+});
+
+test("WriteBudgetsSchema enforces bounds", () => {
+  expect(WriteBudgetsSchema.safeParse({ maxToolCalls: 0 }).success).toBe(false);
+  expect(WriteBudgetsSchema.safeParse({ maxToolCalls: 201 }).success).toBe(
+    false,
+  );
+  expect(WriteBudgetsSchema.safeParse({ maxWallMs: 999 }).success).toBe(false);
+  expect(WriteBudgetsSchema.safeParse({ maxWallMs: 3600001 }).success).toBe(
+    false,
+  );
+});
+
+test("WriteBudgetsSchema accepts boundary values", () => {
+  const budgets = { maxToolCalls: 200, maxWallMs: 3600000 };
+  expect(WriteBudgetsSchema.parse(budgets)).toEqual(budgets);
+  expect(
+    WriteBudgetsSchema.parse({ maxToolCalls: 1, maxWallMs: 1000 }),
+  ).toEqual({ maxToolCalls: 1, maxWallMs: 1000 });
+});
+
 test("WriteJobParamsSchema caps pathHints at 32 entries", () => {
   const base = {
     type: "write",
@@ -251,6 +292,25 @@ test("WriteJobParamsSchema caps pathHints at 32 entries", () => {
     WriteJobParamsSchema.safeParse({ ...base, pathHints: hints.slice(0, 32) })
       .success,
   ).toBe(true);
+});
+
+test("WriteJobParamsSchema caps each pathHint at 1024 chars", () => {
+  const base = {
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "touch the hinted file",
+  };
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, pathHints: ["p".repeat(1024)] })
+      .success,
+  ).toBe(true);
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, pathHints: ["p".repeat(1025)] })
+      .success,
+  ).toBe(false);
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, pathHints: [""] }).success,
+  ).toBe(false);
 });
 
 test("WriteBranchNameSchema requires homefleet/ plus exactly 12 lowercase hex", () => {
@@ -273,9 +333,12 @@ test("WriteBranchNameSchema requires homefleet/ plus exactly 12 lowercase hex", 
   expect(WriteBranchNameSchema.safeParse("0b2945872342").success).toBe(false);
 });
 
-test("writeBranchName derives the branch from the job UUID's first 12 hex", () => {
+test("writeBranchName derives the branch from the job UUID's last 12 hex", () => {
+  // Last 12, not first: a UUIDv7's leading 48 bits are a millisecond
+  // timestamp, so two same-ms jobs would collide on the first 12 hex. The
+  // last 12 are random in both v4 and v7.
   expect(writeBranchName("0198c2f6-3c4d-7e88-a1b2-c3d4e5f60718")).toBe(
-    "homefleet/0198c2f63c4d",
+    "homefleet/c3d4e5f60718",
   );
   // Every derived name satisfies the branch-name schema.
   expect(
@@ -473,7 +536,8 @@ test("JobResultSchema allows canceled results with or without an error", () => {
 });
 
 const validWriteArtifact = {
-  branchName: "homefleet/0b2945872342",
+  // writeBranchName(validJobId) — the last 12 hex of the job UUID.
+  branchName: "homefleet/2b3c837e2a9c",
   baseCommit: "0123456789abcdef0123456789abcdef01234567",
   headCommit: "89abcdef0123456789abcdef0123456789abcdef",
   diffStat: { filesChanged: 2, insertions: 14, deletions: 3 },
@@ -495,6 +559,13 @@ test("JobResultSchema accepts a succeeded write result with a full artifact", ()
 test("JobResultSchema accepts a succeeded write result with artifact null (no changes)", () => {
   const noChanges = { ...validWriteResult, artifact: null };
   expect(JobResultSchema.parse(noChanges)).toEqual(noChanges);
+});
+
+test("JobResultSchema requires artifact (or explicit null) on succeeded write results", () => {
+  // An ABSENT artifact on a succeeded write result is indistinguishable from
+  // "no changes" — a finalize bug could silently drop completed work.
+  const { artifact: _artifact, ...withoutArtifact } = validWriteResult;
+  expect(JobResultSchema.safeParse(withoutArtifact).success).toBe(false);
 });
 
 test("JobResultSchema rejects an artifact on a non-write result", () => {
@@ -547,6 +618,25 @@ test("JobResultSchema allows verify only on write results", () => {
   expect(JobResultSchema.safeParse({ ...validJobResult, verify }).success).toBe(
     false,
   );
+});
+
+test("WriteArtifactSchema bounds commitMessage at 1-4096 chars", () => {
+  expect(
+    WriteArtifactSchema.parse({
+      ...validWriteArtifact,
+      commitMessage: "m".repeat(4096),
+    }).commitMessage,
+  ).toHaveLength(4096);
+  expect(
+    WriteArtifactSchema.safeParse({
+      ...validWriteArtifact,
+      commitMessage: "m".repeat(4097),
+    }).success,
+  ).toBe(false);
+  expect(
+    WriteArtifactSchema.safeParse({ ...validWriteArtifact, commitMessage: "" })
+      .success,
+  ).toBe(false);
 });
 
 test("JobResultSchema rejects a malformed write artifact", () => {

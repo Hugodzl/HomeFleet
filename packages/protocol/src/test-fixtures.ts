@@ -22,7 +22,7 @@ export const validNodeInfo: NodeInfo = {
   deviceId: validDeviceId,
   name: "tower",
   daemonVersion: "0.1.0",
-  protocolVersion: "0.1.0",
+  protocolVersion: "0.2.0",
   platform: "win32",
   roles: ["inference", "execution"],
   executors: ["command", "agent"],

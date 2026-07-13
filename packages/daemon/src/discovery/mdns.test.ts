@@ -22,7 +22,7 @@ function announcement(
     deviceId,
     name: "tower",
     port: 47113,
-    protocolVersion: "0.1.0",
+    protocolVersion: "0.2.0",
     ...overrides,
   };
 }
@@ -101,7 +101,7 @@ test("advertises the announcement as a homefleet service with TXT records", () =
     name: "tower",
     type: "homefleet",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
   });
   return discovery.stop();
 });
@@ -155,11 +155,11 @@ test("drops services whose TXT record fails validation", async () => {
     addresses: ["192.168.1.30"],
   };
   backend.deliver({ ...base, txt: {} }); // missing keys
-  backend.deliver({ ...base, txt: { id: "not-hex", pv: "0.1.0" } });
+  backend.deliver({ ...base, txt: { id: "not-hex", pv: "0.2.0" } });
   backend.deliver({ ...base, txt: { id: deviceIdB, pv: "not-semver" } });
   backend.deliver({
     ...base,
-    txt: { id: Buffer.from(deviceIdB), pv: "0.1.0" }, // non-string value
+    txt: { id: Buffer.from(deviceIdB), pv: "0.2.0" }, // non-string value
   });
 
   expect(a.candidates).toEqual([]);
@@ -169,7 +169,7 @@ test("drops services whose TXT record fails validation", async () => {
 test("drops services with an out-of-range port or no usable address", async () => {
   const backend = new FakeMdnsBackend();
   const a = startDiscovery(backend, announcement(deviceIdA));
-  const txt = { id: deviceIdB, pv: "0.1.0" };
+  const txt = { id: deviceIdB, pv: "0.2.0" };
 
   backend.deliver({
     type: "homefleet",
@@ -193,7 +193,7 @@ test("drops services with an out-of-range port or no usable address", async () =
 test("prefers an IPv4 address but falls back to the first address", async () => {
   const backend = new FakeMdnsBackend();
   const a = startDiscovery(backend, announcement(deviceIdA));
-  const txt = { id: deviceIdB, pv: "0.1.0" };
+  const txt = { id: deviceIdB, pv: "0.2.0" };
 
   backend.deliver({
     type: "homefleet",
@@ -252,7 +252,7 @@ test("a squatter with undecodable TXT under our name causes no rename", async ()
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: "not-a-device-id", pv: "0.1.0" },
+    txt: { id: "not-a-device-id", pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   backend.deliver({
@@ -309,7 +309,7 @@ test("a renamed instance keeps the label within 63 bytes", async () => {
     type: "homefleet",
     name: "x".repeat(63),
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
 
@@ -324,7 +324,7 @@ test("a renamed instance keeps the label within 63 bytes", async () => {
 test("encodeAnnouncementTxt / decodeFoundService round-trip", () => {
   const own = announcement(deviceIdA, { name: "tower", port: 47113 });
   const txt = encodeAnnouncementTxt(own);
-  expect(txt).toEqual({ id: deviceIdA, pv: "0.1.0" });
+  expect(txt).toEqual({ id: deviceIdA, pv: "0.2.0" });
   expect(
     decodeFoundService({
       type: "homefleet",
@@ -339,7 +339,7 @@ test("encodeAnnouncementTxt / decodeFoundService round-trip", () => {
       type: "homefleet",
       name: "tower",
       port: 47113,
-      txt: { pv: "0.1.0" },
+      txt: { pv: "0.2.0" },
       addresses: [],
     }),
   ).toBeNull();
@@ -394,7 +394,7 @@ test("a stale echo of a pre-rename name does not confirm the current publication
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.20"],
   });
   expect(timers.pendingCount()).toBe(1);
@@ -404,7 +404,7 @@ test("a stale echo of a pre-rename name does not confirm the current publication
     type: "homefleet",
     name: "tower (2)",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.20"],
   });
   expect(timers.pendingCount()).toBe(0);
@@ -430,7 +430,7 @@ test("a collision rename supersedes the watchdog and re-arms it for the new name
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   // The rename re-armed the watchdog for "tower (2)", whose echo (not
@@ -463,7 +463,7 @@ test("watchdog recovers when we win the tie-break but our publication died probi
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: deviceIdB, pv: "0.1.0" },
+    txt: { id: deviceIdB, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   expect(backend.activePublications().map((p) => p.request.name)).toEqual([
@@ -563,7 +563,7 @@ test("stop tears down the publication, browser, and backend", async () => {
     type: "homefleet",
     name: "late",
     port: 47113,
-    txt: { id: deviceIdB, pv: "0.1.0" },
+    txt: { id: deviceIdB, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   expect(a.candidates).toEqual([]);
@@ -579,7 +579,7 @@ test("a collision rename emits an operator diagnostic naming both labels", async
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
 
@@ -634,7 +634,7 @@ test("rename-budget exhaustion is reported exactly once, then declines stay quie
     type: "homefleet",
     name: "tower (10)",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   expect(
@@ -665,7 +665,7 @@ test("a collision decline reports exhaustion first; the pending watchdog then st
     type: "homefleet",
     name: "tower (10)",
     port: 47113,
-    txt: { id: deviceIdA, pv: "0.1.0" },
+    txt: { id: deviceIdA, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   expect(
@@ -691,7 +691,7 @@ test("the happy path emits no diagnostics", async () => {
     type: "homefleet",
     name: "laptop",
     port: 47999,
-    txt: { id: deviceIdB, pv: "0.1.0" },
+    txt: { id: deviceIdB, pv: "0.2.0" },
     addresses: ["192.168.1.30"],
   });
   timers.fire();

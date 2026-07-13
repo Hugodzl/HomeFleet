@@ -14,7 +14,7 @@ const validAnnouncement: DiscoveryAnnouncement = {
   deviceId: validDeviceId,
   name: "tower",
   port: 47113,
-  protocolVersion: "0.1.0",
+  protocolVersion: "0.2.0",
 };
 
 test("DiscoveryAnnouncementSchema round-trips a valid announcement", () => {
@@ -81,7 +81,7 @@ test("DiscoveryAnnouncementSchema requires a semver protocolVersion", () => {
   expect(
     DiscoveryAnnouncementSchema.safeParse({
       ...validAnnouncement,
-      protocolVersion: "v0.1.0",
+      protocolVersion: "v0.2.0",
     }).success,
   ).toBe(false);
 });

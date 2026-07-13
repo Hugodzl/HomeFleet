@@ -4,7 +4,7 @@
  * Nodes exchange their `protocolVersion` in `hello`; same-major versions
  * are expected to interoperate (see docs/rfc/hfp-v0.md, "Versioning").
  */
-export const HFP_PROTOCOL_VERSION = "0.1.0";
+export const HFP_PROTOCOL_VERSION = "0.2.0";
 
 /**
  * HTTP path prefix for all HFP endpoints (`/hfp/v0`), derived from the major
