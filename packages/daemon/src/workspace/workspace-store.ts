@@ -8,11 +8,13 @@
  * `core.longpaths` mode):
  *
  *   <cacheDir>\<repoKey>\repo.git        bare cache repo
- *   <cacheDir>\<repoKey>\co\<commitKey>  checkout worktrees
+ *   <cacheDir>\<repoKey>\co\<commitKey>  checkout worktrees (cached, LRU)
+ *   <cacheDir>\<repoKey>\jobs\<jobId12>  ephemeral write-job worktrees
  *   <cacheDir>\.no-hooks                 empty hooks dir (disables hooks)
  *
- * where `repoKey` is the first 16 hex chars of SHA-256(repoId) and `commitKey`
- * is the first 16 hex chars of the 40-hex commit. Four security invariants:
+ * where `repoKey` is the first 16 hex chars of SHA-256(repoId), `commitKey`
+ * is the first 16 hex chars of the 40-hex commit, and `jobId12` is the last
+ * 12 hex of the write job's UUID. Four security invariants:
  *
  * 1. **Allowlist, fail-closed.** Only repoIds in `allowedRepoIds` are accepted.
  *    An empty allowlist accepts nothing. A non-allowlisted repoId is rejected
@@ -55,11 +57,25 @@
  *   checkouts are never pruned).
  * These bound checkout count and object-store size, respectively; they are not
  * a hard total-disk guarantee.
+ *
+ * WRITE-JOB worktrees (`resolve(ref, { write: { jobId } })`) are deliberately
+ * OUTSIDE all of the above cache machinery: each write job gets a dedicated
+ * worktree under `<repoRoot>\jobs\<jobId12>` that no other job ever shares,
+ * is never entered into the checkout map (so it neither counts against
+ * `maxCachedCheckouts` nor can be an eviction victim), and is torn down when
+ * the job's handle is released. Their lifetime is bounded by the daemon
+ * process: {@link init} purges every `jobs` dir, because an in-flight write
+ * job never survives a restart — anything left there is garbage by definition.
  */
 import { createHash } from "node:crypto";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import type { HfpError, WorkspaceRef } from "@homefleet/protocol";
+import {
+  type HfpError,
+  type JobId,
+  jobId12,
+  type WorkspaceRef,
+} from "@homefleet/protocol";
 import type { WorkspaceResolver } from "../jobs/job-manager.js";
 import {
   addWorktree,
@@ -93,7 +109,13 @@ export type WorkspaceErrorCode =
   | "BUNDLE_INVALID"
   | "COMMIT_NOT_DELIVERED"
   | "NOT_SYNCED"
-  | "GIT_FAILED";
+  | "GIT_FAILED"
+  /**
+   * A write resolve for a jobId whose worktree is already live (materialized
+   * or mid-materialization, not yet released). Maps to `INVALID_REQUEST` on
+   * the wire: the request is invalid given the job's current state.
+   */
+  | "WRITE_IN_PROGRESS";
 
 /** A typed workspace failure the sync routes/resolver map to HFP errors. */
 export class WorkspaceError extends Error {
@@ -163,6 +185,37 @@ interface CheckoutEntry {
   refcount: number;
 }
 
+/** Options for {@link WorkspaceStore.resolve}. Absent = read-mode (cached checkout). */
+export interface ResolveOptions {
+  /**
+   * Write mode: instead of a shared cached checkout, materialize a DEDICATED
+   * ephemeral worktree for this write job at `<repoRoot>/jobs/<jobId12>`,
+   * detached at `ref.headCommit`. The job owns the dir exclusively until its
+   * handle is released, which removes the worktree from disk. At most one
+   * live write worktree may exist per jobId ({@link WorkspaceError}
+   * `WRITE_IN_PROGRESS` otherwise).
+   */
+  write?: { jobId: JobId };
+}
+
+/**
+ * A live write-job worktree, keyed by jobId in {@link WorkspaceStore}'s
+ * registry. Registered BEFORE materialization (so a concurrent duplicate
+ * resolve for the same jobId is rejected without a race) and deregistered on
+ * release — or immediately, if the materializing resolve fails.
+ *
+ * Task 6 dependency: the daemon's finalize closure can only see the jobId, so
+ * this entry is the bridge from jobId to everything artifact-bundle creation
+ * needs — the worktree dir, the repo it belongs to, and `baseCommit` (the
+ * `ref.headCommit` the job started from, i.e. the bundle's `--not`
+ * prerequisite). See {@link WorkspaceStore.writeJobWorkspace}.
+ */
+interface WriteWorkspaceEntry {
+  repoKey: string;
+  dir: string;
+  baseCommit: string;
+}
+
 export class WorkspaceStore {
   private readonly cacheDir: string;
   private readonly allowed: ReadonlySet<string>;
@@ -176,6 +229,11 @@ export class WorkspaceStore {
   private readonly locks = new Map<string, Promise<unknown>>();
   /** Live checkouts, keyed `${repoKey}:${commitKey}`, for LRU eviction. */
   private readonly checkouts = new Map<string, CheckoutEntry>();
+  /**
+   * Live write-job worktrees, keyed by jobId. Entirely separate from
+   * {@link checkouts}: a write worktree is never cached, counted, or evicted.
+   */
+  private readonly writeWorkspaces = new Map<string, WriteWorkspaceEntry>();
   /** Fetches applied per repoKey since its last gc (gc-gating counter). */
   private readonly fetchesSinceGc = new Map<string, number>();
   private useTick = 0;
@@ -212,9 +270,11 @@ export class WorkspaceStore {
   }
 
   /**
-   * Prepares the cache root and the empty hooks directory, then registers any
-   * checkouts left on disk by a previous daemon run (oldest first) so the
-   * retention cap holds across restarts. Idempotent.
+   * Prepares the cache root and the empty hooks directory, purges write-job
+   * worktrees left by a previous daemon run (an in-flight write job never
+   * survives a restart), then registers any checkouts left on disk by a
+   * previous daemon run (oldest first) so the retention cap holds across
+   * restarts. Idempotent.
    */
   async init(): Promise<void> {
     if (this.initialized) {
@@ -222,6 +282,7 @@ export class WorkspaceStore {
     }
     await mkdir(this.cacheDir, { recursive: true });
     await mkdir(this.hooksPath(), { recursive: true });
+    await this.purgeWriteWorktrees();
     await this.registerExistingCheckouts();
     this.initialized = true;
   }
@@ -367,33 +428,26 @@ export class WorkspaceStore {
    * the repo lock, before eviction runs) so a running job's checkout is never
    * evicted out from under it. The returned `release` decrements the refcount
    * (floored at 0); it is guarded so a double-call is a harmless no-op.
+   *
+   * With `options.write` set, none of the above cache machinery applies: the
+   * resolve materializes a dedicated ephemeral worktree for that one write
+   * job instead — see {@link resolveForWrite}.
    */
   async resolve(
     ref: WorkspaceRef,
+    options?: ResolveOptions,
   ): Promise<{ dir: string; release: () => void }> {
     this.requireNotStopped();
     this.requireAllowed(ref.repoId);
+    if (options?.write !== undefined) {
+      return this.resolveForWrite(ref, options.write.jobId);
+    }
     const rKey = repoKey(ref.repoId);
     const { headCommit } = ref;
     const cKey = commitKey(headCommit);
     const key = checkoutKey(rKey, cKey);
     const dir = await this.withRepoLock(rKey, async () => {
-      const repoDir = this.repoDir(rKey);
-      if (!(await pathExists(repoDir))) {
-        throw new WorkspaceError(
-          "NOT_SYNCED",
-          "repo has not been synced to this worker yet",
-          { repoId: ref.repoId },
-        );
-      }
-      const worker = this.worker(rKey);
-      if (!(await commitPresent(worker, headCommit))) {
-        throw new WorkspaceError(
-          "NOT_SYNCED",
-          "requested commit is not present in the worker cache; sync first",
-          { repoId: ref.repoId, headCommit },
-        );
-      }
+      const worker = await this.requireSyncedCommit(rKey, ref);
       const checkoutDir = this.checkoutDir(rKey, cKey);
       if (await isPopulatedCheckout(checkoutDir)) {
         // Verify-on-reuse (invariant 4): the dir name is a truncated commit
@@ -521,6 +575,24 @@ export class WorkspaceStore {
     return (ref: WorkspaceRef) => this.resolve(ref);
   }
 
+  /**
+   * The live write-job worktree registered for `jobId`, or `undefined` if
+   * there is none (never resolved, resolve failed, or already released).
+   *
+   * This is the jobId -> workspace bridge the daemon's write-job finalize
+   * step (Task 6) depends on: at finalize time only the jobId is in hand, and
+   * artifact-bundle creation needs the worktree dir (where the job's commit
+   * lives), the repoKey (whose cache repo to bundle from), and `baseCommit` —
+   * the `ref.headCommit` the worktree was materialized at, i.e. the bundle's
+   * `--not` prerequisite.
+   */
+  writeJobWorkspace(
+    jobId: JobId,
+  ): { dir: string; repoKey: string; baseCommit: string } | undefined {
+    const entry = this.writeWorkspaces.get(jobId);
+    return entry === undefined ? undefined : { ...entry };
+  }
+
   // --- internals -----------------------------------------------------------
 
   /**
@@ -548,6 +620,165 @@ export class WorkspaceStore {
     }
   }
 
+  /**
+   * Throws `NOT_SYNCED` unless the repo's cache exists and holds
+   * `ref.headCommit`; returns the repo's {@link WorkerGit} otherwise. Shared
+   * by the read and write resolve paths; MUST be called under the repo lock.
+   */
+  private async requireSyncedCommit(
+    rKey: string,
+    ref: WorkspaceRef,
+  ): Promise<WorkerGit> {
+    if (!(await pathExists(this.repoDir(rKey)))) {
+      throw new WorkspaceError(
+        "NOT_SYNCED",
+        "repo has not been synced to this worker yet",
+        { repoId: ref.repoId },
+      );
+    }
+    const worker = this.worker(rKey);
+    if (!(await commitPresent(worker, ref.headCommit))) {
+      throw new WorkspaceError(
+        "NOT_SYNCED",
+        "requested commit is not present in the worker cache; sync first",
+        { repoId: ref.repoId, headCommit: ref.headCommit },
+      );
+    }
+    return worker;
+  }
+
+  /**
+   * Write-mode resolve: materializes a DEDICATED ephemeral worktree for one
+   * write job at `<repoRoot>/jobs/<jobId12>`, detached at `ref.headCommit`,
+   * under the same per-repo lock as every other git op on that repo.
+   *
+   * Write worktrees are INVISIBLE to the checkout cache by construction: they
+   * are never entered into {@link checkouts} (so they neither count against
+   * `maxCachedCheckouts` nor can be picked as eviction victims), and
+   * {@link registerExistingCheckouts} never registers them (its scan reads
+   * only `<repoRoot>/co`). The read path's documented invariants — pinning,
+   * LRU accounting, re-mint back-off — are untouched.
+   *
+   * The jobId is reserved in {@link writeWorkspaces} SYNCHRONOUSLY (no await
+   * between the duplicate check and the set), so two same-jobId resolves in
+   * one tick cannot both pass the gate; a failed materialization drops the
+   * reservation on its way out.
+   */
+  private async resolveForWrite(
+    ref: WorkspaceRef,
+    jobId: JobId,
+  ): Promise<{ dir: string; release: () => void }> {
+    const rKey = repoKey(ref.repoId);
+    const { headCommit } = ref;
+    const dir = this.writeWorktreeDir(rKey, jobId);
+    if (this.writeWorkspaces.has(jobId)) {
+      throw new WorkspaceError(
+        "WRITE_IN_PROGRESS",
+        "a write worktree for this job is already live (not yet released)",
+        { repoId: ref.repoId, jobId },
+      );
+    }
+    this.writeWorkspaces.set(jobId, {
+      repoKey: rKey,
+      dir,
+      baseCommit: headCommit,
+    });
+    try {
+      await this.withRepoLock(rKey, async () => {
+        if (this.stopped) {
+          // Post-stop the no-mutation rule holds at OP granularity, not just
+          // at the public entry point (the same discipline as the eviction
+          // pass — commit 473850d): this callback may have queued behind the
+          // lock BEFORE stop() landed, and materializing a worktree now would
+          // issue new git/disk ops during shutdown. Back off instead.
+          throw new WorkspaceError(
+            "GIT_FAILED",
+            "workspace store is stopped (daemon shutting down)",
+          );
+        }
+        const worker = await this.requireSyncedCommit(rKey, ref);
+        // A failed/aborted earlier attempt for this jobId can leave a partial
+        // dir at this deterministic path (init() purges only on startup):
+        // clear it before adding, like the read path does.
+        await this.removeCheckoutDir(dir, ref.repoId, headCommit);
+        try {
+          await mkdir(this.jobsRoot(rKey), { recursive: true });
+        } catch (error) {
+          throw new WorkspaceError(
+            "GIT_FAILED",
+            `could not create write-job dir: ${describeError(error)}`,
+            { repoId: ref.repoId, headCommit },
+          );
+        }
+        const added = await addWorktree(worker, dir, headCommit);
+        if (!ok(added)) {
+          throw new WorkspaceError(
+            "GIT_FAILED",
+            `could not materialize write worktree: ${describeGitFailure(added)}`,
+            { repoId: ref.repoId, headCommit },
+          );
+        }
+      });
+    } catch (error) {
+      // The reservation is only as live as the resolve that made it.
+      this.writeWorkspaces.delete(jobId);
+      throw error;
+    }
+    // NOTE: unlike the read-mode handle's synchronous unpin, this release
+    // actually returns a Promise that settles when the teardown has run (or
+    // been skipped post-stop). The declared `() => void` keeps the handle
+    // shape identical for callers; a caller that needs the completion point
+    // (tests, the job finalize path) may await the returned promise.
+    let cleanup: Promise<void> | undefined;
+    const release = (): Promise<void> => {
+      if (cleanup === undefined) {
+        cleanup = this.releaseWriteWorktree(jobId, rKey, dir);
+      }
+      return cleanup;
+    };
+    return { dir, release };
+  }
+
+  /**
+   * Tears down a write-job worktree when its handle is released: under the
+   * repo lock, `git worktree remove` (+prune), `rm` the dir, deregister the
+   * jobId. A teardown failure is logged, never thrown (like eviction); the
+   * next {@link init}'s purge is the backstop. The handle's caching of the
+   * returned promise makes a double-release a no-op.
+   *
+   * Post-stop this runs NO git/disk ops — the op-granularity discipline of
+   * the eviction pass (commit 473850d), checked both before queueing (a
+   * post-stop release must not register a new lock chain past stop()'s
+   * Promise.allSettled snapshot) and inside the locked callback (a release
+   * that queued pre-stop may reach its callback post-stop, and its aborted
+   * `git worktree remove` could leave a stale admin entry while the rm still
+   * deleted the dir). The worktree then simply persists on disk until the
+   * next init() purges `<repoRoot>/jobs` — a consistent, expected state.
+   */
+  private async releaseWriteWorktree(
+    jobId: JobId,
+    rKey: string,
+    dir: string,
+  ): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    await this.withRepoLock(rKey, async () => {
+      if (this.stopped) {
+        return;
+      }
+      try {
+        await removeWorktree(this.worker(rKey), dir);
+        await rm(dir, { recursive: true, force: true });
+      } catch (error) {
+        this.log(
+          `failed to remove write-job worktree ${dir}: ${describeError(error)}`,
+        );
+      }
+      this.writeWorkspaces.delete(jobId);
+    });
+  }
+
   private hooksPath(): string {
     return path.join(this.cacheDir, ".no-hooks");
   }
@@ -563,6 +794,21 @@ export class WorkspaceStore {
   /** `co`, not `checkouts`: every char here recurs in every checkout file path. */
   private checkoutDir(rKey: string, cKey: string): string {
     return path.join(this.repoRoot(rKey), "co", cKey);
+  }
+
+  /**
+   * Ephemeral write-job worktrees live under `<repoRoot>/jobs`, a SIBLING of
+   * `co` — the checkout scan ({@link registerExistingCheckouts}) reads only
+   * `co`, so a write worktree can structurally never be registered against
+   * the retention cap. Purged wholesale by {@link init}.
+   */
+  private jobsRoot(rKey: string): string {
+    return path.join(this.repoRoot(rKey), "jobs");
+  }
+
+  /** One dir per write job, named by the job UUID's last 12 hex (jobId12). */
+  private writeWorktreeDir(rKey: string, jobId: JobId): string {
+    return path.join(this.jobsRoot(rKey), jobId12(jobId));
   }
 
   private worker(rKey: string): WorkerGit {
@@ -775,6 +1021,39 @@ export class WorkspaceStore {
         `evicted workspace checkout ${evicted.dir} ` +
           `(retention cap ${this.maxCachedCheckouts} reached)`,
       );
+    }
+  }
+
+  /**
+   * Removes every repo's `<repoRoot>/jobs` dir wholesale at {@link init}. An
+   * in-flight write job never survives a daemon restart (its executor died
+   * with the process), so anything found there — half-built worktrees, stale
+   * artifact `.bundle` files — is garbage by definition. Absent jobs dirs are
+   * tolerated (`force: true`). Worktree ADMIN entries in `repo.git` that
+   * pointed at the removed dirs go stale; that is harmless ({@link
+   * addWorktree} passes `--force`) and the next {@link removeWorktree}'s
+   * `git worktree prune` reaps them.
+   */
+  private async purgeWriteWorktrees(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.cacheDir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (!KEY_RE.test(name)) {
+        continue; // skip .no-hooks / legacy dirs, like the checkout scan does
+      }
+      const jobsRoot = this.jobsRoot(name);
+      try {
+        await rm(jobsRoot, { recursive: true, force: true });
+      } catch (error) {
+        this.log(
+          `failed to purge write-job worktrees at ${jobsRoot}: ` +
+            describeError(error),
+        );
+      }
     }
   }
 

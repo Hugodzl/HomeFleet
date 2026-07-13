@@ -2,8 +2,9 @@
  * Unit tests for the worker-side workspace store (M7). Real git, real repos,
  * real bundles created via the git core; no faking. Covers the allowlist
  * (fail-closed), repoId path-traversal neutralization, full+incremental sync,
- * malformed / undelivered-commit rejection, per-repo serialization, and the
- * checkout retention cap.
+ * malformed / undelivered-commit rejection, per-repo serialization, the
+ * checkout retention cap, and ephemeral write-job worktrees (v0.2: dedicated
+ * per-job dirs outside the checkout cache, purged on init).
  */
 import {
   chmod,
@@ -889,6 +890,335 @@ test("a pinned checkout whose HEAD cannot be read fails with a read error, not a
   // The pinned dir was not removed.
   expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
   h1.release();
+}, 45_000);
+
+// --- ephemeral write-job worktrees (v0.2) ----------------------------------
+
+/** Valid job UUIDs (v4 shape); the store keys write worktrees by the LAST 12 hex. */
+const JOB_A = "11111111-1111-4111-8111-aaaaaaaaaaaa";
+const JOB_B = "22222222-2222-4222-9222-bbbbbbbbbbbb";
+
+/**
+ * A write handle's `release()` actually returns a promise that settles when
+ * its teardown has run (or been skipped post-stop); the declared type stays
+ * `() => void` to match the read-mode handle, so tests cast to await it
+ * deterministically.
+ */
+function releaseSettled(handle: { release: () => void }): Promise<void> {
+  return handle.release() as unknown as Promise<void>;
+}
+
+test("write resolve materializes a dedicated detached worktree at <repoRoot>/jobs/<jobId12>", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  // Dedicated layout: jobs/<last-12-of-jobId>, a SIBLING of co/ (so the
+  // checkout-cache scan structurally never sees it).
+  expect(path.resolve(handle.dir)).toBe(
+    path.join(
+      path.resolve(cacheDir),
+      repoKey("repo-a"),
+      "jobs",
+      "aaaaaaaaaaaa",
+    ),
+  );
+  // Detached at exactly ref.headCommit, with the commit's content.
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: handle.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: handle.dir,
+    timeoutMs: 30_000,
+  });
+  expect(branch.stdout.trim()).toBe("HEAD"); // detached: no branch checked out
+  expect(await readFile(path.join(handle.dir, "file.txt"), "utf8")).toBe(
+    "content 0\n",
+  );
+
+  // The registry answers jobId -> {dir, repoKey, baseCommit}: the bridge the
+  // daemon's finalize closure (Task 6) needs, since it can only see the jobId.
+  expect(store.writeJobWorkspace(JOB_A)).toEqual({
+    dir: handle.dir,
+    repoKey: repoKey("repo-a"),
+    baseCommit: c1,
+  });
+
+  await releaseSettled(handle);
+  expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
+}, 45_000);
+
+test("write resolve before any sync fails NOT_SYNCED and leaves no registry entry", async () => {
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await expect(
+    store.resolve(
+      { repoId: "repo-a", headCommit: "a".repeat(40) },
+      { write: { jobId: JOB_A } },
+    ),
+  ).rejects.toMatchObject({ code: "NOT_SYNCED" });
+  expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
+});
+
+test("write worktrees are invisible to the checkout cache: uncounted, unevictable, non-evicting", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const c2 = await src.commit("c2");
+  const store = await makeStore({
+    allowedRepoIds: ["repo-a"],
+    maxCachedCheckouts: 1,
+  });
+  // A full bundle of c2 contains c1 and c2.
+  await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
+
+  // One unpinned cached checkout, exactly at cap 1.
+  const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+
+  // A write resolve neither counts against the cap nor evicts: were the write
+  // worktree entered into the checkout map, cap 1 would evict c1 here.
+  const hw = await store.resolve(
+    { repoId: "repo-a", headCommit: c2 },
+    { write: { jobId: JOB_A } },
+  );
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  expect((await stat(path.join(hw.dir, ".git"))).isFile()).toBe(true);
+  const checkouts = (
+    store as unknown as { checkouts: Map<string, { dir: string }> }
+  ).checkouts;
+  expect([...checkouts.values()].some((e) => e.dir === hw.dir)).toBe(false);
+  expect(checkouts.size).toBe(1);
+
+  // Conversely a live write worktree is never an eviction victim: a read
+  // resolve of c2 pushes the cache over cap and the eviction pass must pick
+  // c1 (the LRU CACHED checkout), never the write worktree.
+  const h2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
+  await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
+  expect((await stat(path.join(hw.dir, ".git"))).isFile()).toBe(true);
+
+  h2.release();
+  await releaseSettled(hw);
+}, 45_000);
+
+test("init never registers a jobs dir against the retention cap (the scan reads co/ only)", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 1,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+  };
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const h1 = await store1.resolve({ repoId: "repo-a", headCommit: c1 });
+  h1.release();
+
+  // A populated-LOOKING leftover jobs dir with the newest mtime: were it
+  // registered by the checkout scan, it would out-recency the real checkout
+  // and cap 1 would evict the real one on the next init.
+  const jobsDir = path.join(
+    cacheDir,
+    repoKey("repo-a"),
+    "jobs",
+    "cccccccccccc",
+  );
+  await mkdir(jobsDir, { recursive: true });
+  await writeFile(path.join(jobsDir, ".git"), "gitdir: nowhere\n");
+  await utimes(jobsDir, new Date(), new Date(Date.now() + 60_000));
+
+  const store2 = new WorkspaceStore(opts);
+  await store2.init();
+  // The real checkout survived (cap unaffected) and is the ONLY registration.
+  expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
+  const checkouts = (store2 as unknown as { checkouts: Map<string, unknown> })
+    .checkouts;
+  expect(checkouts.size).toBe(1);
+}, 45_000);
+
+test("one live write worktree per jobId: a duplicate resolve fails until the first is released", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const first = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  await expect(
+    store.resolve(
+      { repoId: "repo-a", headCommit: c1 },
+      { write: { jobId: JOB_A } },
+    ),
+  ).rejects.toMatchObject({ code: "WRITE_IN_PROGRESS" });
+  // The rejected duplicate disturbed neither the live worktree nor its entry.
+  expect((await stat(path.join(first.dir, ".git"))).isFile()).toBe(true);
+  expect(store.writeJobWorkspace(JOB_A)?.dir).toBe(first.dir);
+
+  // A DIFFERENT jobId is independent.
+  const other = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_B } },
+  );
+  expect(other.dir).not.toBe(first.dir);
+
+  // Once released, the same jobId resolves again (same deterministic path,
+  // freshly materialized).
+  await releaseSettled(first);
+  const again = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  expect(again.dir).toBe(first.dir);
+  expect((await stat(path.join(again.dir, ".git"))).isFile()).toBe(true);
+
+  await releaseSettled(other);
+  await releaseSettled(again);
+}, 60_000);
+
+test("releasing a write handle removes its worktree; a second release is a no-op", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  await releaseSettled(handle);
+
+  // Dir removed from disk, its worktree registration pruned from the cache
+  // repo, and the registry no longer answers for the jobId.
+  await expect(stat(handle.dir)).rejects.toThrow();
+  const worker = workerFor(cacheDir, "repo-a");
+  const list = await runGit(["worktree", "list", "--porcelain"], {
+    cwd: worker.repoDir,
+    timeoutMs: 30_000,
+  });
+  expect(list.stdout).not.toContain("aaaaaaaaaaaa");
+  expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
+
+  // Idempotent: the second call neither throws nor re-runs teardown.
+  await releaseSettled(handle);
+  await expect(stat(handle.dir)).rejects.toThrow();
+}, 45_000);
+
+test("a post-stop write release runs no git/disk ops: the worktree persists until the next init purges it", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 32,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+  };
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store1.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+
+  await store1.stop();
+  // Post-stop the release must not touch git or disk (op-granularity
+  // discipline): the worktree stays on disk, in a consistent state.
+  await releaseSettled(handle);
+  expect((await stat(path.join(handle.dir, ".git"))).isFile()).toBe(true);
+
+  // The next daemon run's init purges it: an in-flight write job never
+  // survives a restart.
+  const store2 = new WorkspaceStore(opts);
+  await store2.init();
+  await expect(stat(handle.dir)).rejects.toThrow();
+}, 45_000);
+
+test("init purges leftover write-job dirs and stale files under jobs/ (and tolerates their absence)", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 32,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+  };
+  // First init: no jobs dirs anywhere — must simply work.
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  // Fake leftovers from a crashed run: a half-built worktree dir and a stale
+  // artifact bundle (the future finalize step writes these next to the
+  // worktrees). Both are garbage by definition after a restart.
+  const jobsRoot = path.join(cacheDir, repoKey("repo-a"), "jobs");
+  await mkdir(path.join(jobsRoot, "deadbeefdead"), { recursive: true });
+  await writeFile(path.join(jobsRoot, "deadbeefdead", "half.txt"), "partial\n");
+  await writeFile(path.join(jobsRoot, "aaaaaaaaaaaa.bundle"), "stale\n");
+
+  const store2 = new WorkspaceStore(opts);
+  await store2.init();
+  await expect(stat(jobsRoot)).rejects.toThrow(); // the whole jobs dir is gone
+  // The synced cache itself is untouched.
+  expect(await store2.haveTip("repo-a")).toBe(c1);
+}, 45_000);
+
+test("stop() ahead of a queued write resolve makes it back off without materializing a worktree", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  const internals = store as unknown as {
+    withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T>;
+  };
+  const rKey = repoKey("repo-a");
+
+  // Gated-lock pattern (same as the eviction-halt test): park the repo lock
+  // so the write resolve queues behind the gate, land stop() while it waits,
+  // then open the gate — its locked callback runs only AFTER the stop.
+  let openGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const blocker = internals.withRepoLock(rKey, () => gate);
+  const resolving = store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  const stopping = store.stop();
+  openGate();
+
+  await expect(resolving).rejects.toMatchObject({
+    code: "GIT_FAILED",
+    message: /stopped/i,
+  });
+  await Promise.all([blocker, stopping]);
+
+  // Nothing was materialized — the repo's jobs dir was never even created —
+  // and the failed resolve deregistered its reservation.
+  await expect(stat(path.join(cacheDir, rKey, "jobs"))).rejects.toThrow();
+  expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
 }, 45_000);
 
 test("legacy pre-0.1 cache dirs (64-hex) are warned about once and left in place", async () => {
