@@ -15,6 +15,9 @@ import {
   TERMINAL_JOB_STATUSES,
   TerminalJobStatusSchema,
   WorkspaceRefSchema,
+  WriteBranchNameSchema,
+  WriteJobParamsSchema,
+  writeBranchName,
 } from "./job.js";
 import { validJobId, validJobResult, validWorkspace } from "./test-fixtures.js";
 
@@ -56,6 +59,7 @@ test("JobIdSchema accepts crypto.randomUUID() output", () => {
 test("JobTypeSchema accepts defined job types and rejects others", () => {
   expect(JobTypeSchema.parse("recon")).toBe("recon");
   expect(JobTypeSchema.parse("command")).toBe("command");
+  expect(JobTypeSchema.parse("write")).toBe("write");
   expect(JobTypeSchema.safeParse("shell").success).toBe(false);
 });
 
@@ -186,6 +190,99 @@ test("CommandJobParamsSchema accepts timeoutMs boundary values", () => {
   ).toBe(3600000);
 });
 
+test("write job params parse with defaulted budgets", () => {
+  const params = JobParamsSchema.parse({
+    type: "write",
+    workspace: { repoId: "homefleet", headCommit: "a".repeat(40) },
+    instructions: "add a test for the config loader",
+  });
+  if (params.type !== "write") throw new Error("wrong kind");
+  expect(params.budgets).toEqual({ maxToolCalls: 100, maxWallMs: 600_000 });
+  expect(params.pathHints).toBeUndefined();
+  expect(params.verifyCommand).toBeUndefined();
+});
+
+test("WriteJobParamsSchema keeps explicit hints, verify command, and budgets", () => {
+  const params = {
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "add a test for the config loader",
+    pathHints: ["packages/daemon/src/config.ts"],
+    verifyCommand: { name: "pnpm", args: ["test"] },
+    budgets: { maxToolCalls: 40, maxWallMs: 120000 },
+  };
+  expect(WriteJobParamsSchema.parse(params)).toEqual(params);
+});
+
+test("WriteJobParamsSchema defaults verifyCommand args to []", () => {
+  const parsed = WriteJobParamsSchema.parse({
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "run the loader test",
+    verifyCommand: { name: "pnpm" },
+  });
+  expect(parsed.verifyCommand).toEqual({ name: "pnpm", args: [] });
+});
+
+test("WriteJobParamsSchema rejects empty or oversized instructions", () => {
+  const base = { type: "write", workspace: validWorkspace };
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, instructions: "" }).success,
+  ).toBe(false);
+  expect(
+    WriteJobParamsSchema.safeParse({
+      ...base,
+      instructions: "x".repeat(16385),
+    }).success,
+  ).toBe(false);
+});
+
+test("WriteJobParamsSchema caps pathHints at 32 entries", () => {
+  const base = {
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "touch every hinted file",
+  };
+  const hints = Array.from({ length: 33 }, (_, i) => `src/file-${i}.ts`);
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, pathHints: hints }).success,
+  ).toBe(false);
+  expect(
+    WriteJobParamsSchema.safeParse({ ...base, pathHints: hints.slice(0, 32) })
+      .success,
+  ).toBe(true);
+});
+
+test("WriteBranchNameSchema requires homefleet/ plus exactly 12 lowercase hex", () => {
+  expect(WriteBranchNameSchema.parse("homefleet/0b2945872342")).toBe(
+    "homefleet/0b2945872342",
+  );
+  // 11 and 13 hex chars, uppercase, wrong prefix, missing prefix.
+  expect(WriteBranchNameSchema.safeParse("homefleet/0b294587234").success).toBe(
+    false,
+  );
+  expect(
+    WriteBranchNameSchema.safeParse("homefleet/0b29458723421").success,
+  ).toBe(false);
+  expect(
+    WriteBranchNameSchema.safeParse("homefleet/0B2945872342").success,
+  ).toBe(false);
+  expect(WriteBranchNameSchema.safeParse("feature/0b2945872342").success).toBe(
+    false,
+  );
+  expect(WriteBranchNameSchema.safeParse("0b2945872342").success).toBe(false);
+});
+
+test("writeBranchName derives the branch from the job UUID's first 12 hex", () => {
+  expect(writeBranchName("0198c2f6-3c4d-7e88-a1b2-c3d4e5f60718")).toBe(
+    "homefleet/0198c2f63c4d",
+  );
+  // Every derived name satisfies the branch-name schema.
+  expect(
+    WriteBranchNameSchema.safeParse(writeBranchName(validJobId)).success,
+  ).toBe(true);
+});
+
 test("JobParamsSchema parses both variants through the discriminated union", () => {
   const recon = JobParamsSchema.parse({
     type: "recon",
@@ -219,6 +316,8 @@ test("JobParams narrows through a switch on type", () => {
         return params.prompt;
       case "command":
         return [params.command, ...params.args].join(" ");
+      case "write":
+        return params.instructions;
       default: {
         const exhaustive: never = params;
         return exhaustive;
@@ -371,4 +470,99 @@ test("JobResultSchema allows canceled results with or without an error", () => {
   };
   expect(JobResultSchema.parse(bare)).toEqual(bare);
   expect(JobResultSchema.parse(withError)).toEqual(withError);
+});
+
+const validWriteArtifact = {
+  branchName: "homefleet/0b2945872342",
+  baseCommit: "0123456789abcdef0123456789abcdef01234567",
+  headCommit: "89abcdef0123456789abcdef0123456789abcdef",
+  diffStat: { filesChanged: 2, insertions: 14, deletions: 3 },
+  commitMessage: "add a test for the config loader",
+};
+
+const validWriteResult = {
+  jobId: validJobId,
+  type: "write",
+  status: "succeeded",
+  stats: { toolCalls: 12, wallMs: 90000 },
+  artifact: validWriteArtifact,
+};
+
+test("JobResultSchema accepts a succeeded write result with a full artifact", () => {
+  expect(JobResultSchema.parse(validWriteResult)).toEqual(validWriteResult);
+});
+
+test("JobResultSchema accepts a succeeded write result with artifact null (no changes)", () => {
+  const noChanges = { ...validWriteResult, artifact: null };
+  expect(JobResultSchema.parse(noChanges)).toEqual(noChanges);
+});
+
+test("JobResultSchema rejects an artifact on a non-write result", () => {
+  expect(
+    JobResultSchema.safeParse({
+      ...validJobResult,
+      artifact: validWriteArtifact,
+    }).success,
+  ).toBe(false);
+  // Even an explicit null artifact is write-only shape.
+  expect(
+    JobResultSchema.safeParse({ ...validJobResult, artifact: null }).success,
+  ).toBe(false);
+});
+
+test("JobResultSchema rejects failed write results carrying a non-null artifact", () => {
+  const failed = {
+    ...validWriteResult,
+    status: "failed",
+    error: { code: "BUDGET_EXCEEDED", message: "tool-call budget exhausted" },
+  };
+  expect(JobResultSchema.safeParse(failed).success).toBe(false);
+  // Discarded work: failed results parse with the artifact absent or null.
+  const { artifact: _artifact, ...withoutArtifact } = failed;
+  expect(JobResultSchema.parse(withoutArtifact)).toEqual(withoutArtifact);
+  expect(JobResultSchema.parse({ ...failed, artifact: null })).toEqual({
+    ...failed,
+    artifact: null,
+  });
+});
+
+test("JobResultSchema rejects canceled write results carrying a non-null artifact", () => {
+  const canceled = { ...validWriteResult, status: "canceled" };
+  expect(JobResultSchema.safeParse(canceled).success).toBe(false);
+  expect(JobResultSchema.parse({ ...canceled, artifact: null })).toEqual({
+    ...canceled,
+    artifact: null,
+  });
+});
+
+test("JobResultSchema allows verify only on write results", () => {
+  const verify = {
+    name: "pnpm",
+    args: ["test"],
+    exitCode: 1,
+    outputTail: "1 failed",
+  };
+  const withVerify = { ...validWriteResult, verify };
+  expect(JobResultSchema.parse(withVerify)).toEqual(withVerify);
+  expect(JobResultSchema.safeParse({ ...validJobResult, verify }).success).toBe(
+    false,
+  );
+});
+
+test("JobResultSchema rejects a malformed write artifact", () => {
+  expect(
+    JobResultSchema.safeParse({
+      ...validWriteResult,
+      artifact: { ...validWriteArtifact, branchName: "feature/nope" },
+    }).success,
+  ).toBe(false);
+  expect(
+    JobResultSchema.safeParse({
+      ...validWriteResult,
+      artifact: {
+        ...validWriteArtifact,
+        diffStat: { filesChanged: -1, insertions: 0, deletions: 0 },
+      },
+    }).success,
+  ).toBe(false);
 });

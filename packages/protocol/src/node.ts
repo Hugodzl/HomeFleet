@@ -50,7 +50,7 @@ export type ModelInfo = z.infer<typeof ModelInfoSchema>;
 export const NodeRoleSchema = z.enum(["inference", "execution"]);
 export type NodeRole = z.infer<typeof NodeRoleSchema>;
 
-export const ExecutorKindSchema = z.enum(["command", "agent"]);
+export const ExecutorKindSchema = z.enum(["command", "agent", "write"]);
 export type ExecutorKind = z.infer<typeof ExecutorKindSchema>;
 
 export const NodeInfoSchema = z.object({

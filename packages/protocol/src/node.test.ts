@@ -69,6 +69,7 @@ test("NodeRoleSchema accepts defined roles and rejects others", () => {
 test("ExecutorKindSchema accepts defined kinds and rejects others", () => {
   expect(ExecutorKindSchema.parse("command")).toBe("command");
   expect(ExecutorKindSchema.parse("agent")).toBe("agent");
+  expect(ExecutorKindSchema.parse("write")).toBe("write");
   expect(ExecutorKindSchema.safeParse("shell").success).toBe(false);
 });
 

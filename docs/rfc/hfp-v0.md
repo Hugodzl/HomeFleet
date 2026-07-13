@@ -4,7 +4,8 @@
 
 The HomeFleet Protocol (HFP) is a LAN protocol by which one HomeFleet daemon
 (`homefleetd`) delegates coding-oriented jobs — read-only repository
-reconnaissance and command execution — to another daemon on a paired machine.
+reconnaissance, command execution, and code-writing tasks — to another daemon
+on a paired machine.
 HFP messages are versioned JSON documents exchanged over HTTPS with mutual
 TLS. This document specifies HFP v0: LAN discovery, node identity and
 capability exchange, pairing, job delegation, event streaming, results, and
@@ -33,10 +34,13 @@ described in RFC 2119.
   identity and transport identity are the same thing.
 - **Job** — a unit of delegated work. Job parameters are a tagged union on
   `type`; v0 defines `recon` (read-only repo analysis by the worker's local
-  model) and `command` (allowlisted command execution).
-- **Executor** — the worker-side component that runs a job. v0 defines two
-  executor kinds: `command` (no LLM) and `agent` (a minimal tool-calling
-  loop against an OpenAI-compatible endpoint).
+  model), `command` (allowlisted command execution), and `write`
+  (code-writing by the worker's local model, returning a branch artifact).
+- **Executor** — the worker-side component that runs a job. v0 defines three
+  executor kinds: `command` (no LLM), `agent` (a minimal tool-calling loop
+  against an OpenAI-compatible endpoint), and `write` (the agent loop
+  extended with editing tools; see
+  [Write tasks and artifacts](#write-tasks-and-artifacts)).
 - **Workspace** — a checkout of a repository at a specific commit, identified
   by a `WorkspaceRef` (`repoId` + `headCommit`). Workspace *transfer* (git
   bundles, ADR-0005) is out of scope for this document; HFP v0 only defines
@@ -68,6 +72,7 @@ HFP is bound to HTTPS with mutual TLS:
 | GET    | `/hfp/v0/jobs/{id}`        | —                   | `JobSnapshot`                  |
 | GET    | `/hfp/v0/jobs/{id}/events` | —                   | SSE stream of `JobEvent`       |
 | POST   | `/hfp/v0/jobs/{id}/cancel` | —                   | `CancelResponse`               |
+| GET    | `/hfp/v0/jobs/{id}/artifact` | —                 | git bundle (binary)            |
 | POST   | `/hfp/v0/workspace/have`   | `HaveTipRequest`    | `HaveTipResponse`              |
 | POST   | `/hfp/v0/workspace/bundle` | git bundle (binary) | `BundleUploadResponse`         |
 
@@ -189,10 +194,10 @@ its cache.
 ### Job parameters — `JobParams`
 
 A tagged union on `type`, where `type` is a `JobType`
-(`"recon" | "command"` in this version). This union is the protocol's
-extension point: a future job type is added as a new params schema, a new
-union variant, and a new `JobType` entry — without redesigning the job
-model.
+(`"recon" | "command" | "write"` in this version). This union is the
+protocol's extension point: a future job type is added as a new params
+schema, a new union variant, and a new `JobType` entry — without redesigning
+the job model.
 
 #### `ReconJobParams` (`type: "recon"`)
 
@@ -249,6 +254,50 @@ on their local allowlist.
 }
 ```
 
+#### `WriteJobParams` (`type: "write"`)
+
+A code-writing task executed by the worker's local model in the workspace.
+The result of a successful write job is a **branch artifact** — see
+[Write tasks and artifacts](#write-tasks-and-artifacts) for the artifact
+shape, the delivery endpoint, and the delegator's obligations.
+
+| Field           | Type             | Notes                                          |
+| --------------- | ---------------- | ---------------------------------------------- |
+| `type`          | `"write"`        |                                                |
+| `workspace`     | `WorkspaceRef`   |                                                |
+| `instructions`  | string           | The task prompt, 1–16384 chars                 |
+| `pathHints`     | string[]?        | ≤ 32 entries, each 1–1024 chars; advisory starting points only, never an access restriction |
+| `verifyCommand` | `VerifyCommand`? | Post-commit verification run                   |
+| `budgets`       | `WriteBudgets`   | Defaults applied when absent                   |
+
+`VerifyCommand` is `{ name: string, args: string[] (default []) }`. `name`
+MUST name an entry in the worker's command allowlist — the same gate as
+`command` jobs; a name not on the allowlist is rejected with
+`COMMAND_NOT_ALLOWED` and is never spawned. The verify run is
+**report-only**: its outcome is returned in `JobResult.verify` and a non-zero
+exit does not fail the job.
+
+`WriteBudgets` has the same shape and bounds as `JobBudgets` but defaults
+`maxToolCalls` to `100` — double the recon default, since edits burn a
+read+write pair per file touched (`maxWallMs` default is unchanged at
+`600000`):
+
+| Field          | Type    | Constraints        | Default  |
+| -------------- | ------- | ------------------ | -------- |
+| `maxToolCalls` | integer | ≥ 1, ≤ 200         | `100`    |
+| `maxWallMs`    | integer | ≥ 1000, ≤ 3600000  | `600000` |
+
+```json
+{
+  "type": "write",
+  "workspace": { "repoId": "homefleet", "headCommit": "0123456789abcdef0123456789abcdef01234567" },
+  "instructions": "Add a unit test for the config loader's default handling.",
+  "pathHints": ["packages/daemon/src/config.ts"],
+  "verifyCommand": { "name": "pnpm", "args": ["test"] },
+  "budgets": { "maxToolCalls": 100, "maxWallMs": 600000 }
+}
+```
+
 ### Delegation — `DelegateRequest` / `DelegateResponse`
 
 `DelegateRequest`: `{ params: JobParams }`.
@@ -289,19 +338,23 @@ not an error: the response simply carries the existing terminal status.
 
 ### Job result — `JobResult`
 
-| Field     | Type                | Notes                                                |
-| --------- | ------------------- | ---------------------------------------------------- |
-| `jobId`   | string (UUID)       |                                                      |
-| `type`    | `JobType`           | `"recon" \| "command"` — makes results discriminable |
-| `status`  | `TerminalJobStatus` | `"succeeded" \| "failed" \| "canceled"`              |
-| `summary` | string?             | Model-produced summary (recon jobs)                  |
-| `output`  | `CommandOutput`?    | Captured output (command jobs)                       |
-| `stats`   | `JobStats`          |                                                      |
-| `error`   | `HfpError`?         | See error-presence rules below                       |
+| Field      | Type                     | Notes                                                |
+| ---------- | ------------------------ | ---------------------------------------------------- |
+| `jobId`    | string (UUID)            |                                                      |
+| `type`     | `JobType`                | `"recon" \| "command" \| "write"` — makes results discriminable |
+| `status`   | `TerminalJobStatus`      | `"succeeded" \| "failed" \| "canceled"`              |
+| `summary`  | string?                  | Model-produced summary (recon and write jobs)        |
+| `output`   | `CommandOutput`?         | Captured output (command jobs)                       |
+| `stats`    | `JobStats`               |                                                      |
+| `error`    | `HfpError`?              | See error-presence rules below                       |
+| `artifact` | `WriteArtifact \| null`? | Write jobs only; see [Write tasks and artifacts](#write-tasks-and-artifacts) |
+| `verify`   | `VerifyReport`?          | Write jobs only; present iff `verifyCommand` ran     |
 
 Error-presence rules: a `failed` result MUST carry `error`; a `succeeded`
 result MUST NOT carry `error`; a `canceled` result MAY carry `error` (if
-present, typically code `CANCELED`).
+present, typically code `CANCELED`). The write-only fields have their own
+presence rules, specified in
+[Write tasks and artifacts](#write-tasks-and-artifacts).
 
 `CommandOutput` is `{ stdout: string, stderr: string, exitCode: integer | null }`;
 `exitCode` is `null` when the process was killed by timeout or cancellation
@@ -318,6 +371,101 @@ present, typically code `CANCELED`).
   "stats": { "toolCalls": 7, "wallMs": 42137, "promptTokens": 1500, "completionTokens": 300 }
 }
 ```
+
+### Write tasks and artifacts
+
+A `write` job (params: [`WriteJobParams`](#writejobparams-type-write)) has the
+worker's local model edit a synced workspace and, when it completes with
+changes, commit them **once** on a dedicated branch. The committed work comes
+back to the delegator as a **write artifact**: a branch delivered as a git
+bundle, described by the `artifact` block on the job's `JobResult`.
+
+#### The reserved `homefleet/` branch namespace
+
+Write-job result branches live under `refs/heads/homefleet/`, on both sides:
+the worker creates the result branch there, and the delegator MUST create
+fetched refs only there. The branch name is `homefleet/<jobId12>`, where
+`jobId12` is the first 12 hex characters of the job UUID with hyphens
+stripped (job ID `0198c2f6-3c4d-7e88-a1b2-c3d4e5f60718` → branch
+`homefleet/0198c2f63c4d`). The namespace is reserved: nothing else in
+HomeFleet writes refs under `refs/heads/homefleet/`, so a fetched artifact
+can never clobber a user branch.
+
+#### `WriteArtifact`
+
+| Field           | Type       | Notes                                          |
+| --------------- | ---------- | ---------------------------------------------- |
+| `branchName`    | string     | `homefleet/<jobId12>` (12 lowercase hex)       |
+| `baseCommit`    | string     | 40-hex commit the work started from            |
+| `headCommit`    | string     | 40-hex tip of the result branch — the bundle's integrity anchor |
+| `diffStat`      | `DiffStat` | `{ filesChanged, insertions, deletions }`, each an integer ≥ 0 |
+| `commitMessage` | string     | 1–4096 chars                                   |
+
+Presence rules, enforced by `JobResultSchema`:
+
+- `artifact` and `verify` (even an explicit `artifact: null`) MUST only
+  appear on results with `type: "write"`.
+- A `succeeded` write result carries `artifact: null` when the model
+  completed without producing changes, or a full `WriteArtifact` otherwise.
+- A `failed` or `canceled` write result MUST NOT carry a non-null
+  `artifact`: budget exhaustion, failure, and cancellation discard the
+  work — partial edits are never committed or delivered.
+
+`VerifyReport` is
+`{ name: string, args: string[], exitCode: integer | null, outputTail: string }` —
+the outcome of the requested `verifyCommand`, present iff it was requested
+and ran. `exitCode` is `null` when the verify run was killed (timeout or
+cancellation); `outputTail` is a size-capped tail of its combined output.
+A non-zero `exitCode` does not make the job `failed` — the delegator decides
+what a red verify run means.
+
+```json
+{
+  "jobId": "0b294587-2342-4718-b6bb-2b3c837e2a9c",
+  "type": "write",
+  "status": "succeeded",
+  "summary": "Added a default-handling test for the config loader.",
+  "stats": { "toolCalls": 23, "wallMs": 181204, "promptTokens": 21000, "completionTokens": 2400 },
+  "artifact": {
+    "branchName": "homefleet/0b2945872342",
+    "baseCommit": "0123456789abcdef0123456789abcdef01234567",
+    "headCommit": "89abcdef0123456789abcdef0123456789abcdef",
+    "diffStat": { "filesChanged": 2, "insertions": 41, "deletions": 3 },
+    "commitMessage": "Add config loader default-handling test"
+  },
+  "verify": { "name": "pnpm", "args": ["test"], "exitCode": 0, "outputTail": "Tests 12 passed (12)" }
+}
+```
+
+#### Artifact download — `GET /hfp/v0/jobs/{id}/artifact`
+
+Gated exactly like the other job endpoints: mTLS plus job ownership (only
+the delegator that submitted the job may fetch its artifact; requests for
+non-owned jobs are answered as unknown, so existence never leaks). The
+response streams a git bundle (`application/octet-stream`) containing
+**exactly one ref**: `refs/heads/homefleet/<jobId12>`. The endpoint responds
+404 when the job has no artifact (not a write job, not yet terminal, or a
+result with `artifact: null`) and 410 when the artifact existed but has been
+evicted (job retention). The bundle is retained for the job's retention
+window and does not survive a worker restart.
+
+#### Delegator obligations on fetch-in
+
+The `JobResult` travels over the authenticated mTLS channel and is the
+integrity anchor for the artifact bytes. Before applying a downloaded
+bundle, the delegator MUST verify:
+
+- `git bundle list-heads` shows exactly one ref, and it is the expected
+  `refs/heads/homefleet/<jobId12>` for this job;
+- that ref's tip equals `JobResult.artifact.headCommit` — a peer cannot
+  later substitute different bytes for the result it reported.
+
+A bundle failing either check MUST be discarded, not applied. Applying is a
+plain `git fetch` from the bundle: it creates the ref and MUST NOT touch the
+working tree or any branch outside `refs/heads/homefleet/`; if the ref
+already exists (re-delivery), the fetch MUST be a fast-forward or fail. The
+fetch MUST NOT execute repository hooks; content becomes live only when a
+human checks the branch out.
 
 ### Events — `JobEvent`
 
@@ -626,10 +774,10 @@ queued ---> running +-----------> failed
 ## Future Extensions
 
 - **New job types** extend the `JobParams` discriminated union — e.g.
-  code-writing delegation (diff/branch results) and model-pool orchestration
-  jobs. Adding one means a new params schema, a new union variant, and a new
-  `JobType` entry; each variant comes with its own result conventions and
-  error codes as needed.
+  model-pool orchestration jobs. Adding one means a new params schema, a new
+  union variant, and a new `JobType` entry; each variant comes with its own
+  result conventions and error codes as needed (the `write` kind followed
+  exactly this path).
 - **Dirty-state transfer.** Workspace sync (see [Workspace Sync](#workspace-sync))
   ships committed state only in v0; a post-MVP extension could carry
   uncommitted changes as a patch applied over the materialized checkout
@@ -646,3 +794,5 @@ queued ---> running +-----------> failed
 - ADR-0004 — Syncthing-style trust model (device ID = cert fingerprint)
 - ADR-0005 — git-bundle workspace sync
 - `docs/specs/2026-07-06-homefleet-design.md` — HomeFleet v0.1 design
+- `docs/specs/2026-07-10-code-writing-delegation-design.md` — code-writing
+  delegation (v0.2) design
