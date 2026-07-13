@@ -22,7 +22,6 @@ import { z } from "zod";
 import { type CommandAllowlist, safeSpawn } from "../spawn.js";
 import { decodeUtf8Capped } from "../truncation.js";
 import type { ToolDefinition } from "./openai-client.js";
-import { editFileTool, writeFileTool } from "./write-tools.js";
 
 /** Per-result byte cap for read_file. */
 export const MAX_READ_FILE_BYTES = 65_536;
@@ -263,7 +262,7 @@ export function makeTool<T>(spec: ToolSpec<T>): AgentTool {
   };
 }
 
-const readFileTool = makeTool({
+export const readFileTool = makeTool({
   name: "read_file",
   description:
     "Read a text file from the workspace. Paths are relative to the workspace root.",
@@ -295,7 +294,7 @@ const readFileTool = makeTool({
 /** The kinds list_dir reports for a directory entry. */
 type DirEntryKind = "file" | "dir" | "symlink";
 
-const listDirTool = makeTool({
+export const listDirTool = makeTool({
   name: "list_dir",
   description:
     'List a workspace directory. Returns a JSON array of { name, kind } entries where kind is "file", "dir", or "symlink".',
@@ -482,7 +481,7 @@ async function runGrepWorker(
   });
 }
 
-const grepTool = makeTool({
+export const grepTool = makeTool({
   name: "grep",
   description:
     "Search all workspace files line by line with a JavaScript regular expression. " +
@@ -538,7 +537,7 @@ const grepTool = makeTool({
   },
 });
 
-const globTool = makeTool({
+export const globTool = makeTool({
   name: "glob",
   description:
     "Find workspace files by glob pattern (*, **, ?) over forward-slash relative paths. " +
@@ -572,7 +571,7 @@ const globTool = makeTool({
   },
 });
 
-function runCommandTool(allowlist: CommandAllowlist): AgentTool {
+export function runCommandTool(allowlist: CommandAllowlist): AgentTool {
   const allowed = Object.keys(allowlist).sort(byName);
   return makeTool({
     name: "run_command",
@@ -640,32 +639,4 @@ function runCommandTool(allowlist: CommandAllowlist): AgentTool {
       }
     },
   });
-}
-
-export interface BuildToolsetOptions {
-  /**
-   * Advertise write_file/edit_file (v0.2 code-writing delegation). Off by
-   * default: read-only jobs must never hand the model a write surface.
-   */
-  includeWriteTools?: boolean;
-}
-
-/**
- * The advertised toolset. run_command is present only when the allowlist
- * has entries — an empty allowlist disables the tool AND omits it from the
- * definitions sent to the model. The write tools appear only when opted in
- * via {@link BuildToolsetOptions.includeWriteTools}.
- */
-export function buildToolset(
-  commandAllowlist: CommandAllowlist,
-  options: BuildToolsetOptions = {},
-): AgentTool[] {
-  const tools = [readFileTool, listDirTool, grepTool, globTool];
-  if (options.includeWriteTools === true) {
-    tools.push(writeFileTool, editFileTool);
-  }
-  if (Object.keys(commandAllowlist).length > 0) {
-    tools.push(runCommandTool(commandAllowlist));
-  }
-  return tools;
 }

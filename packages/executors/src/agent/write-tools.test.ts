@@ -15,7 +15,8 @@ import {
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { makeTempDir, removeTempDir } from "../test-fixtures.js";
-import { buildToolset, type ToolExecutionContext } from "./tools.js";
+import type { ToolExecutionContext } from "./tools.js";
+import { buildToolset } from "./toolset.js";
 import {
   editFileTool,
   MAX_EDIT_TEXT_CHARS,

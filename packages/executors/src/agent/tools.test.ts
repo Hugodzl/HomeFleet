@@ -5,7 +5,6 @@ import type { CommandAllowlist } from "../spawn.js";
 import { makeTempDir, removeTempDir } from "../test-fixtures.js";
 import {
   type AgentTool,
-  buildToolset,
   globToRegExp,
   MAX_GREP_FILE_BYTES,
   MAX_GREP_MATCHES,
@@ -13,6 +12,7 @@ import {
   READ_FILE_TRUNCATION_MARKER,
   type ToolExecutionContext,
 } from "./tools.js";
+import { buildToolset } from "./toolset.js";
 
 const nodeAllowlist: CommandAllowlist = {
   node: { executable: process.execPath },
