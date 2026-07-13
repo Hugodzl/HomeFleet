@@ -46,7 +46,6 @@ export {
   editFileTool,
   MAX_EDIT_TEXT_CHARS,
   MAX_WRITE_FILE_BYTES,
-  resolveWritablePath,
   writeFileTool,
 } from "./agent/write-tools.js";
 export {
