@@ -68,7 +68,7 @@
  * job never survives a restart — anything left there is garbage by definition.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   type HfpError,
@@ -102,6 +102,13 @@ import {
   type WorkerGit,
   worktreeHead,
 } from "./git.js";
+import {
+  isPopulatedCheckout,
+  pathExists,
+  purgeWriteWorktrees,
+  scanExistingCheckouts,
+  type WorkspaceInitContext,
+} from "./workspace-init.js";
 
 /** The single ref the worker maintains per repo: its current known head. */
 const TIP_REF = "refs/homefleet/tip";
@@ -312,7 +319,7 @@ export class WorkspaceStore {
     }
     await mkdir(this.cacheDir, { recursive: true });
     await mkdir(this.hooksPath(), { recursive: true });
-    await this.purgeWriteWorktrees();
+    await purgeWriteWorktrees(this.initContext());
     await this.registerExistingCheckouts();
     this.initialized = true;
   }
@@ -1059,8 +1066,22 @@ export class WorkspaceStore {
   }
 
   /** `co`, not `checkouts`: every char here recurs in every checkout file path. */
+  private checkoutsRoot(rKey: string): string {
+    return path.join(this.repoRoot(rKey), "co");
+  }
+
   private checkoutDir(rKey: string, cKey: string): string {
-    return path.join(this.repoRoot(rKey), "co", cKey);
+    return path.join(this.checkoutsRoot(rKey), cKey);
+  }
+
+  /** The narrow seam the init-time purge/scan helpers see of this store. */
+  private initContext(): WorkspaceInitContext {
+    return {
+      cacheDir: this.cacheDir,
+      jobsRoot: (rKey) => this.jobsRoot(rKey),
+      checkoutsRoot: (rKey) => this.checkoutsRoot(rKey),
+      log: this.log,
+    };
   }
 
   /**
@@ -1300,110 +1321,18 @@ export class WorkspaceStore {
     }
   }
 
-  /**
-   * Removes every repo's `<repoRoot>/jobs` dir wholesale at {@link init}. An
-   * in-flight write job never survives a daemon restart (its executor died
-   * with the process), so anything found there — half-built worktrees, stale
-   * artifact `.bundle` files — is garbage by definition. Absent jobs dirs are
-   * tolerated (`force: true`). Worktree ADMIN entries in `repo.git` that
-   * pointed at the removed dirs go stale; that is harmless ({@link
-   * addWorktree} passes `--force`) and the next {@link removeWorktree}'s
-   * `git worktree prune` reaps them.
-   */
-  private async purgeWriteWorktrees(): Promise<void> {
-    let names: string[];
-    try {
-      names = await readdir(this.cacheDir);
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      if (!KEY_RE.test(name)) {
-        continue; // skip .no-hooks / legacy dirs, like the checkout scan does
-      }
-      const jobsRoot = this.jobsRoot(name);
-      try {
-        await rm(jobsRoot, { recursive: true, force: true });
-      } catch (error) {
-        this.log(
-          `failed to purge write-job worktrees at ${jobsRoot}: ` +
-            describeError(error),
-        );
-      }
-    }
-  }
-
   /** Registers checkouts present on disk (from a prior run) for the LRU cap. */
   private async registerExistingCheckouts(): Promise<void> {
-    let names: string[];
-    try {
-      names = await readdir(this.cacheDir);
-    } catch {
-      return;
-    }
-    const found: Array<{ entry: CheckoutEntry; mtimeMs: number }> = [];
-    for (const name of names) {
-      if (LEGACY_REPO_DIR_RE.test(name)) {
-        // A pre-0.1 cache dir (64-hex repo hash, `checkouts/<40-hex>` layout).
-        // Neither registered nor deleted: this version never resolves into
-        // it, and destroying an operator's data on startup is not this
-        // store's call to make.
-        this.log(
-          `legacy workspace cache layout at ${path.join(this.cacheDir, name)}` +
-            " (pre-0.1); not used by this version — safe to delete",
-        );
-        continue;
-      }
-      if (!KEY_RE.test(name)) {
-        continue; // skip .no-hooks and anything not a repoKey dir
-      }
-      const checkoutsRoot = path.join(this.repoRoot(name), "co");
-      let commitKeys: string[];
-      try {
-        commitKeys = await readdir(checkoutsRoot);
-      } catch {
-        continue;
-      }
-      for (const cKey of commitKeys) {
-        if (!KEY_RE.test(cKey)) {
-          continue;
-        }
-        const dir = path.join(checkoutsRoot, cKey);
-        try {
-          const info = await stat(dir);
-          if (!info.isDirectory()) {
-            continue;
-          }
-          if (!(await isPopulatedCheckout(dir))) {
-            // No `.git` gitlink (e.g. a checkout creation that died partway):
-            // not a usable checkout — the same judgment resolve() applies —
-            // so it must not count against the cap and evict real checkouts.
-            // Left on disk: a resolve() for this repo/commit repairs it.
-            continue;
-          }
-          found.push({
-            entry: {
-              repoKey: name,
-              commitKey: cKey,
-              dir,
-              usedAt: 0,
-              refcount: 0,
-            },
-            mtimeMs: info.mtimeMs,
-          });
-        } catch {
-          // Vanished between readdir and stat; ignore.
-        }
-      }
-    }
-    // Oldest first, so subsequent use ordering is preserved and eviction picks
-    // the genuinely oldest survivors first.
-    found.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const { entry } of found) {
+    // The scan (in workspace-init.ts) only reads disk and returns oldest-first
+    // entries; minting map entries and enforcing the cap stay the store's own.
+    for (const found of await scanExistingCheckouts(this.initContext())) {
       this.useTick += 1;
-      this.checkouts.set(checkoutKey(entry.repoKey, entry.commitKey), {
-        ...entry,
+      this.checkouts.set(checkoutKey(found.repoKey, found.commitKey), {
+        repoKey: found.repoKey,
+        commitKey: found.commitKey,
+        dir: found.dir,
         usedAt: this.useTick,
+        refcount: 0,
       });
     }
     await this.evictToCapacity();
@@ -1412,10 +1341,6 @@ export class WorkspaceStore {
 
 /** repoKey/commitKey length. 16 hex chars = 64 bits; see {@link repoKey}. */
 const KEY_HEX_CHARS = 16;
-/** A repoKey or commitKey directory name. */
-const KEY_RE = /^[0-9a-f]{16}$/;
-/** A pre-0.1 per-repo cache dir name (full 64-hex SHA-256 of the repoId). */
-const LEGACY_REPO_DIR_RE = /^[0-9a-f]{64}$/;
 
 /**
  * The per-repo cache key: the first 16 hex chars of SHA-256(repoId). One
@@ -1446,20 +1371,6 @@ function commitKey(headCommit: string): string {
 /** Checkout-map key: dir-derived identity, so one directory = one LRU entry. */
 function checkoutKey(rKey: string, cKey: string): string {
   return `${rKey}:${cKey}`;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await stat(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** A checkout dir is usable iff it exists and carries the worktree gitlink. */
-async function isPopulatedCheckout(dir: string): Promise<boolean> {
-  return pathExists(path.join(dir, ".git"));
 }
 
 function describeError(error: unknown): string {
