@@ -854,6 +854,39 @@ test("a response exceeding maxBytes aborts with a typed error and cleans up the 
   expect(existsSync(destPath)).toBe(false);
 }, 20_000);
 
+test("a client disconnect mid-download leaves the bundle deletable by eviction", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  // Large enough that the server is still mid-stream when the client aborts
+  // (the byte cap trips after the first chunks and destroys the socket).
+  const bundlePath = await registerArtifact(
+    b,
+    jobId,
+    randomBytes(8 * 1024 * 1024),
+  );
+
+  const destPath = await makeDestPath();
+  const thrown = await a.client
+    .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  expect(thrown).toBeInstanceOf(HfpResponseTooLargeError);
+
+  // Eviction must actually delete the bundle file after the disconnect: the
+  // route's close handler destroys the read stream, releasing its fd. remove()
+  // drops the entry and unlinks once; the wait covers the small window until
+  // the destroyed stream's fd close lets the delete settle on Windows.
+  await b.artifacts.remove(jobId);
+  await waitUntil(() => !existsSync(bundlePath));
+  expect(existsSync(bundlePath)).toBe(false);
+}, 20_000);
+
 test("a 200 artifact response without the head-commit header is a typed error", async () => {
   const a = await createDaemon("alpha");
   // A misbehaving worker: its artifact route streams bytes but omits the

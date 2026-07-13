@@ -53,7 +53,7 @@ import {
   isAncestor,
   resolveHeadCommit,
 } from "../workspace/git.js";
-import { HEAD_COMMIT_HEADER } from "../workspace/routes.js";
+import { HEAD_COMMIT_HEADER, REPO_ID_HEADER } from "./headers.js";
 import { MAX_BODY_BYTES } from "./limits.js";
 
 /**
@@ -411,8 +411,8 @@ export class HfpClient {
               // repoId is opaque (may contain non-ASCII, `/`, `\`); URL-encode
               // it so it is a safe single-line header value. headCommit is
               // already 40-hex (header-safe).
-              "x-homefleet-repo-id": encodeURIComponent(repoId),
-              "x-homefleet-head-commit": headCommit,
+              [REPO_ID_HEADER]: encodeURIComponent(repoId),
+              [HEAD_COMMIT_HEADER]: headCommit,
             },
           },
           resolve,

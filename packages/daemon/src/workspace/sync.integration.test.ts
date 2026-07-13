@@ -106,7 +106,8 @@ async function createDaemon(
     host: HOST,
     port: 0,
   });
-  registerJobRoutes(server, jobManager);
+  // No artifact store: this suite never downloads write-job artifacts.
+  registerJobRoutes(server, jobManager, undefined);
   registerWorkspaceRoutes(server, store);
   const { port } = await server.start();
   cleanups.push(async () => {

@@ -207,6 +207,7 @@ export {
   type PairTarget,
   STREAM_IDLE_TIMEOUT_MS,
 } from "./transport/client.js";
+export { HEAD_COMMIT_HEADER, REPO_ID_HEADER } from "./transport/headers.js";
 export { MAX_BODY_BYTES } from "./transport/limits.js";
 export {
   NodeServer,
@@ -238,11 +239,7 @@ export {
   isAncestor,
   resolveHeadCommit,
 } from "./workspace/git.js";
-export {
-  HEAD_COMMIT_HEADER,
-  REPO_ID_HEADER,
-  registerWorkspaceRoutes,
-} from "./workspace/routes.js";
+export { registerWorkspaceRoutes } from "./workspace/routes.js";
 export {
   repoKey,
   WorkspaceError,

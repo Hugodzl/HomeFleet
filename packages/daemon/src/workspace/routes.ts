@@ -26,14 +26,10 @@ import {
   HaveTipResponseSchema,
   type HfpError,
 } from "@homefleet/protocol";
+import { HEAD_COMMIT_HEADER, REPO_ID_HEADER } from "../transport/headers.js";
 import type { NodeServer } from "../transport/server.js";
 import { COMMIT_HASH_RE } from "./git.js";
 import { WorkspaceError, type WorkspaceStore } from "./workspace-store.js";
-
-/** Header carrying the (URL-encoded) repoId for the binary bundle upload. */
-export const REPO_ID_HEADER = "x-homefleet-repo-id";
-/** Header carrying the 40-hex headCommit the bundle claims to deliver. */
-export const HEAD_COMMIT_HEADER = "x-homefleet-head-commit";
 
 /** Registers the two workspace-sync routes against `store`. */
 export function registerWorkspaceRoutes(

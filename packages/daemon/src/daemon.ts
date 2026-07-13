@@ -355,7 +355,11 @@ export class Daemon {
       host: config.hfp.host,
       port: config.hfp.port,
     });
-    registerJobRoutes(nodeServer, jobManager);
+    // Artifact store deliberately absent until the write-job assembly lands
+    // (Task 11): the artifact route gates on ownership but always answers
+    // 404 NO_ARTIFACT. Task 11 constructs the ArtifactStore here and wires
+    // it to finalize registration and the manager's onJobEvicted hook.
+    registerJobRoutes(nodeServer, jobManager, undefined);
     registerWorkspaceRoutes(nodeServer, workspaceStore);
     const { port: hfpPort } = await nodeServer.start();
     this.teardown.push(() => nodeServer.stop());

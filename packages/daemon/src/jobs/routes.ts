@@ -26,9 +26,9 @@ import {
   type JobEvent,
 } from "@homefleet/protocol";
 import { z } from "zod";
+import { HEAD_COMMIT_HEADER } from "../transport/headers.js";
 import type { NodeServer } from "../transport/server.js";
 import type { ArtifactStore } from "../workspace/artifact-store.js";
-import { HEAD_COMMIT_HEADER } from "../workspace/routes.js";
 import { JobDispatchError } from "./job.js";
 import type { JobManager } from "./job-manager.js";
 
@@ -40,15 +40,16 @@ export const SSE_HEARTBEAT_MS = 15_000;
 
 /**
  * Registers the five job-dispatch routes against `manager`. `artifacts` is
- * the write-job bundle registry the artifact download serves from; while the
- * daemon assembly does not wire one (Task 11), it may be omitted, in which
- * case the artifact route still gates on ownership but always answers 404
+ * the write-job bundle registry the artifact download serves from. The
+ * parameter is REQUIRED (not optional) so an assembly cannot silently forget
+ * it: passing `undefined` is a deliberate "no artifact serving here" — the
+ * artifact route still gates on ownership but always answers 404
  * NO_ARTIFACT.
  */
 export function registerJobRoutes(
   server: NodeServer,
   manager: JobManager,
-  artifacts?: ArtifactStore,
+  artifacts: ArtifactStore | undefined,
 ): void {
   server.route(
     "POST",
@@ -187,7 +188,10 @@ function handleArtifactDownload(
       res.destroy();
     }
   });
-  // Client disconnect mid-download: stop reading the file.
+  // Client disconnect mid-download: stop reading the file. Pinned by the
+  // artifact-route unit test — a leaked read stream is NOT otherwise
+  // observable on Windows (Node opens with FILE_SHARE_DELETE and unlinks
+  // with POSIX semantics, so even a held-open bundle deletes cleanly).
   res.on("close", () => file.destroy());
   res.on("error", () => file.destroy());
 }
