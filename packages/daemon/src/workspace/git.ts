@@ -473,13 +473,28 @@ export async function verifyBundle(
   worker: WorkerGit,
   bundlePath: string,
 ): Promise<boolean> {
-  const result = await runGit(["bundle", "verify", bundlePath], {
+  return ok(await verifyBundleDetailed(worker, bundlePath));
+}
+
+/**
+ * {@link verifyBundle} with the raw {@link GitCommandResult} preserved, for
+ * callers that must tell a REFUSED bundle apart from a git that never really
+ * inspected it (killed/timed out/unspawnable). The delegator-side apply gate
+ * needs the distinction: collapsing a timeout into "bad bundle" would
+ * mislabel an infrastructure failure as a hostile artifact.
+ */
+export async function verifyBundleDetailed(
+  worker: WorkerGit,
+  bundlePath: string,
+): Promise<GitCommandResult> {
+  // `--end-of-options` pins the bundle path as a positional even if a future
+  // caller ever passed a `-`-prefixed path (defense in depth; costs nothing).
+  return runGit(["bundle", "verify", "--end-of-options", bundlePath], {
     cwd: worker.repoDir,
     timeoutMs: worker.timeoutMs,
     config: workerConfig(worker),
     signal: worker.signal,
   });
-  return ok(result);
 }
 
 /**
@@ -494,15 +509,37 @@ export async function listBundleHeads(
   worker: WorkerGit,
   bundlePath: string,
 ): Promise<Map<string, string>> {
-  const result = await runGit(["bundle", "list-heads", bundlePath], {
-    cwd: worker.repoDir,
-    timeoutMs: worker.timeoutMs,
-    config: workerConfig(worker),
-    signal: worker.signal,
-  });
+  return (await listBundleHeadsDetailed(worker, bundlePath)).heads;
+}
+
+/** {@link listBundleHeadsDetailed}'s shape: the heads plus the raw result. */
+export interface BundleHeadsResult {
+  result: GitCommandResult;
+  /** Empty when the command failed (see `result` for why). */
+  heads: Map<string, string>;
+}
+
+/**
+ * {@link listBundleHeads} with the raw {@link GitCommandResult} preserved —
+ * same rationale as {@link verifyBundleDetailed}: a killed/timed-out/
+ * unspawnable git must be distinguishable from a genuinely unreadable bundle.
+ */
+export async function listBundleHeadsDetailed(
+  worker: WorkerGit,
+  bundlePath: string,
+): Promise<BundleHeadsResult> {
+  const result = await runGit(
+    ["bundle", "list-heads", "--end-of-options", bundlePath],
+    {
+      cwd: worker.repoDir,
+      timeoutMs: worker.timeoutMs,
+      config: workerConfig(worker),
+      signal: worker.signal,
+    },
+  );
   const heads = new Map<string, string>();
   if (!ok(result)) {
-    return heads;
+    return { result, heads };
   }
   for (const line of result.stdout.split("\n")) {
     // Each line is "<40-hex sha> <refname>".
@@ -511,7 +548,7 @@ export async function listBundleHeads(
       heads.set(match[2], match[1]);
     }
   }
-  return heads;
+  return { result, heads };
 }
 
 /**

@@ -7,7 +7,7 @@
  * createWorkerBundle), so every bundle under test is byte-for-byte what a
  * real worker would ship.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { WriteArtifact } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
@@ -422,6 +422,73 @@ test("an aborted signal maps to GIT_FAILURE, not a spurious BAD_BUNDLE, and impo
       bundlePath: fx.bundlePath,
       hooksPathDir: fx.hooksPathDir,
       signal: controller.signal,
+    }),
+    "GIT_FAILURE",
+  );
+  expect(await sourceRef(fx.repo.repoPath, REF)).toBeNull();
+}, 30_000);
+
+test("a bundle swapped between the pre-filter and the fetch (TOCTOU) is caught by the post-fetch backstop", async () => {
+  const fx = await makeArtifactFixture();
+
+  // Bundle B: the SAME single ref name at a DIFFERENT tip (head2, a child of
+  // head), same prerequisite base — a swap the header pre-filter cannot see
+  // because it already ran against bundle A.
+  const wt2 = path.join(await tempDir("hf-apply-wt2-"), "wt");
+  expect(ok(await addWorktree(fx.worker, wt2, fx.head))).toBe(true);
+  await writeFile(path.join(wt2, "evil.txt"), "swapped in after the check\n");
+  const head2 = await commitAllInWorktree(fx.worker, wt2, {
+    message: "attacker commit",
+    authorName: "HomeFleet Worker",
+    authorEmail: "worker@abcd1234.invalid",
+  });
+  if (head2 === null) {
+    throw new Error("expected a commit on a dirtied tree");
+  }
+  expect(ok(await updateRef(fx.worker, REF, head2))).toBe(true);
+  const bundleB = path.join(await tempDir("hf-apply-swap-"), "b.bundle");
+  expect(
+    ok(
+      await createWorkerBundle(fx.worker, {
+        bundlePath: bundleB,
+        ref: REF,
+        base: fx.base,
+      }),
+    ),
+  ).toBe(true);
+
+  // Deterministic swap: the seam fires after list-heads + verify saw bundle A
+  // (tip = fx.head, matching the claim) and right before the fetch reads the
+  // file again.
+  await expectApplyError(
+    applyWriteArtifact({
+      sourceRepoPath: fx.repo.repoPath,
+      artifact: fx.artifact,
+      bundlePath: fx.bundlePath,
+      hooksPathDir: fx.hooksPathDir,
+      testHookBeforeFetch: async () => {
+        await copyFile(bundleB, fx.bundlePath);
+      },
+    }),
+    "REF_MISMATCH",
+  );
+  // The fetch DID land the swapped tip — capped to the reserved namespace,
+  // but the backstop must refuse success and flag it.
+  expect(await sourceRef(fx.repo.repoPath, REF)).toBe(head2);
+}, 30_000);
+
+test("a timed-out git during bundle inspection maps to GIT_FAILURE, not a spurious BAD_BUNDLE", async () => {
+  const fx = await makeArtifactFixture();
+  // 1ms: the kill fires before git can even finish spawning, so the very
+  // first stage (bundle list-heads) dies killed (code null, timedOut) — the
+  // classifier must report an infrastructure failure, not a bundle verdict.
+  await expectApplyError(
+    applyWriteArtifact({
+      sourceRepoPath: fx.repo.repoPath,
+      artifact: fx.artifact,
+      bundlePath: fx.bundlePath,
+      hooksPathDir: fx.hooksPathDir,
+      timeoutMs: 1,
     }),
     "GIT_FAILURE",
   );

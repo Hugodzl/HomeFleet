@@ -25,16 +25,22 @@
  *    not by our bookkeeping. Every call runs under {@link delegatorConfig}
  *    (hooks neutralized, `ext::` transport refused, no submodule recursion),
  *    so fetched content can never execute anything.
+ * 5. AFTER the fetch, the delivered tip is re-read from the source repo and
+ *    must equal the claimed head commit — the authoritative backstop that
+ *    closes the list-heads -> fetch TOCTOU window (M7's sync-in keeps the
+ *    same post-fetch delivered-check; list-heads is only the cheap gate).
  */
 import { type WriteArtifact, WriteArtifactSchema } from "@homefleet/protocol";
 import {
+  COMMIT_HASH_RE,
   DEFAULT_GIT_TIMEOUT_MS,
   delegatorConfig,
   describeGitFailure,
-  listBundleHeads,
+  type GitCommandResult,
+  listBundleHeadsDetailed,
   ok,
   runGit,
-  verifyBundle,
+  verifyBundleDetailed,
   type WorkerGit,
 } from "./git.js";
 
@@ -73,6 +79,20 @@ export interface ApplyWriteArtifactInput {
   hooksPathDir: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * TEST SEAM ONLY (mirrors runGit's `binary`/`killGraceMs` seams): awaited
+   * after the pre-fetch checks pass and immediately before the fetch, so the
+   * TOCTOU regression test can deterministically swap the bundle file in
+   * that window. Production callers must never set this.
+   */
+  testHookBeforeFetch?: () => Promise<void> | void;
+}
+
+/** `true` when a git result reflects a kill/timeout/spawn failure, not a verdict. */
+function neverRan(result: GitCommandResult): boolean {
+  // A killed child (timeout OR abort) settles with `code === null`; a spawn
+  // failure also has `code === null` plus `spawnError`.
+  return result.timedOut || result.code === null;
 }
 
 /**
@@ -114,19 +134,28 @@ export async function applyWriteArtifact(
     signal: input.signal,
   };
 
-  // Maps a stage failure that may actually be a kill/abort: a killed git
-  // must surface as GIT_FAILURE, never as a spurious BAD_BUNDLE verdict on
-  // a bundle that was never really inspected.
-  const failure = (fallback: ApplyError): ApplyError =>
-    input.signal?.aborted
-      ? new ApplyError("GIT_FAILURE", "apply was aborted")
-      : fallback;
+  // Wraps a stage verdict: a git that was killed (timeout/abort) or never
+  // spawned must surface as GIT_FAILURE, never as a BAD_BUNDLE verdict on a
+  // bundle that was never really inspected.
+  const verdictOrGitFailure = (
+    result: GitCommandResult,
+    verdict: ApplyError,
+  ): ApplyError =>
+    input.signal?.aborted || neverRan(result)
+      ? new ApplyError(
+          "GIT_FAILURE",
+          `git was interrupted: ${describeGitFailure(result)}`,
+        )
+      : verdict;
 
   // 2. Header-only pre-filter (M7 pattern): refuse BEFORE anything is
-  //    fetched. `list-heads` imports no objects.
-  const heads = await listBundleHeads(git, input.bundlePath);
+  //    fetched. `list-heads` imports no objects. This is the CHEAP gate; the
+  //    authoritative check is the post-fetch delivered-tip re-read below.
+  const listed = await listBundleHeadsDetailed(git, input.bundlePath);
+  const heads = listed.heads;
   if (heads.size === 0) {
-    throw failure(
+    throw verdictOrGitFailure(
+      listed.result,
       new ApplyError(
         "BAD_BUNDLE",
         `${input.bundlePath} is not a readable git bundle (no advertised refs)`,
@@ -157,8 +186,10 @@ export async function applyWriteArtifact(
   // 3. Structural + prerequisite check: the bundle's recorded base must
   //    already exist in the source repo (it does by construction — the job
   //    was delegated from this repo at that commit).
-  if (!(await verifyBundle(git, input.bundlePath))) {
-    throw failure(
+  const verified = await verifyBundleDetailed(git, input.bundlePath);
+  if (!ok(verified)) {
+    throw verdictOrGitFailure(
+      verified,
       new ApplyError(
         "BAD_BUNDLE",
         `git bundle verify refused ${input.bundlePath} ` +
@@ -166,6 +197,8 @@ export async function applyWriteArtifact(
       ),
     );
   }
+
+  await input.testHookBeforeFetch?.();
 
   // 4. The fetch. NON-forced refspec (no `+`), so git enforces
   //    fast-forward-only on an existing ref. Ref updates in git are atomic
@@ -176,8 +209,15 @@ export async function applyWriteArtifact(
   //    including the `! [rejected] ... (non-fast-forward)` line this code
   //    classifies on (verified against real git: quiet non-ff = exit 1 with
   //    EMPTY stderr, indistinguishable from other failures).
+  //    `--end-of-options` pins the bundle path and refspec as positionals.
   const fetched = await runGit(
-    ["fetch", "--no-tags", input.bundlePath, `${targetRef}:${targetRef}`],
+    [
+      "fetch",
+      "--no-tags",
+      "--end-of-options",
+      input.bundlePath,
+      `${targetRef}:${targetRef}`,
+    ],
     {
       cwd: input.sourceRepoPath,
       timeoutMs,
@@ -188,7 +228,7 @@ export async function applyWriteArtifact(
   if (!ok(fetched)) {
     // A kill (timeout/abort) settles with code === null; classify it before
     // reading stderr, which a killed git may have left mid-sentence.
-    if (input.signal?.aborted || fetched.timedOut || fetched.code === null) {
+    if (input.signal?.aborted || neverRan(fetched)) {
       throw new ApplyError(
         "GIT_FAILURE",
         `git fetch was interrupted: ${describeGitFailure(fetched)}`,
@@ -205,6 +245,40 @@ export async function applyWriteArtifact(
     throw new ApplyError(
       "GIT_FAILURE",
       `git fetch failed: ${describeGitFailure(fetched)}`,
+    );
+  }
+
+  // 5. Authoritative backstop (closes the list-heads -> fetch TOCTOU): the
+  //    file could have been swapped for a same-ref-name bundle at a different
+  //    tip after the pre-filter read it. Re-read what the fetch actually
+  //    delivered; anything but the claimed head is refused. The damage is
+  //    already capped to the reserved namespace by the schema-pinned refspec,
+  //    but success must never be reported for an unverified tip.
+  const delivered = await runGit(
+    ["rev-parse", "--verify", "--quiet", targetRef],
+    {
+      cwd: input.sourceRepoPath,
+      timeoutMs,
+      config: delegatorConfig(input.hooksPathDir),
+      signal: input.signal,
+    },
+  );
+  const deliveredTip = delivered.stdout.trim();
+  if (!ok(delivered) || !COMMIT_HASH_RE.test(deliveredTip)) {
+    throw new ApplyError(
+      "GIT_FAILURE",
+      `could not re-read ${targetRef} after the fetch: ` +
+        describeGitFailure(delivered),
+    );
+  }
+  if (deliveredTip !== artifact.headCommit) {
+    throw new ApplyError(
+      "REF_MISMATCH",
+      `post-fetch check: ${targetRef} WAS advanced to ${deliveredTip}, which ` +
+        `differs from the claimed ${artifact.headCommit} (bundle changed ` +
+        "between verification and fetch). The write stayed inside the " +
+        "reserved refs/heads/homefleet/ namespace, but the branch should be " +
+        "inspected or deleted, not reviewed as the job's result.",
     );
   }
 
