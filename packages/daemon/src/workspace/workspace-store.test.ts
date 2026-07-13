@@ -1201,6 +1201,63 @@ test("init purges leftover write-job dirs and stale files under jobs/ (and toler
   expect(await store2.haveTip("repo-a")).toBe(c1);
 }, 45_000);
 
+test("init sweeps leaked refs/heads/homefleet/* from the bare cache; every other ref survives", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const cacheDir = path.join(await tempDir("homefleet-cache-"), "workspaces");
+  const opts: WorkspaceStoreOptions = {
+    cacheDir,
+    allowedRepoIds: ["repo-a"],
+    maxBundleBytes: 512 * 1024 * 1024,
+    maxCachedCheckouts: 32,
+    gcAfterFetches: 100,
+    gitTimeoutMs: 30_000,
+  };
+  const store1 = new WorkspaceStore(opts);
+  await store1.init();
+  await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
+
+  // Plant what a hard crash between finalize's updateRef and its finally's
+  // deleteRef leaks: a write-branch ref in the bare cache. Nothing else ever
+  // deletes it, and it anchors the job's objects against gc forever. Plus a
+  // user branch that the sweep must NOT touch (only homefleet/* is ours).
+  const worker = workerFor(cacheDir, "repo-a");
+  const plant = async (ref: string): Promise<void> => {
+    const r = await runGit(["update-ref", ref, c1], {
+      cwd: worker.repoDir,
+      timeoutMs: 30_000,
+    });
+    expect(ok(r)).toBe(true);
+  };
+  await plant("refs/heads/homefleet/deadbeefdead");
+  await plant("refs/heads/homefleet/aaaaaaaaaaaa");
+  await plant("refs/heads/main");
+
+  const store2 = new WorkspaceStore(opts);
+  await store2.init();
+
+  // Every leaked write-branch ref is gone...
+  const swept = await runGit(
+    ["for-each-ref", "--format=%(refname)", "refs/heads/homefleet/"],
+    { cwd: worker.repoDir, timeoutMs: 30_000 },
+  );
+  expect(swept.stdout.trim()).toBe("");
+  // ...while the tip ref (refs/homefleet/tip — OUTSIDE refs/heads/, so a
+  // sloppy prefix match would eat it) and the user branch are untouched.
+  expect(await store2.haveTip("repo-a")).toBe(c1);
+  const main = await runGit(["show-ref", "--verify", "refs/heads/main"], {
+    cwd: worker.repoDir,
+    timeoutMs: 30_000,
+  });
+  expect(main.code).toBe(0);
+
+  // A repo with NO leaked refs is tolerated: a further init sweeps nothing
+  // and leaves the cache serving.
+  const store3 = new WorkspaceStore(opts);
+  await store3.init();
+  expect(await store3.haveTip("repo-a")).toBe(c1);
+}, 45_000);
+
 test("stop() ahead of a queued write resolve makes it back off without materializing a worktree", async () => {
   const src = await makeSrc();
   const c1 = await src.commit("c1");

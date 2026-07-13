@@ -107,6 +107,7 @@ import {
   pathExists,
   purgeWriteWorktrees,
   scanExistingCheckouts,
+  sweepLeakedWriteRefs,
   type WorkspaceInitContext,
 } from "./workspace-init.js";
 
@@ -308,10 +309,10 @@ export class WorkspaceStore {
 
   /**
    * Prepares the cache root and the empty hooks directory, purges write-job
-   * worktrees left by a previous daemon run (an in-flight write job never
-   * survives a restart), then registers any checkouts left on disk by a
-   * previous daemon run (oldest first) so the retention cap holds across
-   * restarts. Idempotent.
+   * worktrees AND leaked write-branch refs left by a previous daemon run (an
+   * in-flight write job never survives a restart), then registers any
+   * checkouts left on disk by a previous daemon run (oldest first) so the
+   * retention cap holds across restarts. Idempotent.
    */
   async init(): Promise<void> {
     if (this.initialized) {
@@ -320,6 +321,7 @@ export class WorkspaceStore {
     await mkdir(this.cacheDir, { recursive: true });
     await mkdir(this.hooksPath(), { recursive: true });
     await purgeWriteWorktrees(this.initContext());
+    await sweepLeakedWriteRefs(this.initContext());
     await this.registerExistingCheckouts();
     this.initialized = true;
   }
@@ -1080,6 +1082,7 @@ export class WorkspaceStore {
       cacheDir: this.cacheDir,
       jobsRoot: (rKey) => this.jobsRoot(rKey),
       checkoutsRoot: (rKey) => this.checkoutsRoot(rKey),
+      worker: (rKey) => this.worker(rKey),
       log: this.log,
     };
   }

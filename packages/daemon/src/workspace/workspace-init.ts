@@ -13,6 +13,7 @@
  */
 import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { deleteRef, listRefs, type WorkerGit } from "./git.js";
 
 /** A repoKey or commitKey directory name (16 hex chars; see the store doc). */
 export const KEY_RE = /^[0-9a-f]{16}$/;
@@ -32,6 +33,8 @@ export interface WorkspaceInitContext {
   jobsRoot(repoKey: string): string;
   /** `<repoRoot>/co` for a repoKey — where cached checkouts live. */
   checkoutsRoot(repoKey: string): string;
+  /** The store's worker-git context for a repoKey's bare cache repo. */
+  worker(repoKey: string): WorkerGit;
   /** Diagnostic sink (purge failures, legacy-layout warnings). */
   log(message: string): void;
 }
@@ -92,6 +95,46 @@ export async function purgeWriteWorktrees(
         `failed to purge write-job worktrees at ${jobsRoot}: ` +
           describeError(error),
       );
+    }
+  }
+}
+
+/**
+ * The refs/heads namespace write-job finalize mints its transient branch
+ * refs in. Deliberately the refs/heads/ FORM (writeBranchName lands under
+ * it); the worker's own tip ref lives at `refs/homefleet/tip`, OUTSIDE
+ * refs/heads/, so it is structurally out of this sweep's reach.
+ */
+const WRITE_REF_PREFIX = "refs/heads/homefleet/";
+
+/**
+ * Deletes every leaked `refs/heads/homefleet/*` ref from each repo's bare
+ * cache at init. Finalize deletes its transient branch ref in a `finally`,
+ * but a hard crash between `updateRef` and that `deleteRef` (or a
+ * stop-killed cleanup) leaks the ref permanently — nothing else sweeps
+ * refs, and each leaked ref anchors its job's objects against
+ * `gc --prune=now` forever. Safe by the same argument as the jobs-dir
+ * purge: init runs pre-serving, and an in-flight write job never survives
+ * a restart, so ANY ref in this namespace is garbage by definition. Only
+ * this exact namespace is touched: the tip ref (`refs/homefleet/tip`) and
+ * user branches are structurally outside it. Best effort per repo —
+ * a failed sweep is logged, never fails init.
+ */
+export async function sweepLeakedWriteRefs(
+  ctx: WorkspaceInitContext,
+): Promise<void> {
+  for (const name of await repoKeyDirs(ctx)) {
+    if (!KEY_RE.test(name)) {
+      continue;
+    }
+    const worker = ctx.worker(name);
+    if (!(await pathExists(worker.repoDir))) {
+      continue; // a repoKey dir without a bare cache repo (never synced)
+    }
+    const leaked = await listRefs(worker, WRITE_REF_PREFIX);
+    for (const ref of leaked) {
+      await deleteRef(worker, ref);
+      ctx.log(`swept leaked write-branch ref ${ref} from cache ${name}`);
     }
   }
 }

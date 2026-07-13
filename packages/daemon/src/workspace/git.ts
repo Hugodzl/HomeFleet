@@ -652,6 +652,32 @@ export async function updateRef(
   });
 }
 
+/**
+ * WORKER side: fully-qualified refnames under `prefix` in the cache repo,
+ * via `git for-each-ref --format=%(refname) <prefix>`. The prefix matches
+ * whole path components (git's own for-each-ref semantics), so
+ * `refs/heads/homefleet/` can never match `refs/homefleet/tip`. Returns an
+ * empty list on failure (best effort — used by init-time sweeps).
+ */
+export async function listRefs(
+  worker: WorkerGit,
+  prefix: string,
+): Promise<string[]> {
+  const result = await runGit(["for-each-ref", "--format=%(refname)", prefix], {
+    cwd: worker.repoDir,
+    timeoutMs: worker.timeoutMs,
+    config: workerConfig(worker),
+    signal: worker.signal,
+  });
+  if (!ok(result)) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
 /** WORKER side: delete `ref` if it exists (best effort). */
 export async function deleteRef(worker: WorkerGit, ref: string): Promise<void> {
   await runGit(["update-ref", "-d", ref], {
