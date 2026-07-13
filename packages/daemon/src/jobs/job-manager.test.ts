@@ -324,16 +324,16 @@ test("activeJobs and maxConcurrent expose live load for NodeInfo", async () => {
   expect(manager.activeJobs).toBe(0);
 });
 
-test("the resolver release handle is awaited when a job reaches a terminal state", async () => {
-  // Each resolve hands out a handle whose ASYNC release bumps a shared counter
-  // only after a real async hop, so we can assert both that the pin is
-  // released on every post-acquire terminal path and that the manager AWAITS
-  // the promise-shaped release (the write path's teardown is genuinely async).
+test("the resolver release handle fires exactly once when a job reaches a terminal state", async () => {
+  // Each resolve hands out a handle whose release bumps a shared counter, so
+  // we can assert the pin is released exactly once on every post-acquire
+  // terminal path. (That the manager AWAITS the promise-shaped release is
+  // pinned by the slot-holding test below — a counter alone cannot
+  // discriminate awaited from fire-and-forget.)
   let releases = 0;
   const resolveWorkspace: WorkspaceResolver = async () => ({
     dir: "/unit-ws",
     release: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
       releases += 1;
     },
   });
@@ -378,11 +378,50 @@ test("the resolver release handle is awaited when a job reaches a terminal state
   const response = await cancelManager.cancel(cancelJob.jobId, OWNER);
   expect(response.status).toBe("canceled");
 
-  // Exactly one awaited release per job — succeeded, failed, canceled — and
-  // never twice (the settle wait would catch a double-fire as a 4th bump).
+  // Exactly one release per job — succeeded, failed, canceled — and never
+  // twice (a small settle wait would catch a double-fire as a 4th bump).
   await waitUntil(() => releases === 3);
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(releases).toBe(3);
+});
+
+test("executeJob AWAITS release: the run slot is held until the release settles", async () => {
+  // A fire-and-forget `handle.release()` would free the slot the moment the
+  // job turns terminal; an awaited one holds it through the (possibly slow)
+  // worktree teardown. Discriminate with a manually-gated release on a
+  // single-slot manager: while the first job's release is pending, a queued
+  // second job must NOT have started.
+  let openRelease: () => void = () => {};
+  const releaseGate = new Promise<void>((resolve) => {
+    openRelease = resolve;
+  });
+  let releases = 0;
+  const resolveWorkspace: WorkspaceResolver = async () => ({
+    dir: "/unit-ws",
+    release: () => {
+      releases += 1;
+      // Only the FIRST job's release blocks; by the time the second job
+      // releases, the gate is already open.
+      return releaseGate;
+    },
+  });
+  const manager = makeManager({ maxConcurrentJobs: 1, resolveWorkspace });
+
+  const first = manager.submit(commandParams(), OWNER);
+  const second = manager.submit(commandParams(), OWNER);
+
+  // The first job reaches its terminal state (finishJob runs BEFORE the
+  // finally's release), but its release has not settled: the slot must still
+  // be held and the second job still queued.
+  await waitUntil(() => isSucceeded(manager, first.jobId));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(releases).toBe(1);
+  expect(manager.snapshot(second.jobId, OWNER).status).toBe("queued");
+
+  // Settling the release frees the slot; the second job now runs.
+  openRelease();
+  await waitUntil(() => isSucceeded(manager, second.jobId));
+  expect(releases).toBe(2);
 });
 
 test("the resolver receives the job's identity: a write job's {jobId, type} reach it", async () => {

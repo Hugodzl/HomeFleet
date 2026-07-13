@@ -599,6 +599,11 @@ export class JobManager {
       }
       this.finishJob(record, result);
     } finally {
+      // Awaiting (not fire-and-forget) deliberately holds this job's
+      // concurrency slot through workspace teardown: a write worktree's
+      // removal is real disk churn on this machine, so the slot stays
+      // occupied until it completes. Task 12's throughput measurements
+      // should expect terminal-state-to-slot-free latency to include it.
       await handle.release();
     }
   }

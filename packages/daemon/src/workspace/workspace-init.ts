@@ -60,7 +60,10 @@ export async function isPopulatedCheckout(dir: string): Promise<boolean> {
   return pathExists(path.join(dir, ".git"));
 }
 
-/** The per-repo cache dirs present under the cache root (16-hex names only). */
+/**
+ * All names under the cache root, unfiltered — callers filter with KEY_RE
+ * themselves (the scan needs legacy 64-hex names for its warning).
+ */
 async function repoKeyDirs(ctx: WorkspaceInitContext): Promise<string[]> {
   let names: string[];
   try {
