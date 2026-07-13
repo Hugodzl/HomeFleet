@@ -6,9 +6,15 @@ committed direction is the roadmap in the
 [design doc](specs/2026-07-06-homefleet-design.md); items noted in devlogs get
 mirrored here so nothing lives only in prose.
 
+**Exception (2026-07-12):** the product ideas below have been clustered and
+given an approved build order — see the
+[backlog structuring doc](specs/2026-07-12-backlog-structuring.md) (idea keys
+A1–A3, B1, C1 and shared seams S1–S5 come from there). The pool itself stays
+open and unordered for new entries.
+
 ## Product ideas
 
-### Fleet management GUI
+### Fleet management GUI (A1)
 
 A GUI on the central node to see and manage the other nodes: state,
 capabilities, name, parameters, and so on — management, not just a read-only
@@ -18,7 +24,7 @@ HTTP API was deliberately designed so a dashboard can be added as a client
 (design doc, v0.1 non-goals), so the seam already exists — the brainstorm is
 scope (tray vs. web vs. both) and which mutations the API should expose.
 
-### Control over local models per node
+### Control over local models per node (A2)
 
 More control over which local models can be used and installed on each node.
 Today a worker drives tasks with whatever its OpenAI-compatible server happens
@@ -26,7 +32,7 @@ to serve; this would make the model set an explicit, managed part of node
 configuration — an allowlist/catalog per node, surfaced through capability
 advertisements so the delegating side can pick (or be denied) a model.
 
-### Workspace-less tasks as node capabilities
+### Workspace-less tasks as node capabilities (C1)
 
 Delegate tasks that don't need the git bundle / repo sync at all — web
 searches, calculations, and similar self-contained work — advertised as
@@ -35,7 +41,7 @@ workspace optional in the job spec rather than a required stage of dispatch,
 and let executors declare whether they need one. This also broadens what a
 weak-GPU box can contribute.
 
-### Remote model install from the central node
+### Remote model install from the central node (A3)
 
 Install new models onto other nodes from the main/central node's GUI. Builds
 on the two ideas above (GUI + per-node model catalog). Two things to
@@ -45,7 +51,7 @@ install is a privileged management operation — it needs a deliberate story in
 the Syncthing-style trust model (ADR 0004) rather than riding the existing
 job-dispatch channel.
 
-### Painless install and fleet expansion
+### Painless install and fleet expansion (B1)
 
 Getting HomeFleet running for the first time is complicated today (clone,
 pnpm, build, run bins with bare `node`), and so is managing the fleet and

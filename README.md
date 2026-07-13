@@ -233,7 +233,9 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → code-writing delegation (diffs/branches back) → tray app + web dashboard → macOS/Linux polish → multi-node fan-out → model-pool orchestration on the same fabric.
+v0.1 (recon + command delegation) → code-writing delegation (diffs/branches back) → packaging & painless install → dashboard (read-only, then fleet management) → per-node model catalog → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md).
+
+Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
 Unordered ideas and known follow-ups live in the [backlog](docs/backlog.md).
 
