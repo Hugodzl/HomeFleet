@@ -22,6 +22,7 @@ import { z } from "zod";
 import { type CommandAllowlist, safeSpawn } from "../spawn.js";
 import { decodeUtf8Capped } from "../truncation.js";
 import type { ToolDefinition } from "./openai-client.js";
+import { editFileTool, writeFileTool } from "./write-tools.js";
 
 /** Per-result byte cap for read_file. */
 export const MAX_READ_FILE_BYTES = 65_536;
@@ -88,7 +89,7 @@ export interface AgentTool {
   ): Promise<ToolResultPayload>;
 }
 
-class SandboxViolationError extends Error {
+export class SandboxViolationError extends Error {
   constructor(requested: string) {
     super(`path escapes the workspace: ${requested}`);
     this.name = "SandboxViolationError";
@@ -96,7 +97,7 @@ class SandboxViolationError extends Error {
 }
 
 /** Purely lexical containment: `target` is `root` or lives under it. */
-function isContained(root: string, target: string): boolean {
+export function isContained(root: string, target: string): boolean {
   const rel = path.relative(root, target);
   return (
     rel === "" ||
@@ -119,8 +120,13 @@ function isContained(root: string, target: string): boolean {
  * escape. Resolving both sides in one namespace keeps the check consistent;
  * the realpath re-check below is what actually enforces the boundary against
  * symlink escapes, and it compares realpath-to-realpath.
+ *
+ * NOTE: `realpath(resolved)` throws ENOENT for a not-yet-existing entry, so
+ * this guard only resolves EXISTING paths — the write tools' guard
+ * (resolveWritablePath in write-tools.ts) layers missing-leaf handling on
+ * top of it.
  */
-async function resolveInWorkspace(
+export async function resolveInWorkspace(
   workspaceDir: string,
   requested: string,
 ): Promise<string> {
@@ -212,7 +218,7 @@ async function walkFiles(realRoot: string): Promise<string[]> {
   return results;
 }
 
-interface ToolSpec<T> {
+export interface ToolSpec<T> {
   name: string;
   description: string;
   /** JSON Schema for the arguments object. */
@@ -226,7 +232,7 @@ interface ToolSpec<T> {
  * and ANY thrown error (sandbox violations, missing files, ...) become
  * error tool-results for the model — never an executor crash.
  */
-function makeTool<T>(spec: ToolSpec<T>): AgentTool {
+export function makeTool<T>(spec: ToolSpec<T>): AgentTool {
   return {
     name: spec.name,
     definition: {
@@ -636,13 +642,28 @@ function runCommandTool(allowlist: CommandAllowlist): AgentTool {
   });
 }
 
+export interface BuildToolsetOptions {
+  /**
+   * Advertise write_file/edit_file (v0.2 code-writing delegation). Off by
+   * default: read-only jobs must never hand the model a write surface.
+   */
+  includeWriteTools?: boolean;
+}
+
 /**
  * The advertised toolset. run_command is present only when the allowlist
  * has entries — an empty allowlist disables the tool AND omits it from the
- * definitions sent to the model.
+ * definitions sent to the model. The write tools appear only when opted in
+ * via {@link BuildToolsetOptions.includeWriteTools}.
  */
-export function buildToolset(commandAllowlist: CommandAllowlist): AgentTool[] {
+export function buildToolset(
+  commandAllowlist: CommandAllowlist,
+  options: BuildToolsetOptions = {},
+): AgentTool[] {
   const tools = [readFileTool, listDirTool, grepTool, globTool];
+  if (options.includeWriteTools === true) {
+    tools.push(writeFileTool, editFileTool);
+  }
   if (Object.keys(commandAllowlist).length > 0) {
     tools.push(runCommandTool(commandAllowlist));
   }

@@ -30,6 +30,7 @@ export {
 } from "./agent/openai-client.js";
 export {
   type AgentTool,
+  type BuildToolsetOptions,
   buildToolset,
   GREP_MATCH_TIMEOUT_MS,
   MAX_GLOB_RESULTS,
@@ -41,6 +42,13 @@ export {
   type ToolExecutionContext,
   type ToolResultPayload,
 } from "./agent/tools.js";
+export {
+  editFileTool,
+  MAX_EDIT_TEXT_CHARS,
+  MAX_WRITE_FILE_BYTES,
+  resolveWritablePath,
+  writeFileTool,
+} from "./agent/write-tools.js";
 export {
   CommandExecutor,
   type CommandExecutorOptions,
