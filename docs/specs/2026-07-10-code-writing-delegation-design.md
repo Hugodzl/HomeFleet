@@ -120,8 +120,10 @@ worker-side caps clamp both, exactly as today.
 
 **Bundle-out (worker).** After the commit, the worker creates an incremental
 bundle covering `baseCommit..headCommit` containing exactly one ref:
-`refs/heads/homefleet/<jobId12>` (`jobId12` = first 12 hex of the job UUID,
-hyphens stripped). The bundle is retained beside the job record until the
+`refs/heads/homefleet/<jobId12>` (`jobId12` = the job UUID's last 12 hex —
+its final hyphen-group, random in both UUIDv4 and v7; amended from "first 12"
+in Task 1 review, since a v7 UUID's leading 48 bits are a timestamp and two
+same-millisecond jobs would deterministically collide). The bundle is retained beside the job record until the
 job is evicted (`maxRetainedJobs`) or the daemon restarts; the worktree is
 removed immediately after bundling. Size is capped by the existing
 `maxBundleBytes`.
