@@ -422,7 +422,20 @@ export interface WorkerGit {
 }
 
 /**
- * Worker-side `-c` config applied to every call against received content:
+ * Worker-side `-c` config applied to every call against received content.
+ * Delegates to {@link delegatorConfig} (which owns the four pins and their
+ * rationale) so the two sides can never drift apart.
+ */
+function workerConfig(worker: WorkerGit): string[] {
+  return delegatorConfig(worker.hooksPath);
+}
+
+/**
+ * The four security pins applied as `-c` config to every git call that touches
+ * received content — on the worker side via {@link workerConfig}, and on the
+ * DELEGATING side (write-job apply) directly: exported for `artifact-apply.ts`,
+ * the only code that fetches worker-produced content into a user repository.
+ * Takes a bare hooks-dir path because the delegator has no {@link WorkerGit}.
  * - `core.hooksPath=<empty dir>` — received content can never trigger a hook.
  * - `protocol.ext.allow=never` — a `ext::` transport (which runs an arbitrary
  *   program) is refused, so no fetch/bundle path can execute a command even if
@@ -441,18 +454,6 @@ export interface WorkerGit {
  *   operator's `git config --global core.longpaths` (and the OS LongPathsEnabled
  *   registry key, which git's own path check ignores) never reach the worker.
  *   Harmless on POSIX, where the limit does not exist. (M8 two-machine rig find.)
- */
-function workerConfig(worker: WorkerGit): string[] {
-  return delegatorConfig(worker.hooksPath);
-}
-
-/**
- * DELEGATING side (write-job apply): the SAME four security pins as
- * {@link workerConfig}, taken as a bare hooks-dir path because the delegator
- * has no {@link WorkerGit} — it runs against the user's own source repo.
- * Exported for `artifact-apply.ts`, the only code that fetches worker-produced
- * content into a user repository; workerConfig delegates here so the two
- * sides can never drift apart.
  */
 export function delegatorConfig(hooksPath: string): string[] {
   return [
