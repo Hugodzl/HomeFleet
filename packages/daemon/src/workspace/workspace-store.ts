@@ -232,6 +232,20 @@ interface WriteWorkspaceEntry {
   baseCommit: string;
 }
 
+/**
+ * Non-null result of {@link WorkspaceStore.finalizeWriteJob}: the wire
+ * artifact for the executor's JobResult, plus everything ArtifactStore
+ * registration needs — so the assembly's finalize closure never re-derives
+ * the bundle path or races a stat outside the repo lock.
+ */
+export interface FinalizedWriteJob {
+  artifact: WriteArtifact;
+  /** Absolute path of the bundle: `<repoRoot>/jobs/<jobId12>.bundle`. */
+  bundlePath: string;
+  /** Bundle size in bytes, measured under the repo lock after creation. */
+  byteLength: number;
+}
+
 export class WorkspaceStore {
   private readonly cacheDir: string;
   private readonly allowed: ReadonlySet<string>;
@@ -622,9 +636,13 @@ export class WorkspaceStore {
    * the diffstat, bundle `branch --not base` to
    * `<repoRoot>/jobs/<jobId12>.bundle`, delete the ref again (the bundle is
    * self-contained; a lingering ref would leak into future have/gc
-   * decisions), and return the wire-schema-shaped artifact. Returns `null`
-   * on a clean tree — the model declared done without changing anything —
-   * with no commit, no ref, and no bundle.
+   * decisions), and return the wire-schema-shaped artifact together with
+   * the bundle's path and byte length (measured under the lock, right after
+   * creation) so the assembly's finalize closure can register into the
+   * ArtifactStore without re-deriving paths or racing a stat — it forwards
+   * `.artifact` to the executor and the rest to `ArtifactStore.register`.
+   * Returns `null` on a clean tree — the model declared done without
+   * changing anything — with no commit, no ref, and no bundle.
    *
    * Runs post-executor, so the job's worktree is materialized; the registry
    * entry (which exists from reservation time) is the jobId -> workspace
@@ -651,7 +669,7 @@ export class WorkspaceStore {
     deviceId8: string;
     /** The job's cancellation; the store's stop signal is composed in. */
     signal?: AbortSignal;
-  }): Promise<WriteArtifact | null> {
+  }): Promise<FinalizedWriteJob | null> {
     this.requireNotStopped();
     const { jobId, commitMessage, deviceId8, signal } = input;
     throwIfJobAborted(signal);
@@ -706,7 +724,7 @@ export class WorkspaceStore {
       jobSignal: AbortSignal | undefined;
       opSignal: AbortSignal;
     },
-  ): Promise<WriteArtifact | null> {
+  ): Promise<FinalizedWriteJob | null> {
     // Queued behind the lock: a stop() or job abort may have landed since
     // the public entry point's checks (the op-granularity discipline).
     this.requireNotStopped();
@@ -759,9 +777,9 @@ export class WorkspaceStore {
       );
     }
     try {
-      let stat: DiffStatCounts;
+      let diffCounts: DiffStatCounts;
       try {
-        stat = await diffStat(worker, worker.repoDir, base, head);
+        diffCounts = await diffStat(worker, worker.repoDir, base, head);
       } catch (error) {
         throw this.finalizeFailure(
           jobSignal,
@@ -788,12 +806,28 @@ export class WorkspaceStore {
           `could not bundle the artifact: ${describeGitFailure(bundled)}`,
         );
       }
+      // Measured here, under the lock, so the registered byte length can
+      // never race a concurrent mutation of the file.
+      let byteLength: number;
+      try {
+        byteLength = (await stat(bundlePath)).size;
+      } catch (error) {
+        throw this.finalizeFailure(
+          jobSignal,
+          jobId,
+          `could not stat the artifact bundle: ${describeError(error)}`,
+        );
+      }
       return {
-        branchName,
-        baseCommit: base,
-        headCommit: head,
-        diffStat: stat,
-        commitMessage: input.commitMessage,
+        artifact: {
+          branchName,
+          baseCommit: base,
+          headCommit: head,
+          diffStat: diffCounts,
+          commitMessage: input.commitMessage,
+        },
+        bundlePath,
+        byteLength,
       };
     } finally {
       // The bundle is self-contained (its one prerequisite is baseCommit,

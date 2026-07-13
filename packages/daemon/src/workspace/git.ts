@@ -78,6 +78,34 @@ const STRIPPED_GIT_ENV_VARS = [
   "GIT_COMMITTER_DATE",
 ] as const;
 
+/**
+ * The hardened environment every spawned git runs with. Exported so tests
+ * can pin its guarantees directly — some of the regressions it prevents are
+ * otherwise invisible on an English-locale box (a localized `--shortstat`
+ * would make {@link diffStat}'s regex miss and silently report all-zero
+ * diffstats, indistinguishable from the legitimate empty-range case).
+ */
+export function gitChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    // Ignore ambient user/system git config (see file doc).
+    GIT_CONFIG_GLOBAL: NONEXISTENT_CONFIG_PATH,
+    GIT_CONFIG_SYSTEM: NONEXISTENT_CONFIG_PATH,
+    // Never block on a credential/other prompt.
+    GIT_TERMINAL_PROMPT: "0",
+    // Pin git's message locale: {@link diffStat} (and failure logging)
+    // parse human-readable output that git localizes, so an ambient
+    // French/German locale would silently change what git prints.
+    LC_ALL: "C",
+  };
+  // Ambient identity env vars outrank `-c user.*` config; strip them so the
+  // identity a caller passes is authoritative (see STRIPPED_GIT_ENV_VARS).
+  for (const name of STRIPPED_GIT_ENV_VARS) {
+    delete env[name];
+  }
+  return env;
+}
+
 /** Every possible ending of a git invocation, as data (never thrown). */
 export interface GitCommandResult {
   /** Process exit code, or `null` when our kill path terminated it. */
@@ -183,19 +211,7 @@ export function runGit(
   const binary = options.binary ?? "git";
   const configArgs = (options.config ?? []).flatMap((pair) => ["-c", pair]);
   const finalArgs = [...configArgs, ...args];
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    // Ignore ambient user/system git config (see file doc).
-    GIT_CONFIG_GLOBAL: NONEXISTENT_CONFIG_PATH,
-    GIT_CONFIG_SYSTEM: NONEXISTENT_CONFIG_PATH,
-    // Never block on a credential/other prompt.
-    GIT_TERMINAL_PROMPT: "0",
-  };
-  // Ambient identity env vars outrank `-c user.*` config; strip them so the
-  // identity a caller passes is authoritative (see STRIPPED_GIT_ENV_VARS).
-  for (const name of STRIPPED_GIT_ENV_VARS) {
-    delete env[name];
-  }
+  const env = gitChildEnv();
 
   return new Promise((resolve) => {
     const child = spawn(binary, finalArgs, {

@@ -213,6 +213,11 @@ function tailChars(text: string, maxChars: number): string {
  * case the rejection is the cancellation surfacing (the store rejects with
  * an AbortError-named error once its git ops are killed) and the job maps
  * to canceled.
+ *
+ * `workspaceDir` is informational: the daemon-side finalize resolves the
+ * job's worktree from its own registry (`writeJobWorkspace(jobId)`) rather
+ * than trusting this field — it exists for fakes/diagnostics, and assembly
+ * may assert it matches the registry's dir.
  */
 export type FinalizeWriteFn = (input: {
   jobId: JobId;

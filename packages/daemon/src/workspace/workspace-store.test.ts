@@ -1285,7 +1285,7 @@ test("finalizeWriteJob commits, bundles, and returns a schema-valid artifact; th
     "content 0\nplus a new line\n",
   );
 
-  const artifact = await store.finalizeWriteJob({
+  const finalized = await store.finalizeWriteJob({
     jobId: JOB_A,
     commitMessage: "Add new.txt and extend file.txt",
     deviceId8: "abcd1234",
@@ -1293,10 +1293,10 @@ test("finalizeWriteJob commits, bundles, and returns a schema-valid artifact; th
 
   // Shape-exact under the wire schema (the executor's JobResultSchema.parse
   // backstop makes any deviation a job-rejecting programmer error).
-  if (artifact === null) {
+  if (finalized === null) {
     throw new Error("expected an artifact for a dirtied worktree");
   }
-  const parsed = WriteArtifactSchema.parse(artifact);
+  const parsed = WriteArtifactSchema.parse(finalized.artifact);
   expect(parsed.branchName).toBe("homefleet/aaaaaaaaaaaa");
   expect(parsed.baseCommit).toBe(c1);
   expect(parsed.headCommit).not.toBe(c1);
@@ -1328,6 +1328,11 @@ test("finalizeWriteJob commits, bundles, and returns a schema-valid artifact; th
     "aaaaaaaaaaaa.bundle",
   );
   expect((await stat(bundlePath)).size).toBeGreaterThan(0);
+  // The non-null result also carries what ArtifactStore registration needs
+  // (Task 11's closure): the bundle's path and its measured size.
+  expect(finalized.bundlePath).toBe(bundlePath);
+  expect(finalized.byteLength).toBe((await stat(bundlePath)).size);
+  expect(finalized.byteLength).toBeGreaterThan(0);
   const heads = await listBundleHeads(worker, bundlePath);
   expect([...heads.entries()]).toEqual([
     ["refs/heads/homefleet/aaaaaaaaaaaa", parsed.headCommit],
@@ -1389,6 +1394,53 @@ test("finalizeWriteJob returns null on a clean tree: no commit, no ref, no bundl
     timeoutMs: 30_000,
   });
   expect(refs.code).not.toBe(0);
+  await releaseSettled(handle);
+}, 45_000);
+
+test("a bundle-create failure still deletes the branch ref and keeps the registry entry live", async () => {
+  const src = await makeSrc();
+  const c1 = await src.commit("c1");
+  const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
+  await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
+  const handle = await store.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  await writeFile(path.join(handle.dir, "new.txt"), "doomed\n");
+  // Plant a DIRECTORY at the bundle path: `git bundle create` cannot rename
+  // its lockfile over a directory, so bundling fails AFTER the commit and
+  // the branch ref were created.
+  const bundlePath = path.join(
+    cacheDir,
+    repoKey("repo-a"),
+    "jobs",
+    "aaaaaaaaaaaa.bundle",
+  );
+  await mkdir(bundlePath, { recursive: true });
+
+  await expect(
+    store.finalizeWriteJob({
+      jobId: JOB_A,
+      commitMessage: "will not bundle",
+      deviceId8: "abcd1234",
+    }),
+  ).rejects.toMatchObject({ code: "GIT_FAILED", message: /bundle/i });
+
+  // The finally-path deleteRef ran: no homefleet ref lingers in the bare
+  // repo to leak into future have/gc decisions (the invariant Task 9's
+  // delegator-side have-computation builds on).
+  const worker = workerFor(cacheDir, "repo-a");
+  const refs = await runGit(["show-ref", "homefleet/aaaaaaaaaaaa"], {
+    cwd: worker.repoDir,
+    timeoutMs: 30_000,
+  });
+  expect(refs.code).not.toBe(0);
+  expect(refs.stdout.trim()).toBe("");
+  // The entry stays live — release() still owns the worktree teardown — and
+  // no partial bundle FILE appeared (the planted directory is untouched).
+  expect(store.writeJobWorkspace(JOB_A)).toBeDefined();
+  expect((await stat(bundlePath)).isDirectory()).toBe(true);
   await releaseSettled(handle);
 }, 45_000);
 

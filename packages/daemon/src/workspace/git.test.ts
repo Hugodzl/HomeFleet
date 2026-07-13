@@ -16,6 +16,7 @@ import {
   createWorkerBundle,
   diffStat,
   fetchBundleHead,
+  gitChildEnv,
   initBareRepo,
   isAncestor,
   listBundleHeads,
@@ -536,6 +537,55 @@ test("createWorkerBundle bundles ref --not base from the bare repo; heads and ve
   const fresh = await makeWorker();
   expect(await verifyBundle(fresh, bundlePath)).toBe(false);
 }, 30_000);
+
+test("gitChildEnv pins the message locale and strips ambient identity env", () => {
+  // diffStat parses --shortstat's human-readable, LOCALIZED output: on a
+  // French/German daemon an unpinned locale makes its regex miss and every
+  // diffstat silently collapses to {0,0,0} (the no-match fallback doubles as
+  // the legitimate empty-range path). This box's git ships no translations,
+  // so the pin is asserted on the env builder itself rather than on
+  // localized git output.
+  const keys = [
+    "LC_ALL",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_DATE",
+  ] as const;
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  process.env.LC_ALL = "fr_FR.UTF-8";
+  process.env.GIT_AUTHOR_NAME = "Ambient Author";
+  process.env.GIT_AUTHOR_EMAIL = "ambient@example.com";
+  process.env.GIT_AUTHOR_DATE = "2001-01-01T00:00:00Z";
+  process.env.GIT_COMMITTER_NAME = "Ambient Committer";
+  process.env.GIT_COMMITTER_EMAIL = "ambient-c@example.com";
+  process.env.GIT_COMMITTER_DATE = "2001-01-01T00:00:00Z";
+  try {
+    const env = gitChildEnv();
+    expect(env.LC_ALL).toBe("C");
+    expect(env.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(env.GIT_AUTHOR_EMAIL).toBeUndefined();
+    expect(env.GIT_AUTHOR_DATE).toBeUndefined();
+    expect(env.GIT_COMMITTER_NAME).toBeUndefined();
+    expect(env.GIT_COMMITTER_EMAIL).toBeUndefined();
+    expect(env.GIT_COMMITTER_DATE).toBeUndefined();
+    // The existing hardening still holds.
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(env.GIT_CONFIG_GLOBAL).toBeDefined();
+    expect(env.GIT_CONFIG_SYSTEM).toBeDefined();
+  } finally {
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
 
 test("createWorkerBundle refuses a malformed base commit", async () => {
   const worker = await makeWorker();
