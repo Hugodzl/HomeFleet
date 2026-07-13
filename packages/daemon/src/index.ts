@@ -125,6 +125,7 @@ export {
   JobManager,
   type JobManagerOptions,
   type JobSubscription,
+  type WorkspaceHandle,
   type WorkspaceResolver,
 } from "./jobs/job-manager.js";
 export {

@@ -36,6 +36,7 @@ import type {
 import type {
   CancelResponse,
   JobEvent,
+  JobId,
   JobParams,
   JobResult,
   JobSnapshot,
@@ -69,22 +70,42 @@ export const DEFAULT_MAX_RETAINED_JOBS = 256;
 export const DEFAULT_CANCEL_UNWIND_TIMEOUT_MS = 30_000;
 
 /**
+ * What a {@link WorkspaceResolver} hands back: the absolute, materialized
+ * workspace directory plus its `release` callback. `release()` is uniformly
+ * promise-shaped — the read path's release is a synchronous unpin wrapped in
+ * a resolved promise, while a write job's release genuinely awaits its
+ * worktree teardown — so callers await it unconditionally instead of
+ * maybe-promise juggling. It settles without throwing in both stores
+ * (teardown failures are logged, never thrown).
+ */
+export interface WorkspaceHandle {
+  dir: string;
+  release: () => Promise<void>;
+}
+
+/**
  * Resolves a workspace reference to a release handle: the absolute,
- * already-materialized checkout directory plus a `release` callback. The
+ * already-materialized workspace directory plus a `release` callback. The
  * daemon injects a resolver (M5 does NOT transfer workspaces — that is M7, git
  * bundles). A rejection yields a terminal `failed` result with
  * `WORKSPACE_UNAVAILABLE`.
  *
- * The handle PINS its checkout against eviction for as long as the job is
- * reading it: the resolver holds a reference the store will not evict, and the
- * caller MUST invoke `release()` exactly once when it is done with the
- * directory (see {@link JobManager.executeJob}). `release()` is safe to call
- * once; callers must not call it twice.
+ * `job` identifies WHO is asking: a `write`-typed job must be routed to a
+ * dedicated ephemeral write worktree keyed by its jobId (the store's
+ * `resolve(ref, { write: { jobId } })` path), while every other type shares
+ * the pinned checkout cache.
+ *
+ * The handle PINS its workspace for as long as the job is using it: the
+ * resolver holds a reference the store will not evict (read path) or a
+ * dedicated worktree (write path), and the caller MUST await `release()`
+ * exactly once when it is done with the directory (see
+ * {@link JobManager.executeJob}).
  */
 export type WorkspaceResolver = (
   ref: WorkspaceRef,
   owner: string,
-) => Promise<{ dir: string; release: () => void }>;
+  job: { jobId: JobId; type: JobType },
+) => Promise<WorkspaceHandle>;
 
 export interface JobManagerOptions {
   /** One executor per supported job type; a duplicate type is a config error. */
@@ -100,6 +121,15 @@ export interface JobManagerOptions {
   cancelUnwindTimeoutMs?: number;
   /** Diagnostic sink for evictions and dropped events; defaults to a no-op. */
   logger?: (message: string) => void;
+  /**
+   * Called with the id of every job record this manager drops: retention
+   * eviction ({@link JobManager.evictIfNeeded}) and the wholesale record
+   * teardown in {@link JobManager.stop}. The daemon uses it to reap
+   * per-job resources that outlive the run itself (a write job's artifact
+   * bundle in the ArtifactStore). Shielded: a throwing hook is logged and
+   * never breaks eviction or shutdown.
+   */
+  onJobEvicted?: (jobId: JobId) => void;
 }
 
 /** Distributes `Omit` across a union so each member keeps its own shape. */
@@ -130,6 +160,7 @@ export class JobManager {
   private readonly maxRetainedJobs: number;
   private readonly cancelUnwindTimeoutMs: number;
   private readonly log: (message: string) => void;
+  private readonly onJobEvicted: (jobId: JobId) => void;
 
   /** All retained jobs (active + terminal), keyed by id, insertion-ordered. */
   private readonly records = new Map<string, JobRecord>();
@@ -159,6 +190,7 @@ export class JobManager {
     this.cancelUnwindTimeoutMs =
       options.cancelUnwindTimeoutMs ?? DEFAULT_CANCEL_UNWIND_TIMEOUT_MS;
     this.log = options.logger ?? (() => {});
+    this.onJobEvicted = options.onJobEvicted ?? (() => {});
     if (this.maxConcurrentJobs < 1) {
       throw new Error("maxConcurrentJobs must be >= 1");
     }
@@ -385,12 +417,18 @@ export class JobManager {
     }
 
     // Any subscriber still attached (e.g. never saw its result): force-close.
+    // Then clear every retained record, notifying the eviction hook for each
+    // — stop() is the last time per-job resources (a write job's artifact)
+    // can be reaped through this manager, so teardown counts as eviction.
     for (const record of this.records.values()) {
       for (const subscriber of record.subscribers) {
         this.closeSubscriber(subscriber);
       }
       record.subscribers.clear();
+      this.notifyEvicted(record.jobId);
     }
+    this.records.clear();
+    this.terminalOrder.length = 0;
   }
 
   /**
@@ -498,24 +536,29 @@ export class JobManager {
     this.append(record, { type: "status", status: "running" });
 
     // Acquire the workspace as a release handle: for as long as `handle` is
-    // held the checkout is PINNED against eviction, so the store cannot yank a
-    // directory this job is reading. A resolution FAILURE is caught here —
-    // nothing was acquired, so there is nothing to release.
-    let handle: { dir: string; release: () => void };
+    // held the checkout is PINNED against eviction (read path) or the job's
+    // dedicated write worktree is live, so the store cannot yank a directory
+    // this job is using. The job's {jobId, type} identity is what lets the
+    // resolver route a write job to its own worktree. A resolution FAILURE is
+    // caught here — nothing was acquired, so there is nothing to release.
+    let handle: WorkspaceHandle;
     try {
       handle = await this.resolveWorkspace(
         record.params.workspace,
         record.owner,
+        { jobId: record.jobId, type: record.params.type },
       );
     } catch (error) {
       this.finishJob(record, this.workspaceUnavailableResult(record, error));
       return;
     }
 
-    // Past acquisition: `release()` must run exactly once on EVERY terminal
-    // path (abort-after-resolve, missing executor, executor success/throw), so
-    // wrap the rest in a finally. `release()` is idempotent in the store, but
-    // this finally is the single caller and fires it just once.
+    // Past acquisition: `release()` must run (and be awaited) exactly once on
+    // EVERY terminal path (abort-after-resolve, missing executor, executor
+    // success/throw), so wrap the rest in a finally. `release()` is
+    // idempotent in the store, but this finally is the single caller and
+    // fires it just once. Awaiting is safe: both stores' releases log
+    // teardown failures rather than throw.
     try {
       if (record.abort.signal.aborted) {
         this.finishJob(record, this.canceledResult(record));
@@ -556,7 +599,7 @@ export class JobManager {
       }
       this.finishJob(record, result);
     } finally {
-      handle.release();
+      await handle.release();
     }
   }
 
@@ -658,9 +701,19 @@ export class JobManager {
         this.closeSubscriber(subscriber);
       }
       record.subscribers.clear();
+      this.notifyEvicted(record.jobId);
       this.log(
         `evicted terminal job ${oldest} (retention cap ${this.maxRetainedJobs} reached)`,
       );
+    }
+  }
+
+  /** Shielded eviction notification: a throwing hook must not break eviction. */
+  private notifyEvicted(jobId: JobId): void {
+    try {
+      this.onJobEvicted(jobId);
+    } catch (error) {
+      this.log(`onJobEvicted threw for ${jobId}: ${describeError(error)}`);
     }
   }
 

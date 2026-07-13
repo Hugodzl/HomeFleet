@@ -337,17 +337,17 @@ test("checkout retention cap evicts the least-recently-used checkout", async () 
     repoId: "repo-a",
     headCommit: c1,
   });
-  r1();
+  await r1();
   const { dir: d2, release: r2 } = await store.resolve({
     repoId: "repo-a",
     headCommit: c2,
   });
-  r2();
+  await r2();
   const { dir: d3, release: r3 } = await store.resolve({
     repoId: "repo-a",
     headCommit: c3,
   });
-  r3();
+  await r3();
 
   // Cap is 2: the oldest (c1) checkout was evicted; c2 and c3 remain on disk.
   await expect(stat(path.join(d1, ".git"))).rejects.toThrow();
@@ -376,12 +376,12 @@ test("a pinned checkout is not evicted while its handle is held, and is after re
 
   // Release c1's handle, then trigger another eviction pass (via a resolve):
   // c1 is now unpinned and becomes the victim; c2 stays pinned and survives.
-  h1.release();
+  await h1.release();
   await store.resolve({ repoId: "repo-a", headCommit: c2 });
   await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
   expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
 
-  h2.release();
+  await h2.release();
 }, 45_000);
 
 test("the store's release handle is idempotent: a double-release neither throws nor sticks the pin", async () => {
@@ -400,8 +400,8 @@ test("the store's release handle is idempotent: a double-release neither throws 
   // must keep the refcount at 0 (never negative) — so c1 ends up genuinely
   // unpinned, not stuck pinned by a double-decrement gone wrong.
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
-  h1.release();
+  await h1.release();
+  await h1.release();
 
   // Cap is 1: resolving a DIFFERENT commit runs an eviction pass. c1 must now
   // be evicted — proving the double-release left it unpinned. Had it thrown or
@@ -410,7 +410,7 @@ test("the store's release handle is idempotent: a double-release neither throws 
   await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
   expect((await stat(path.join(h2.dir, ".git"))).isFile()).toBe(true);
 
-  h2.release();
+  await h2.release();
 }, 45_000);
 
 test("checkout cap survives across store instances (init re-registers on-disk checkouts)", async () => {
@@ -430,9 +430,9 @@ test("checkout cap survives across store instances (init re-registers on-disk ch
   const store1 = new WorkspaceStore(opts);
   await store1.init();
   await store1.applyBundle("repo-a", await fullBundle(src, c3), c3);
-  (await store1.resolve({ repoId: "repo-a", headCommit: c1 })).release();
-  (await store1.resolve({ repoId: "repo-a", headCommit: c2 })).release();
-  (await store1.resolve({ repoId: "repo-a", headCommit: c3 })).release();
+  await (await store1.resolve({ repoId: "repo-a", headCommit: c1 })).release();
+  await (await store1.resolve({ repoId: "repo-a", headCommit: c2 })).release();
+  await (await store1.resolve({ repoId: "repo-a", headCommit: c3 })).release();
 
   // A new store over the same cacheDir with a tighter cap must evict on init.
   const store2 = new WorkspaceStore({ ...opts, maxCachedCheckouts: 1 });
@@ -457,7 +457,7 @@ test("init does not register an unpopulated checkout dir against the retention c
   await store1.init();
   await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
   const h1 = await store1.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
 
   // An unpopulated checkout dir (no `.git` gitlink) — e.g. left by a checkout
   // creation that died partway. Forced to the newest mtime so that, were it
@@ -475,20 +475,48 @@ test("init does not register an unpopulated checkout dir against the retention c
   expect((await stat(strayDir)).isDirectory()).toBe(true);
 }, 45_000);
 
-test("resolver injects into the WorkspaceResolver contract", async () => {
+test("resolver injects into the WorkspaceResolver contract and routes by job type", async () => {
   const src = await makeSrc();
   const head = await src.commit("c1");
   const store = await makeStore({ allowedRepoIds: ["repo-a"] });
+  const cacheDir = (store as unknown as { cacheDir: string }).cacheDir;
   await store.applyBundle("repo-a", await fullBundle(src, head), head);
   const resolver = store.createResolver();
-  const { dir } = await resolver(
+
+  // A non-write job goes down the shared-checkout read path.
+  const read = await resolver(
     { repoId: "repo-a", headCommit: head },
     "owner-x",
+    {
+      jobId: JOB_B,
+      type: "command",
+    },
   );
-  expect(await readFile(path.join(dir, "file.txt"), "utf8")).toBe(
+  expect(await readFile(path.join(read.dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
-}, 30_000);
+  expect(path.resolve(read.dir)).toContain(`${path.sep}co${path.sep}`);
+
+  // A write job is routed to its DEDICATED ephemeral worktree — the actual
+  // point of the resolver's job argument.
+  const write = await resolver(
+    { repoId: "repo-a", headCommit: head },
+    "owner-x",
+    { jobId: JOB_A, type: "write" },
+  );
+  expect(path.resolve(write.dir)).toBe(
+    path.join(
+      path.resolve(cacheDir),
+      repoKey("repo-a"),
+      "jobs",
+      "aaaaaaaaaaaa",
+    ),
+  );
+  expect(store.writeJobWorkspace(JOB_A)?.dir).toBe(write.dir);
+  await write.release();
+  expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
+  await read.release();
+}, 45_000);
 
 test("a bundle advertising a head != the claimed headCommit imports no objects", async () => {
   const src = await makeSrc();
@@ -637,9 +665,9 @@ test("stop() during an eviction pass halts it: no further worktree removals are 
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
   const h2 = await store.resolve({ repoId: "repo-a", headCommit: c2 });
   const h3 = await store.resolve({ repoId: "repo-a", headCommit: c3 });
-  h1.release();
-  h2.release();
-  h3.release();
+  await h1.release();
+  await h2.release();
+  await h3.release();
 
   const internals = store as unknown as {
     withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T>;
@@ -739,7 +767,7 @@ test("checkout paths are short: <cacheDir>/<16-hex>/co/<16-hex>, 37 chars past t
   const suffix = path.resolve(dir).slice(path.resolve(cacheDir).length);
   expect(suffix).toMatch(/^[\\/][0-9a-f]{16}[\\/]co[\\/][0-9a-f]{16}$/);
   expect(suffix).toHaveLength(37);
-  release();
+  await release();
 }, 30_000);
 
 test("verify-on-reuse: a checkout dir holding the wrong commit is re-materialized", async () => {
@@ -752,7 +780,7 @@ test("verify-on-reuse: a checkout dir holding the wrong commit is re-materialize
   await store.applyBundle("repo-a", await fullBundle(src, c2), c2);
 
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
 
   // Tamper: swap the worktree under c1's dir NAME to actually hold c2 — the
   // on-disk analogue of a truncated-commit-key collision.
@@ -772,7 +800,7 @@ test("verify-on-reuse: a checkout dir holding the wrong commit is re-materialize
   expect(await readFile(path.join(h2.dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
-  h2.release();
+  await h2.release();
 }, 45_000);
 
 test("a pinned checkout dir holding the wrong commit is never removed: resolve fails instead", async () => {
@@ -796,7 +824,7 @@ test("a pinned checkout dir holding the wrong commit is never removed: resolve f
   ).rejects.toMatchObject({ code: "GIT_FAILED" });
   // The dir was NOT removed: its worktree gitlink is still on disk.
   expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
-  h1.release();
+  await h1.release();
 }, 45_000);
 
 test("eviction backs off a victim that a queued-ahead resolve re-pinned", async () => {
@@ -812,7 +840,7 @@ test("eviction backs off a victim that a queued-ahead resolve re-pinned", async 
 
   // One unpinned checkout, exactly at the cap.
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
 
   // Same tick: resolve(c2) queues on the repo lock first, then resolve(c1).
   // c2's eviction pass picks the unpinned c1 entry as victim and queues its
@@ -828,8 +856,8 @@ test("eviction backs off a victim that a queued-ahead resolve re-pinned", async 
   expect(await readFile(path.join(h1again.dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
-  h2.release();
-  h1again.release();
+  await h2.release();
+  await h1again.release();
 }, 45_000);
 
 test("an unpinned checkout whose HEAD cannot be read is re-materialized (self-heal)", async () => {
@@ -839,7 +867,7 @@ test("an unpinned checkout whose HEAD cannot be read is re-materialized (self-he
   await store.applyBundle("repo-a", await fullBundle(src, c1), c1);
 
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
   // Corrupt the worktree gitlink so the checkout's HEAD can no longer be
   // read. Delete-and-recreate (not overwrite): git marks the gitlink hidden
   // on Windows, and truncating writes to hidden files fail with EPERM.
@@ -857,7 +885,7 @@ test("an unpinned checkout whose HEAD cannot be read is re-materialized (self-he
   expect(await readFile(path.join(h2.dir, "file.txt"), "utf8")).toBe(
     "content 0\n",
   );
-  h2.release();
+  await h2.release();
 }, 45_000);
 
 test("a pinned checkout whose HEAD cannot be read fails with a read error, not a collision claim", async () => {
@@ -892,7 +920,7 @@ test("a pinned checkout whose HEAD cannot be read fails with a read error, not a
   );
   // The pinned dir was not removed.
   expect((await stat(path.join(h1.dir, ".git"))).isFile()).toBe(true);
-  h1.release();
+  await h1.release();
 }, 45_000);
 
 // --- ephemeral write-job worktrees (v0.2) ----------------------------------
@@ -900,16 +928,6 @@ test("a pinned checkout whose HEAD cannot be read fails with a read error, not a
 /** Valid job UUIDs (v4 shape); the store keys write worktrees by the LAST 12 hex. */
 const JOB_A = "11111111-1111-4111-8111-aaaaaaaaaaaa";
 const JOB_B = "22222222-2222-4222-9222-bbbbbbbbbbbb";
-
-/**
- * A write handle's `release()` actually returns a promise that settles when
- * its teardown has run (or been skipped post-stop); the declared type stays
- * `() => void` to match the read-mode handle, so tests cast to await it
- * deterministically.
- */
-function releaseSettled(handle: { release: () => void }): Promise<void> {
-  return handle.release() as unknown as Promise<void>;
-}
 
 test("write resolve materializes a dedicated detached worktree at <repoRoot>/jobs/<jobId12>", async () => {
   const src = await makeSrc();
@@ -955,7 +973,7 @@ test("write resolve materializes a dedicated detached worktree at <repoRoot>/job
     baseCommit: c1,
   });
 
-  await releaseSettled(handle);
+  await handle.release();
   expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
 }, 45_000);
 
@@ -983,7 +1001,7 @@ test("write worktrees are invisible to the checkout cache: uncounted, unevictabl
 
   // One unpinned cached checkout, exactly at cap 1.
   const h1 = await store.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
 
   // A write resolve neither counts against the cap nor evicts: were the write
   // worktree entered into the checkout map, cap 1 would evict c1 here.
@@ -1006,8 +1024,8 @@ test("write worktrees are invisible to the checkout cache: uncounted, unevictabl
   await expect(stat(path.join(h1.dir, ".git"))).rejects.toThrow();
   expect((await stat(path.join(hw.dir, ".git"))).isFile()).toBe(true);
 
-  h2.release();
-  await releaseSettled(hw);
+  await h2.release();
+  await hw.release();
 }, 45_000);
 
 test("init never registers a jobs dir against the retention cap (the scan reads co/ only)", async () => {
@@ -1026,7 +1044,7 @@ test("init never registers a jobs dir against the retention cap (the scan reads 
   await store1.init();
   await store1.applyBundle("repo-a", await fullBundle(src, c1), c1);
   const h1 = await store1.resolve({ repoId: "repo-a", headCommit: c1 });
-  h1.release();
+  await h1.release();
 
   // A populated-LOOKING leftover jobs dir with the newest mtime: were it
   // registered by the checkout scan, it would out-recency the real checkout
@@ -1079,7 +1097,7 @@ test("one live write worktree per jobId: a duplicate resolve fails until the fir
 
   // Once released, the same jobId resolves again (same deterministic path,
   // freshly materialized).
-  await releaseSettled(first);
+  await first.release();
   const again = await store.resolve(
     { repoId: "repo-a", headCommit: c1 },
     { write: { jobId: JOB_A } },
@@ -1087,8 +1105,8 @@ test("one live write worktree per jobId: a duplicate resolve fails until the fir
   expect(again.dir).toBe(first.dir);
   expect((await stat(path.join(again.dir, ".git"))).isFile()).toBe(true);
 
-  await releaseSettled(other);
-  await releaseSettled(again);
+  await other.release();
+  await again.release();
 }, 60_000);
 
 test("releasing a write handle removes its worktree; a second release is a no-op", async () => {
@@ -1102,7 +1120,7 @@ test("releasing a write handle removes its worktree; a second release is a no-op
     { repoId: "repo-a", headCommit: c1 },
     { write: { jobId: JOB_A } },
   );
-  await releaseSettled(handle);
+  await handle.release();
 
   // Dir removed from disk, its worktree registration pruned from the cache
   // repo, and the registry no longer answers for the jobId.
@@ -1116,7 +1134,7 @@ test("releasing a write handle removes its worktree; a second release is a no-op
   expect(store.writeJobWorkspace(JOB_A)).toBeUndefined();
 
   // Idempotent: the second call neither throws nor re-runs teardown.
-  await releaseSettled(handle);
+  await handle.release();
   await expect(stat(handle.dir)).rejects.toThrow();
 }, 45_000);
 
@@ -1143,7 +1161,7 @@ test("a post-stop write release runs no git/disk ops: the worktree persists unti
   await store1.stop();
   // Post-stop the release must not touch git or disk (op-granularity
   // discipline): the worktree stays on disk, in a consistent state.
-  await releaseSettled(handle);
+  await handle.release();
   expect((await stat(path.join(handle.dir, ".git"))).isFile()).toBe(true);
 
   // The next daemon run's init purges it: an in-flight write job never
@@ -1166,7 +1184,7 @@ test("a post-stop write release runs no git/disk ops: the worktree persists unti
     timeoutMs: 30_000,
   });
   expect(head.stdout.trim()).toBe(c1);
-  await releaseSettled(again);
+  await again.release();
 }, 45_000);
 
 test("init purges leftover write-job dirs and stale files under jobs/ (and tolerates their absence)", async () => {
@@ -1408,7 +1426,7 @@ test("finalizeWriteJob commits, bundles, and returns a schema-valid artifact; th
   // release() removes the worktree but NEVER the bundle (a jobs/ SIBLING of
   // the worktree dir): the artifact's lifetime is the job's, not the
   // handle's — job eviction / the next init purge reap it.
-  await releaseSettled(handle);
+  await handle.release();
   await expect(stat(handle.dir)).rejects.toThrow();
   expect((await stat(bundlePath)).size).toBeGreaterThan(0);
 }, 60_000);
@@ -1451,7 +1469,7 @@ test("finalizeWriteJob returns null on a clean tree: no commit, no ref, no bundl
     timeoutMs: 30_000,
   });
   expect(refs.code).not.toBe(0);
-  await releaseSettled(handle);
+  await handle.release();
 }, 45_000);
 
 test("a bundle-create failure still deletes the branch ref and keeps the registry entry live", async () => {
@@ -1498,7 +1516,7 @@ test("a bundle-create failure still deletes the branch ref and keeps the registr
   // no partial bundle FILE appeared (the planted directory is untouched).
   expect(store.writeJobWorkspace(JOB_A)).toBeDefined();
   expect((await stat(bundlePath)).isDirectory()).toBe(true);
-  await releaseSettled(handle);
+  await handle.release();
 }, 45_000);
 
 test("finalizeWriteJob for a jobId without a live write worktree fails NO_WRITE_WORKSPACE", async () => {
@@ -1594,7 +1612,7 @@ test("aborting the job signal mid-finalize rejects with an AbortError-named erro
   );
   await expect(stat(bundlePath)).rejects.toThrow();
   expect(store.writeJobWorkspace(JOB_A)).toBeDefined();
-  await releaseSettled(handle);
+  await handle.release();
 }, 45_000);
 
 test("an already-aborted job signal rejects finalizeWriteJob before any git op", async () => {
@@ -1622,5 +1640,5 @@ test("an already-aborted job signal rejects finalizeWriteJob before any git op",
     );
   expect(rejection).toBeInstanceOf(Error);
   expect((rejection as Error).name).toBe("AbortError");
-  await releaseSettled(handle);
+  await handle.release();
 }, 45_000);

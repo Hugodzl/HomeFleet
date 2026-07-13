@@ -9,9 +9,11 @@ import type { ExecutionContext, Executor } from "@homefleet/executors";
 import type {
   CommandJobParams,
   JobEvent,
+  JobId,
   JobParams,
   JobResult,
   ReconJobParams,
+  WriteJobParams,
 } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { JobDispatchError } from "./job.js";
@@ -105,7 +107,7 @@ function makeManager(options: Partial<JobManagerOptions> = {}): JobManager {
     executors: options.executors ?? [new SucceedingExecutor()],
     resolveWorkspace:
       options.resolveWorkspace ??
-      (async () => ({ dir: "/unit-ws", release: () => {} })),
+      (async () => ({ dir: "/unit-ws", release: async () => {} })),
     ...options,
   });
   managers.push(manager);
@@ -322,13 +324,16 @@ test("activeJobs and maxConcurrent expose live load for NodeInfo", async () => {
   expect(manager.activeJobs).toBe(0);
 });
 
-test("the resolver release handle fires when a job reaches a terminal state", async () => {
-  // Each resolve hands out a handle whose release bumps a shared counter, so we
-  // can assert the pin is released on every post-acquire terminal path.
+test("the resolver release handle is awaited when a job reaches a terminal state", async () => {
+  // Each resolve hands out a handle whose ASYNC release bumps a shared counter
+  // only after a real async hop, so we can assert both that the pin is
+  // released on every post-acquire terminal path and that the manager AWAITS
+  // the promise-shaped release (the write path's teardown is genuinely async).
   let releases = 0;
   const resolveWorkspace: WorkspaceResolver = async () => ({
     dir: "/unit-ws",
-    release: () => {
+    release: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
       releases += 1;
     },
   });
@@ -373,8 +378,111 @@ test("the resolver release handle fires when a job reaches a terminal state", as
   const response = await cancelManager.cancel(cancelJob.jobId, OWNER);
   expect(response.status).toBe("canceled");
 
-  // Exactly one release per job — succeeded, failed, canceled — and never twice.
+  // Exactly one awaited release per job — succeeded, failed, canceled — and
+  // never twice (the settle wait would catch a double-fire as a 4th bump).
+  await waitUntil(() => releases === 3);
+  await new Promise((resolve) => setTimeout(resolve, 30));
   expect(releases).toBe(3);
+});
+
+test("the resolver receives the job's identity: a write job's {jobId, type} reach it", async () => {
+  const seen: Array<{ jobId: JobId; type: string }> = [];
+  const resolveWorkspace: WorkspaceResolver = async (_ref, _owner, job) => {
+    seen.push({ jobId: job.jobId, type: job.type });
+    return { dir: "/unit-ws", release: async () => {} };
+  };
+  const manager = makeManager({
+    executors: [new SucceedingWriteExecutor(), new SucceedingExecutor()],
+    resolveWorkspace,
+  });
+
+  const writeJob = manager.submit(writeParams(), OWNER);
+  await waitUntil(() => {
+    try {
+      return manager.snapshot(writeJob.jobId, OWNER).status === "succeeded";
+    } catch {
+      return false;
+    }
+  });
+  const commandJob = manager.submit(commandParams(), OWNER);
+  await waitUntil(() => isSucceeded(manager, commandJob.jobId));
+
+  expect(seen).toEqual([
+    { jobId: writeJob.jobId, type: "write" },
+    { jobId: commandJob.jobId, type: "command" },
+  ]);
+});
+
+test("a write job with no write executor registered is rejected UNSUPPORTED_JOB_TYPE", () => {
+  const manager = makeManager({ executors: [new SucceedingExecutor()] });
+  const thrown = ((): unknown => {
+    try {
+      manager.submit(writeParams(), OWNER);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  })();
+  expect(thrown).toBeInstanceOf(JobDispatchError);
+  expect((thrown as JobDispatchError).code).toBe("UNSUPPORTED_JOB_TYPE");
+});
+
+test("onJobEvicted fires with the evicted jobId on retention overflow", async () => {
+  const evicted: JobId[] = [];
+  const manager = makeManager({
+    maxConcurrentJobs: 1, // serialize so termination order == submit order
+    maxRetainedJobs: 2,
+    onJobEvicted: (jobId) => evicted.push(jobId),
+  });
+
+  const first = manager.submit(commandParams(), OWNER);
+  const second = manager.submit(commandParams(), OWNER);
+  const third = manager.submit(commandParams(), OWNER);
+  await waitUntil(() => isSucceeded(manager, third.jobId));
+
+  expect(evicted).toEqual([first.jobId]);
+  expect(manager.snapshot(second.jobId, OWNER).status).toBe("succeeded");
+});
+
+test("onJobEvicted fires for every retained record on stop()", async () => {
+  const evicted: JobId[] = [];
+  const manager = makeManager({
+    executors: [new SucceedingExecutor(), new SucceedingExecutor2()],
+    onJobEvicted: (jobId) => evicted.push(jobId),
+  });
+
+  const a = manager.submit(commandParams(), OWNER);
+  const b = manager.submit(reconParams(), OWNER);
+  await waitUntil(() => isSucceeded(manager, a.jobId));
+  await waitUntil(() => isSucceeded(manager, b.jobId));
+
+  await manager.stop();
+  expect(evicted.sort()).toEqual([a.jobId, b.jobId].sort());
+});
+
+test("a throwing onJobEvicted hook breaks neither eviction nor stop", async () => {
+  const logs: string[] = [];
+  const manager = makeManager({
+    maxConcurrentJobs: 1,
+    maxRetainedJobs: 2,
+    logger: (message) => logs.push(message),
+    onJobEvicted: () => {
+      throw new Error("hook kaboom");
+    },
+  });
+
+  const first = manager.submit(commandParams(), OWNER);
+  const second = manager.submit(commandParams(), OWNER);
+  const third = manager.submit(commandParams(), OWNER);
+  await waitUntil(() => isSucceeded(manager, third.jobId));
+
+  // The eviction still happened despite the throwing hook, and was shielded.
+  expect(() => manager.snapshot(first.jobId, OWNER)).toThrow(JobDispatchError);
+  expect(manager.snapshot(second.jobId, OWNER).status).toBe("succeeded");
+  expect(logs.some((line) => line.includes("hook kaboom"))).toBe(true);
+
+  // stop()'s per-record teardown notifications are shielded the same way.
+  await expect(manager.stop()).resolves.toBeUndefined();
 });
 
 /** A second command-typed executor is a config error, so the backstop test's
@@ -402,4 +510,30 @@ function reconParams(): JobParams {
     prompt: "hi",
     budgets: { maxToolCalls: 5, maxWallMs: 30_000 },
   };
+}
+
+function writeParams(): JobParams {
+  return {
+    type: "write",
+    workspace: { repoId: "r", headCommit: "a".repeat(40) },
+    instructions: "change things",
+    budgets: { maxToolCalls: 5, maxWallMs: 30_000 },
+  };
+}
+
+/** Minimal write executor: succeeds with the mandatory explicit artifact. */
+class SucceedingWriteExecutor implements Executor<"write"> {
+  readonly type = "write" as const;
+  async execute(
+    _params: WriteJobParams,
+    context: ExecutionContext,
+  ): Promise<JobResult> {
+    return {
+      jobId: context.jobId,
+      type: "write",
+      status: "succeeded",
+      artifact: null,
+      stats: { toolCalls: 0, wallMs: 0 },
+    };
+  }
 }

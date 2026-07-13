@@ -154,7 +154,7 @@ test("a real JobManager satisfies the jobs source shape", () => {
   // Compile-time: JobManager must be assignable to JobLoadSource.
   const manager: JobLoadSource = new JobManager({
     executors: [],
-    resolveWorkspace: async () => ({ dir: ".", release: () => {} }),
+    resolveWorkspace: async () => ({ dir: ".", release: async () => {} }),
     maxConcurrentJobs: 3,
   });
   const info = makeProvider({ jobs: manager })();

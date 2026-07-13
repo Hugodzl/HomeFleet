@@ -91,7 +91,7 @@ async function createDaemon(
   const workspaceDir = await makeTempDataDir(`homefleet-ws-${name}-`);
   const resolveWorkspace: WorkspaceResolver =
     options.resolveWorkspace ??
-    (async () => ({ dir: workspaceDir, release: () => {} }));
+    (async () => ({ dir: workspaceDir, release: async () => {} }));
 
   const jobManager = new JobManager({
     executors: options.executors ?? [],

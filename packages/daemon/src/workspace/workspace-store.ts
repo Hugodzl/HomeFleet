@@ -78,7 +78,10 @@ import {
   type WriteArtifact,
   writeBranchName,
 } from "@homefleet/protocol";
-import type { WorkspaceResolver } from "../jobs/job-manager.js";
+import type {
+  WorkspaceHandle,
+  WorkspaceResolver,
+} from "../jobs/job-manager.js";
 import {
   addWorktree,
   COMMIT_HASH_RE,
@@ -466,7 +469,10 @@ export class WorkspaceStore {
    * Handing out the dir PINS the checkout: its refcount is incremented (under
    * the repo lock, before eviction runs) so a running job's checkout is never
    * evicted out from under it. The returned `release` decrements the refcount
-   * (floored at 0); it is guarded so a double-call is a harmless no-op.
+   * (floored at 0) synchronously and returns an already-resolved promise —
+   * the {@link WorkspaceHandle} contract is uniformly promise-shaped because
+   * the WRITE path's teardown is genuinely async. It is guarded so a
+   * double-call is a harmless no-op.
    *
    * With `options.write` set, none of the above cache machinery applies: the
    * resolve materializes a dedicated ephemeral worktree for that one write
@@ -475,7 +481,7 @@ export class WorkspaceStore {
   async resolve(
     ref: WorkspaceRef,
     options?: ResolveOptions,
-  ): Promise<{ dir: string; release: () => void }> {
+  ): Promise<WorkspaceHandle> {
     this.requireNotStopped();
     this.requireAllowed(ref.repoId);
     if (options?.write !== undefined) {
@@ -571,12 +577,14 @@ export class WorkspaceStore {
       throw error;
     }
     let released = false;
-    const release = (): void => {
-      if (released) {
-        return;
+    const release = (): Promise<void> => {
+      // The unpin itself is synchronous; the resolved promise only satisfies
+      // the uniform promise-shaped WorkspaceHandle contract.
+      if (!released) {
+        released = true;
+        this.unpin(key);
       }
-      released = true;
-      this.unpin(key);
+      return Promise.resolve();
     };
     return { dir, release };
   }
@@ -608,10 +616,18 @@ export class WorkspaceStore {
     await Promise.allSettled(pending);
   }
 
-  /** A resolver bound to this store, for injection into the JobManager. */
+  /**
+   * A resolver bound to this store, for injection into the JobManager. The
+   * job's type routes the resolve: a `write` job gets its dedicated
+   * ephemeral worktree (keyed by its jobId); everything else shares the
+   * pinned checkout cache.
+   */
   createResolver(): WorkspaceResolver {
     // owner is intentionally ignored: the worker cache is not per-owner.
-    return (ref: WorkspaceRef) => this.resolve(ref);
+    return (ref, _owner, job) =>
+      job.type === "write"
+        ? this.resolve(ref, { write: { jobId: job.jobId } })
+        : this.resolve(ref);
   }
 
   /**
@@ -948,7 +964,7 @@ export class WorkspaceStore {
   private async resolveForWrite(
     ref: WorkspaceRef,
     jobId: JobId,
-  ): Promise<{ dir: string; release: () => void }> {
+  ): Promise<WorkspaceHandle> {
     const rKey = repoKey(ref.repoId);
     const { headCommit } = ref;
     const dir = this.writeWorktreeDir(rKey, jobId);
@@ -1000,11 +1016,11 @@ export class WorkspaceStore {
       this.writeWorkspaces.delete(jobId);
       throw error;
     }
-    // NOTE: unlike the read-mode handle's synchronous unpin, this release
-    // actually returns a Promise that settles when the teardown has run (or
-    // been skipped post-stop). The declared `() => void` keeps the handle
-    // shape identical for callers; a caller that needs the completion point
-    // (tests, the job finalize path) may await the returned promise.
+    // Unlike the read-mode handle's synchronous unpin, this release settles
+    // only when the teardown has run (or been skipped post-stop) — which is
+    // exactly why WorkspaceHandle.release is promise-shaped. The cached
+    // cleanup promise makes a double-release a no-op that still reports the
+    // first teardown's completion.
     let cleanup: Promise<void> | undefined;
     const release = (): Promise<void> => {
       if (cleanup === undefined) {
