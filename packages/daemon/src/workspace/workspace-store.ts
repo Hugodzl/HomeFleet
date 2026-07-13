@@ -585,6 +585,13 @@ export class WorkspaceStore {
    * lives), the repoKey (whose cache repo to bundle from), and `baseCommit` —
    * the `ref.headCommit` the worktree was materialized at, i.e. the bundle's
    * `--not` prerequisite.
+   *
+   * Two caveats for consumers: an entry exists from RESERVATION time, so the
+   * dir is only guaranteed to be on disk once the resolve that reserved it
+   * has returned. And any git op touching the returned worktree or its repo
+   * MUST go through this store (under its per-repo lock) — this accessor
+   * reads the mapping, it is not a license for out-of-band git: a concurrent
+   * sync's `gc --prune=now` would race it.
    */
   writeJobWorkspace(
     jobId: JobId,
@@ -598,8 +605,9 @@ export class WorkspaceStore {
   /**
    * Fails closed once {@link stop} has run. Reuses the `GIT_FAILED` code (no new
    * wire mapping) — the route maps it to a clear INTERNAL error; the message
-   * says the store is stopped. Checked at the top of every public entry point,
-   * before any disk access.
+   * says the store is stopped. Checked at the top of every public entry point
+   * (before any disk access) and again inside lock-queued mutating callbacks
+   * that must not issue git/disk ops once stop() has landed mid-queue.
    */
   private requireNotStopped(): void {
     if (this.stopped) {
@@ -685,17 +693,12 @@ export class WorkspaceStore {
     });
     try {
       await this.withRepoLock(rKey, async () => {
-        if (this.stopped) {
-          // Post-stop the no-mutation rule holds at OP granularity, not just
-          // at the public entry point (the same discipline as the eviction
-          // pass — commit 473850d): this callback may have queued behind the
-          // lock BEFORE stop() landed, and materializing a worktree now would
-          // issue new git/disk ops during shutdown. Back off instead.
-          throw new WorkspaceError(
-            "GIT_FAILED",
-            "workspace store is stopped (daemon shutting down)",
-          );
-        }
+        // Post-stop the no-mutation rule holds at OP granularity, not just at
+        // the public entry point (the same discipline as the eviction pass —
+        // commit 473850d): this callback may have queued behind the lock
+        // BEFORE stop() landed, and materializing a worktree now would issue
+        // new git/disk ops during shutdown. Back off instead.
+        this.requireNotStopped();
         const worker = await this.requireSyncedCommit(rKey, ref);
         // A failed/aborted earlier attempt for this jobId can leave a partial
         // dir at this deterministic path (init() purges only on startup):
@@ -806,7 +809,12 @@ export class WorkspaceStore {
     return path.join(this.repoRoot(rKey), "jobs");
   }
 
-  /** One dir per write job, named by the job UUID's last 12 hex (jobId12). */
+  /**
+   * One dir per write job, named by the job UUID's last 12 hex (jobId12).
+   * Note the registry ({@link writeWorkspaces}) keys by the FULL jobId while
+   * dirs use only the 12-hex tail: a tail collision between two live
+   * daemon-generated v4 ids (~2^-48) is documented, not defended.
+   */
   private writeWorktreeDir(rKey: string, jobId: JobId): string {
     return path.join(this.jobsRoot(rKey), jobId12(jobId));
   }
@@ -855,7 +863,11 @@ export class WorkspaceStore {
     }
   }
 
-  /** Serializes work for one repoKey onto a single promise chain. */
+  /**
+   * Serializes work for one repoKey onto a single promise chain. NON-
+   * REENTRANT: an inner acquisition awaited inside an outer callback for the
+   * same repoKey queues behind that outer callback and deadlocks.
+   */
   private withRepoLock<T>(rKey: string, fn: () => Promise<T>): Promise<T> {
     const prior = this.locks.get(rKey) ?? Promise.resolve();
     const next = prior.then(fn, fn);

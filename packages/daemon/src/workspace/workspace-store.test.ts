@@ -1148,6 +1148,22 @@ test("a post-stop write release runs no git/disk ops: the worktree persists unti
   const store2 = new WorkspaceStore(opts);
   await store2.init();
   await expect(stat(handle.dir)).rejects.toThrow();
+
+  // The purge deleted only the DIR, leaving a stale worktree admin entry in
+  // repo.git — the purge comment claims `addWorktree --force` recovers from
+  // exactly that, so pin it: the same jobId materializes again on store2.
+  const again = await store2.resolve(
+    { repoId: "repo-a", headCommit: c1 },
+    { write: { jobId: JOB_A } },
+  );
+  expect(again.dir).toBe(handle.dir);
+  expect((await stat(path.join(again.dir, ".git"))).isFile()).toBe(true);
+  const head = await runGit(["rev-parse", "HEAD"], {
+    cwd: again.dir,
+    timeoutMs: 30_000,
+  });
+  expect(head.stdout.trim()).toBe(c1);
+  await releaseSettled(again);
 }, 45_000);
 
 test("init purges leftover write-job dirs and stale files under jobs/ (and tolerates their absence)", async () => {
