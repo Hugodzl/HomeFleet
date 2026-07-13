@@ -121,7 +121,7 @@ What a node advertises about itself during `hello` and pairing.
 | `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.1.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
-| `executors`         | `("command" \| "agent")[]`              | Executor kinds this node offers                |
+| `executors`         | `("command" \| "agent" \| "write")[]`   | Executor kinds this node offers                |
 | `models`            | `ModelInfo[]`                           | Models reachable via the node's OpenAI-compatible endpoint(s) |
 | `hardware`          | `{ cpu, ramBytes, gpus: GpuInfo[] }`    | `cpu`: string; `ramBytes`: integer ≥ 0         |
 | `maxConcurrentJobs` | integer ≥ 1                             |                                                |
