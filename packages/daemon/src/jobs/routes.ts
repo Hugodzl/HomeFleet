@@ -4,10 +4,11 @@
  * peer's device ID (`peer.deviceId`) is the job owner and is never null on a
  * `paired` route.
  *
- *   POST /hfp/v0/jobs             -> DelegateResponse   (submit)
- *   GET  /hfp/v0/jobs/{id}        -> JobSnapshot        (poll)
- *   GET  /hfp/v0/jobs/{id}/events -> text/event-stream  (subscribe)
- *   POST /hfp/v0/jobs/{id}/cancel -> CancelResponse     (cancel)
+ *   POST /hfp/v0/jobs               -> DelegateResponse          (submit)
+ *   GET  /hfp/v0/jobs/{id}          -> JobSnapshot               (poll)
+ *   GET  /hfp/v0/jobs/{id}/events   -> text/event-stream         (subscribe)
+ *   POST /hfp/v0/jobs/{id}/cancel   -> CancelResponse            (cancel)
+ *   GET  /hfp/v0/jobs/{id}/artifact -> application/octet-stream  (download)
  *
  * Worker-side failures map to HTTP via {@link statusForCode} with an
  * `HfpError` JSON body: UNKNOWN_JOB → 404 (identical for absent and
@@ -15,6 +16,7 @@
  * 400. Result-carried failures (e.g. WORKSPACE_UNAVAILABLE) are 200 job
  * results, not route errors.
  */
+import { createReadStream } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   DelegateRequestSchema,
@@ -25,6 +27,8 @@ import {
 } from "@homefleet/protocol";
 import { z } from "zod";
 import type { NodeServer } from "../transport/server.js";
+import type { ArtifactStore } from "../workspace/artifact-store.js";
+import { HEAD_COMMIT_HEADER } from "../workspace/routes.js";
 import { JobDispatchError } from "./job.js";
 import type { JobManager } from "./job-manager.js";
 
@@ -34,10 +38,17 @@ const NO_BODY_SCHEMA = z.unknown();
 /** Interval between SSE keepalive comments, so a slow job's socket stays live. */
 export const SSE_HEARTBEAT_MS = 15_000;
 
-/** Registers the four job-dispatch routes against `manager`. */
+/**
+ * Registers the five job-dispatch routes against `manager`. `artifacts` is
+ * the write-job bundle registry the artifact download serves from; while the
+ * daemon assembly does not wire one (Task 11), it may be omitted, in which
+ * case the artifact route still gates on ownership but always answers 404
+ * NO_ARTIFACT.
+ */
 export function registerJobRoutes(
   server: NodeServer,
   manager: JobManager,
+  artifacts?: ArtifactStore,
 ): void {
   server.route(
     "POST",
@@ -94,6 +105,91 @@ export function registerJobRoutes(
       context.res,
     );
   });
+
+  server.routeStream("GET", "/jobs/:id/artifact", {}, (context) => {
+    handleArtifactDownload(
+      manager,
+      artifacts,
+      context.peer.deviceId,
+      context.params.id ?? "",
+      context.res,
+    );
+  });
+}
+
+/**
+ * Streams a write-job's bundle to its owner (v0.2 Task 8).
+ *
+ * The ownership/existence gate runs FIRST and reuses the snapshot idiom: an
+ * absent or non-owned job gets the identical UNKNOWN_JOB 404 as `GET
+ * /jobs/{id}`, so existence never leaks. An evicted job's record is gone
+ * from the manager, so it too answers UNKNOWN_JOB — by design, eviction is
+ * indistinguishable from "never existed" (see the RFC's artifact-download
+ * section). A known, owned job without a registered bundle (non-write job,
+ * `artifact: null`, not yet terminal, or no store wired) is 404 NO_ARTIFACT.
+ *
+ * Headers are only written once the bundle file is OPEN: a file that
+ * vanished between registry lookup and open (eviction race) still gets a
+ * clean JSON 404; an error after headers destroys the response so the
+ * client sees a truncated body, never a silent success.
+ */
+function handleArtifactDownload(
+  manager: JobManager,
+  artifacts: ArtifactStore | undefined,
+  deviceId: string | null,
+  jobId: string,
+  res: ServerResponse,
+): void {
+  try {
+    const owner = requireOwner(deviceId);
+    manager.snapshot(jobId, owner);
+  } catch (error) {
+    const { status, body } = errorResult(error);
+    sendJson(res, status, body);
+    return;
+  }
+
+  const entry = artifacts?.get(jobId);
+  if (entry === undefined) {
+    sendJson(res, 404, {
+      code: "NO_ARTIFACT",
+      message: "job has no downloadable artifact",
+    });
+    return;
+  }
+
+  const file = createReadStream(entry.bundlePath);
+  file.on("open", () => {
+    try {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": entry.byteLength,
+        [HEAD_COMMIT_HEADER]: entry.headCommit,
+      });
+    } catch {
+      file.destroy();
+      return;
+    }
+    file.pipe(res);
+  });
+  file.on("error", () => {
+    if (!res.headersSent) {
+      // Pre-open failure (bundle vanished): a clean JSON 404, same shape as
+      // "no artifact" — the entry is stale, not a different resource state.
+      sendJson(res, 404, {
+        code: "NO_ARTIFACT",
+        message: "artifact bundle is no longer available",
+      });
+    } else {
+      // Mid-flight failure: the only honest signal is a destroyed stream
+      // (content-length was already promised; ending early would look like
+      // a short but complete body to some clients).
+      res.destroy();
+    }
+  });
+  // Client disconnect mid-download: stop reading the file.
+  res.on("close", () => file.destroy());
+  res.on("error", () => file.destroy());
 }
 
 /** Opens (or refuses) the SSE stream for one job. */
@@ -223,6 +319,7 @@ export function statusForCode(code: HfpErrorCode): number {
     case "UNAUTHORIZED":
       return 401;
     case "UNKNOWN_JOB":
+    case "NO_ARTIFACT":
       return 404;
     case "BUSY":
       return 503;

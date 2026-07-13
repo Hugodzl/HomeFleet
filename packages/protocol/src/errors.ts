@@ -7,6 +7,7 @@ import { z } from "zod";
 export const HfpErrorCodeSchema = z.enum([
   "UNAUTHORIZED",
   "UNKNOWN_JOB",
+  "NO_ARTIFACT",
   "UNSUPPORTED_JOB_TYPE",
   "WORKSPACE_UNAVAILABLE",
   "BUSY",

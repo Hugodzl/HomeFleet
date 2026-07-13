@@ -447,12 +447,16 @@ what a red verify run means.
 Gated exactly like the other job endpoints: mTLS plus job ownership (only
 the delegator that submitted the job may fetch its artifact; requests for
 non-owned jobs are answered as unknown, so existence never leaks). The
-response streams a git bundle (`application/octet-stream`) containing
+response streams a git bundle (`application/octet-stream`, with the branch
+tip echoed in an `x-homefleet-head-commit` response header) containing
 **exactly one ref**: `refs/heads/homefleet/<jobId12>`. The endpoint responds
-404 when the job has no artifact (not a write job, not yet terminal, or a
-result with `artifact: null`) and 410 when the artifact existed but has been
-evicted (job retention). The bundle is retained for the job's retention
-window and does not survive a worker restart.
+404 `NO_ARTIFACT` when the job exists but has no artifact (not a write job,
+not yet terminal, or a result with `artifact: null`). An evicted job (job
+retention) is indistinguishable from an unknown one — eviction drops the job
+record itself, and existence-hiding beats status precision — so it answers
+the same 404 `UNKNOWN_JOB` as a job that never existed. The bundle is
+retained for the job's retention window and does not survive a worker
+restart.
 
 #### Delegator obligations on fetch-in
 
@@ -517,6 +521,7 @@ one of:
 | ----------------------- | ----------------------------------------------------------- |
 | `UNAUTHORIZED`          | Peer not paired, or not permitted for this operation        |
 | `UNKNOWN_JOB`           | No job with the given ID                                    |
+| `NO_ARTIFACT`           | Job exists but has no downloadable artifact                 |
 | `UNSUPPORTED_JOB_TYPE`  | Worker does not support this `JobParams` variant            |
 | `WORKSPACE_UNAVAILABLE` | Repo not on the worker's allowlist or otherwise unavailable |
 | `BUSY`                  | Worker at `maxConcurrentJobs`                               |

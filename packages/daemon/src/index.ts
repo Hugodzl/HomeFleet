@@ -191,6 +191,7 @@ export {
   type PairingManagerOptions,
 } from "./pairing/pairing.js";
 export {
+  ArtifactHeadCommitError,
   BUNDLE_UPLOAD_IDLE_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   FingerprintMismatchError,

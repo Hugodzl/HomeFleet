@@ -4,8 +4,9 @@
  * is MockOpenAiEndpoint (the agent's model server); processes, sockets, TLS,
  * and the SSE stream are all real.
  */
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   AgentExecutor,
@@ -31,13 +32,16 @@ import {
   removeTempDataDir,
 } from "../test-fixtures.js";
 import {
+  ArtifactHeadCommitError,
   HfpClient,
   HfpRequestError,
+  HfpResponseTooLargeError,
   type HfpTarget,
   HfpTimeoutError,
 } from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
+import { ArtifactStore } from "../workspace/artifact-store.js";
 import { JobManager, type WorkspaceResolver } from "./job-manager.js";
 import { registerJobRoutes } from "./routes.js";
 
@@ -53,6 +57,7 @@ interface Daemon {
   server: NodeServer;
   client: HfpClient;
   jobManager: JobManager;
+  artifacts: ArtifactStore;
   workspaceDir: string;
   port: number;
   nodeInfo: () => ReturnType<typeof makeNodeInfo>;
@@ -63,6 +68,11 @@ interface DaemonOptions {
   resolveWorkspace?: WorkspaceResolver;
   maxConcurrentJobs?: number;
   maxQueuedJobs?: number;
+  maxRetainedJobs?: number;
+  /** Register the job routes WITHOUT an artifact store (Task 11 not wired). */
+  omitArtifactStore?: boolean;
+  /** Runs before registerJobRoutes: an earlier route shadows a later one. */
+  preRegister?: (server: NodeServer) => void;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -102,7 +112,11 @@ async function createDaemon(
     ...(options.maxQueuedJobs !== undefined
       ? { maxQueuedJobs: options.maxQueuedJobs }
       : {}),
+    ...(options.maxRetainedJobs !== undefined
+      ? { maxRetainedJobs: options.maxRetainedJobs }
+      : {}),
   });
+  const artifacts = new ArtifactStore();
 
   const server = new NodeServer({
     identity,
@@ -112,7 +126,12 @@ async function createDaemon(
     host: HOST,
     port: 0,
   });
-  registerJobRoutes(server, jobManager);
+  options.preRegister?.(server);
+  registerJobRoutes(
+    server,
+    jobManager,
+    options.omitArtifactStore ? undefined : artifacts,
+  );
   const { port } = await server.start();
 
   cleanups.push(async () => {
@@ -130,6 +149,7 @@ async function createDaemon(
     server,
     client: new HfpClient(identity),
     jobManager,
+    artifacts,
     workspaceDir,
     port,
     nodeInfo,
@@ -586,4 +606,282 @@ test("delegating a job type the worker has no executor for is rejected with UNSU
   expect((error as HfpRequestError).hfpError?.code).toBe(
     "UNSUPPORTED_JOB_TYPE",
   );
+});
+
+// --- Artifact download: GET /hfp/v0/jobs/{id}/artifact (v0.2 Task 8) ---
+
+const FAKE_HEAD = "f".repeat(40);
+
+/** Delegates a trivial command job and drains it to a terminal result. */
+async function runTerminalJob(a: Daemon, target: HfpTarget): Promise<string> {
+  const { jobId } = await a.client.delegate(
+    target,
+    commandParams("node", ["-e", "0"]),
+  );
+  await collectStream(a.client, target, jobId);
+  return jobId;
+}
+
+/** Writes `bytes` as a fake bundle file and registers it for `jobId` on `b`. */
+async function registerArtifact(
+  b: Daemon,
+  jobId: string,
+  bytes: Buffer,
+): Promise<string> {
+  const dir = await makeTempDataDir("homefleet-artifact-");
+  cleanups.push(() => removeTempDataDir(dir));
+  const bundlePath = path.join(dir, "job.bundle");
+  await writeFile(bundlePath, bytes);
+  b.artifacts.register(jobId, {
+    bundlePath,
+    headCommit: FAKE_HEAD,
+    byteLength: bytes.length,
+  });
+  return bundlePath;
+}
+
+async function makeDestPath(): Promise<string> {
+  const dir = await makeTempDataDir("homefleet-artifact-dest-");
+  cleanups.push(() => removeTempDataDir(dir));
+  return path.join(dir, "fetched.bundle");
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+const expectHfpError = (
+  thrown: unknown,
+  status: number,
+  code: string,
+): void => {
+  expect(thrown).toBeInstanceOf(HfpRequestError);
+  expect((thrown as HfpRequestError).status).toBe(status);
+  expect((thrown as HfpRequestError).hfpError?.code).toBe(code);
+};
+
+test("artifact download round-trips the bundle byte-identically with the head-commit header", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  const bytes = randomBytes(256 * 1024);
+  await registerArtifact(b, jobId, bytes);
+
+  const destPath = await makeDestPath();
+  const { headCommit } = await a.client.fetchJobArtifact(
+    target,
+    jobId,
+    destPath,
+    { maxBytes: 1024 * 1024 },
+  );
+  expect(headCommit).toBe(FAKE_HEAD);
+  expect(sha256(await readFile(destPath))).toBe(sha256(bytes));
+}, 20_000);
+
+test("non-owner, unknown job, and unpaired peers cannot fetch an artifact", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  const c = await createDaemon("charlie");
+  const d = await createDaemon("delta"); // never paired with b
+  await pairAToB(a, b);
+  await pairAToB(c, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  await registerArtifact(b, jobId, randomBytes(1024));
+
+  // A different paired peer gets the same UNKNOWN_JOB 404 as an absent job:
+  // existence never leaks, and the artifact is not served.
+  const destPath = await makeDestPath();
+  expectHfpError(
+    await c.client
+      .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "UNKNOWN_JOB",
+  );
+  expectHfpError(
+    await a.client
+      .fetchJobArtifact(target, "not-a-job-id", destPath, {
+        maxBytes: 1024 * 1024,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "UNKNOWN_JOB",
+  );
+  expectHfpError(
+    await d.client
+      .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    401,
+    "UNAUTHORIZED",
+  );
+  expect(existsSync(destPath)).toBe(false);
+}, 20_000);
+
+test("a known job with no artifact entry answers 404 NO_ARTIFACT", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  const destPath = await makeDestPath();
+  expectHfpError(
+    await a.client
+      .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "NO_ARTIFACT",
+  );
+  expect(existsSync(destPath)).toBe(false);
+});
+
+test("an evicted job's artifact is indistinguishable from an unknown job (404 UNKNOWN_JOB)", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", {
+    executors: [nodeAllowlist()],
+    maxRetainedJobs: 1,
+  });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const first = await runTerminalJob(a, target);
+  await registerArtifact(b, first, randomBytes(1024));
+  // A second job pushes the retained-jobs cap: the first record is evicted.
+  await runTerminalJob(a, target);
+
+  // The RFC's "410 after eviction" is amended: eviction drops the job record,
+  // so the ownership gate answers the same UNKNOWN_JOB 404 as for an absent
+  // job — existence-hiding beats status precision.
+  const destPath = await makeDestPath();
+  expectHfpError(
+    await a.client
+      .fetchJobArtifact(target, first, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "UNKNOWN_JOB",
+  );
+}, 20_000);
+
+test("routes registered without an artifact store always answer NO_ARTIFACT", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", {
+    executors: [nodeAllowlist()],
+    omitArtifactStore: true,
+  });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  const destPath = await makeDestPath();
+  expectHfpError(
+    await a.client
+      .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "NO_ARTIFACT",
+  );
+});
+
+test("a bundle file that vanished after registration yields a clean error, not a wedged daemon", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  const bundlePath = await registerArtifact(b, jobId, randomBytes(1024));
+  // Eviction race: the file is deleted while the registry entry survives.
+  await rm(bundlePath, { force: true });
+
+  const destPath = await makeDestPath();
+  expectHfpError(
+    await a.client
+      .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1024 * 1024 })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    404,
+    "NO_ARTIFACT",
+  );
+  expect(existsSync(destPath)).toBe(false);
+
+  // The daemon still serves requests after the failed open.
+  expect((await a.client.jobSnapshot(target, jobId)).status).toBe("succeeded");
+});
+
+test("a response exceeding maxBytes aborts with a typed error and cleans up the partial file", async () => {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo", { executors: [nodeAllowlist()] });
+  await pairAToB(a, b);
+  const target = targetOf(b);
+
+  const jobId = await runTerminalJob(a, target);
+  await registerArtifact(b, jobId, randomBytes(64 * 1024));
+
+  const destPath = await makeDestPath();
+  const thrown = await a.client
+    .fetchJobArtifact(target, jobId, destPath, { maxBytes: 1000 })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  expect(thrown).toBeInstanceOf(HfpResponseTooLargeError);
+  expect((thrown as HfpResponseTooLargeError).limitBytes).toBe(1000);
+  expect(existsSync(destPath)).toBe(false);
+}, 20_000);
+
+test("a 200 artifact response without the head-commit header is a typed error", async () => {
+  const a = await createDaemon("alpha");
+  // A misbehaving worker: its artifact route streams bytes but omits the
+  // integrity-anchor header. Registered BEFORE the real routes so it shadows.
+  const b = await createDaemon("bravo", {
+    executors: [nodeAllowlist()],
+    preRegister: (server) => {
+      server.routeStream("GET", "/jobs/:id/artifact", {}, ({ res }) => {
+        const bytes = randomBytes(2048);
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": bytes.length,
+        });
+        res.end(bytes);
+      });
+    },
+  });
+  await pairAToB(a, b);
+
+  const destPath = await makeDestPath();
+  const thrown = await a.client
+    .fetchJobArtifact(targetOf(b), "any-job-id", destPath, {
+      maxBytes: 1024 * 1024,
+    })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  expect(thrown).toBeInstanceOf(ArtifactHeadCommitError);
+  expect(existsSync(destPath)).toBe(false);
 });

@@ -11,7 +11,7 @@
  * long-lived authenticated connections to outlive the revocation.
  */
 import { once } from "node:events";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import os from "node:os";
@@ -48,10 +48,12 @@ import type { z } from "zod";
 import { certFingerprint } from "../identity/fingerprint.js";
 import type { Identity } from "../identity/identity.js";
 import {
+  COMMIT_HASH_RE,
   createBundle,
   isAncestor,
   resolveHeadCommit,
 } from "../workspace/git.js";
+import { HEAD_COMMIT_HEADER } from "../workspace/routes.js";
 import { MAX_BODY_BYTES } from "./limits.js";
 
 /**
@@ -145,6 +147,24 @@ export class HfpResponseTooLargeError extends Error {
     super(`response body exceeded the ${limitBytes}-byte limit; aborting`);
     this.name = "HfpResponseTooLargeError";
     this.limitBytes = limitBytes;
+  }
+}
+
+/**
+ * A 2xx artifact-download response arrived without a usable
+ * `x-homefleet-head-commit` header. That header is the artifact's integrity
+ * anchor (the delegator verifies the fetched bundle's tip against it), so a
+ * response missing it — or carrying a non-40-hex value — is unusable and the
+ * download is refused before a byte is written.
+ */
+export class ArtifactHeadCommitError extends Error {
+  constructor(received: string | undefined) {
+    super(
+      received === undefined
+        ? `artifact response is missing the ${HEAD_COMMIT_HEADER} header`
+        : `artifact response carries an invalid ${HEAD_COMMIT_HEADER} header`,
+    );
+    this.name = "ArtifactHeadCommitError";
   }
 }
 
@@ -482,6 +502,105 @@ export class HfpClient {
   }
 
   /**
+   * `GET /hfp/v0/jobs/{id}/artifact` — download a write-job's bundle to
+   * `destPath` (v0.2 Task 8). The response is BINARY and potentially large,
+   * so it is streamed straight to disk, never buffered: mirrors the
+   * server-side `streamToFileCapped` semantics — the moment more than
+   * `options.maxBytes` arrive, the partial file is deleted, the connection
+   * aborted, and {@link HfpResponseTooLargeError} thrown.
+   *
+   * Returns the bundle's claimed tip from the `x-homefleet-head-commit`
+   * response header; a 2xx response without a valid 40-hex value there is
+   * refused with {@link ArtifactHeadCommitError} (the header is the
+   * integrity anchor the apply step verifies the fetched ref against).
+   * Non-2xx responses throw {@link HfpRequestError}, exactly like
+   * {@link jobSnapshot}. Reuses {@link connectPinned}; the socket is always
+   * destroyed on the way out, and `destPath` never survives a failure.
+   */
+  async fetchJobArtifact(
+    target: HfpTarget,
+    jobId: string,
+    destPath: string,
+    options: { maxBytes: number; idleTimeoutMs?: number },
+  ): Promise<{ headCommit: string }> {
+    const connectTimeoutMs = target.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const idleTimeoutMs =
+      options.idleTimeoutMs ?? BUNDLE_UPLOAD_IDLE_TIMEOUT_MS;
+    const { socket } = await this.connectPinned({
+      host: target.host,
+      port: target.port,
+      expectedDeviceId: target.expectedDeviceId,
+      timeoutMs: connectTimeoutMs,
+    });
+    let fileStarted = false;
+    try {
+      // Re-arm the inactivity timer for the (possibly long) download; a large
+      // bundle on a slow link must not be mistaken for a stall.
+      socket.removeAllListeners("timeout");
+      socket.setTimeout(idleTimeoutMs, () => {
+        socket.destroy(
+          new HfpTimeoutError(target.host, target.port, idleTimeoutMs),
+        );
+      });
+
+      const response = await new Promise<IncomingMessage>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            createConnection: () => socket,
+            method: "GET",
+            path: `${HFP_PATH_PREFIX}/jobs/${encodeURIComponent(jobId)}/artifact`,
+            headers: { host: `${target.host}:${target.port}` },
+          },
+          resolve,
+        );
+        req.on("error", reject);
+        req.end();
+      });
+      response.on("error", () => {});
+
+      const status = response.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        // Error bodies are small JSON HfpErrors: surface the same typed
+        // error family as jobSnapshot.
+        const bodyText = await readCappedBody(response, MAX_BODY_BYTES);
+        throw buildRequestError(status, bodyText);
+      }
+
+      const headCommit = firstHeaderValue(response.headers[HEAD_COMMIT_HEADER]);
+      if (headCommit === undefined || !COMMIT_HASH_RE.test(headCommit)) {
+        throw new ArtifactHeadCommitError(headCommit);
+      }
+
+      fileStarted = true;
+      const outcome = await streamResponseToFileCapped(
+        response,
+        destPath,
+        options.maxBytes,
+      );
+      if (outcome === "too-large") {
+        throw new HfpResponseTooLargeError(options.maxBytes);
+      }
+      return { headCommit };
+    } catch (error) {
+      if (fileStarted) {
+        // Never leave a partial (or oversized) download behind. The socket
+        // teardown below aborts the transfer; the write stream is already
+        // closed by streamResponseToFileCapped before it settles.
+        await rm(destPath, { force: true, maxRetries: 3 });
+      }
+      if (
+        !(error instanceof HfpTimeoutError) &&
+        socket.errored instanceof HfpTimeoutError
+      ) {
+        throw socket.errored;
+      }
+      throw error;
+    } finally {
+      socket.destroy();
+    }
+  }
+
+  /**
    * `GET /hfp/v0/jobs/{id}/events` — stream a delegated job's events over SSE.
    *
    * Reuses {@link connectPinned} (the fingerprint pin is NOT reimplemented):
@@ -812,6 +931,81 @@ function flushSseEvent(dataLines: string[]): JobEvent | undefined {
     return undefined;
   }
   return JobEventSchema.parse(JSON.parse(dataLines.join("\n")));
+}
+
+/** First value of a possibly-repeated response header. */
+function firstHeaderValue(
+  value: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Streams `response` to `filePath`, honoring backpressure, resolving
+ * `"too-large"` the instant the received bytes exceed `maxBytes` (the caller
+ * deletes the partial file and aborts the socket). The write stream is fully
+ * closed before this settles — on Windows an open handle would block the
+ * caller's cleanup `rm`. Mirrors the server-side `streamToFileCapped`.
+ */
+function streamResponseToFileCapped(
+  response: IncomingMessage,
+  filePath: string,
+  maxBytes: number,
+): Promise<"ok" | "too-large"> {
+  return new Promise((resolve, reject) => {
+    const out = createWriteStream(filePath);
+    let size = 0;
+    let settled = false;
+    // Settle only once the file handle is closed (destroy always emits
+    // 'close'), so the caller can immediately rm the partial file.
+    const settleOnClose = (outcome: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      response.pause();
+      out.once("close", outcome);
+      out.destroy();
+    };
+    out.on("error", (error) => {
+      settleOnClose(() => reject(error));
+    });
+    response.on("error", (error) => {
+      settleOnClose(() => reject(error));
+    });
+    response.on("data", (chunk: Buffer) => {
+      if (settled) {
+        return;
+      }
+      size += chunk.length;
+      if (size > maxBytes) {
+        settleOnClose(() => resolve("too-large"));
+        return;
+      }
+      if (!out.write(chunk)) {
+        response.pause();
+        out.once("drain", () => {
+          if (!settled) {
+            response.resume();
+          }
+        });
+      }
+    });
+    response.on("end", () => {
+      if (settled) {
+        return;
+      }
+      // Do NOT mark settled yet: if the final flush fails, the 'error'
+      // handler above must still be able to reject (the end callback only
+      // runs on a clean finish).
+      out.end(() => {
+        if (!settled) {
+          settled = true;
+          resolve("ok");
+        }
+      });
+    });
+  });
 }
 
 /** Reads up to `limit` bytes of a (small, error) response body as text. */

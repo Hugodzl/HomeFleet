@@ -4,6 +4,7 @@ import { HfpErrorCodeSchema, HfpErrorSchema } from "./errors.js";
 const ALL_CODES = [
   "UNAUTHORIZED",
   "UNKNOWN_JOB",
+  "NO_ARTIFACT",
   "UNSUPPORTED_JOB_TYPE",
   "WORKSPACE_UNAVAILABLE",
   "BUSY",
