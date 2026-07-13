@@ -349,14 +349,21 @@ test("a finish_task call with unparseable JSON args falls through as an error to
   );
 });
 
-test("finish_task args that are valid JSON but fail the schema fail the job with INTERNAL", async () => {
+test("finish_task without a usable summary fails the job with INTERNAL", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([
     {
       kind: "tool_calls",
-      // summary is required; the loop has already ended the conversation, so
-      // there is no way to hand the model an error and continue.
-      toolCalls: [{ name: "finish_task", arguments: { commitMessage: 42 } }],
+      // A non-string summary leaves the completion report unusable, and the
+      // loop has already ended the conversation, so there is no way to hand
+      // the model an error and continue — even a good commitMessage cannot
+      // save the call.
+      toolCalls: [
+        {
+          name: "finish_task",
+          arguments: { commitMessage: "Good message", summary: 42 },
+        },
+      ],
     },
   ]);
   const finalize = fakeFinalize();
@@ -368,7 +375,82 @@ test("finish_task args that are valid JSON but fail the schema fail the job with
   expect(result.status).toBe("failed");
   expect(result.error?.code).toBe("INTERNAL");
   expect(result.error?.message).toContain("finish_task");
+  expect(result.error?.message).toContain("summary");
   expect(finalize.calls).toHaveLength(0);
+});
+
+test("a junk commitMessage beside a valid summary falls back instead of failing the job", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([
+    {
+      kind: "tool_calls",
+      // commitMessage is a field the executor synthesizes anyway, so a
+      // wrong-typed one must not discard completed work.
+      toolCalls: [
+        {
+          name: "finish_task",
+          arguments: { commitMessage: 42, summary: "did the thing" },
+        },
+      ],
+    },
+  ]);
+  const finalize = fakeFinalize();
+  const executor = makeExecutor(endpoint, finalize.fn);
+
+  const result = await executor.execute(params(), harness(ws).context);
+
+  assertValid(result);
+  expect(result.status).toBe("succeeded");
+  expect(result.summary).toBe("did the thing");
+  expect(finalize.calls).toHaveLength(1);
+  expect(finalize.calls[0]?.commitMessage).toBe(
+    "Add a friendly greeting to the README.",
+  );
+});
+
+test("finish_task without a commitMessage falls back to the instructions' first line", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([
+    {
+      kind: "tool_calls",
+      toolCalls: [{ name: "finish_task", arguments: { summary: "small fix" } }],
+    },
+  ]);
+  const finalize = fakeFinalize();
+  const executor = makeExecutor(endpoint, finalize.fn);
+
+  const result = await executor.execute(params(), harness(ws).context);
+
+  assertValid(result);
+  expect(result.status).toBe("succeeded");
+  expect(finalize.calls[0]?.commitMessage).toBe(
+    "Add a friendly greeting to the README.",
+  );
+});
+
+test("a whitespace-only commitMessage falls back to the instructions' first line", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([
+    {
+      kind: "tool_calls",
+      toolCalls: [
+        {
+          name: "finish_task",
+          arguments: { commitMessage: "   ", summary: "done" },
+        },
+      ],
+    },
+  ]);
+  const finalize = fakeFinalize();
+  const executor = makeExecutor(endpoint, finalize.fn);
+
+  const result = await executor.execute(params(), harness(ws).context);
+
+  assertValid(result);
+  expect(result.status).toBe("succeeded");
+  expect(finalize.calls[0]?.commitMessage).toBe(
+    "Add a friendly greeting to the README.",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -586,6 +668,9 @@ test("a throwing finalize fails the job with INTERNAL naming finalize, and verif
   expect(result.error?.code).toBe("INTERNAL");
   expect(result.error?.message).toContain("finalize");
   expect(result.error?.message).toContain("bundle-out exploded");
+  // The operator-facing hint: work may sit committed in the workspace even
+  // though no artifact could be delivered.
+  expect(result.error?.message).toContain("committed but undelivered");
   expect(result.verify).toBeUndefined();
 });
 
@@ -667,6 +752,41 @@ test("verify runs AFTER finalize, in the workspace directory", async () => {
   expect(result.verify?.exitCode).toBe(0);
   expect(result.verify?.outputTail).toContain("finalized-first");
 });
+
+test("an abort during the verify spawn does not destroy the committed work", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([{ kind: "content", content: "done" }]);
+  const controller = new AbortController();
+  // finalize succeeds, then schedules the abort to land while the verify
+  // child is still sleeping — after the commit, before verify can finish.
+  const finalize = fakeFinalize(async (input) => {
+    setTimeout(() => controller.abort(), 100);
+    return makeArtifact(input.commitMessage);
+  });
+  const executor = makeExecutor(endpoint, finalize.fn, {
+    commandAllowlist: nodeAllowlist,
+  });
+  const { context } = harness(ws, { signal: controller.signal });
+
+  const result = await executor.execute(
+    params({
+      verifyCommand: {
+        name: "node",
+        args: ["-e", "setTimeout(() => {}, 30000);"],
+      },
+    }),
+    context,
+  );
+
+  assertValid(result);
+  // The work was committed before the abort arrived: the job stays
+  // succeeded and the artifact survives; only the verify report shows the
+  // kill (null exit code). Guards against a future "cancel always yields
+  // canceled" refactor destroying deliverable artifacts.
+  expect(result.status).toBe("succeeded");
+  expect(result.artifact).not.toBeNull();
+  expect(result.verify).toMatchObject({ name: "node", exitCode: null });
+}, 15_000);
 
 // ---------------------------------------------------------------------------
 // 6. context-window floor

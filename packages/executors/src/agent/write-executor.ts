@@ -66,7 +66,12 @@ export const VERIFY_OUTPUT_TAIL_CHARS = 8192;
 export const MIN_VERIFY_TIMEOUT_MS = 1000;
 
 const FinishTaskArgsSchema = z.object({
-  commitMessage: z.string().optional(),
+  // A junk commitMessage (wrong type) is absorbed into `undefined` so it
+  // falls into the fallback seam the executor has anyway (absent/blank →
+  // instructions' first line) — completed work must not be discarded over a
+  // field the executor can synthesize itself. summary stays strict: without
+  // a usable summary the completion report is meaningless.
+  commitMessage: z.string().optional().catch(undefined),
   summary: z.string(),
 });
 
@@ -130,9 +135,9 @@ function writeSystemPrompt(
     "relevant files first, then apply changes with edit_file (exact-match " +
     "replace) or write_file (create or replace a whole file). When the " +
     "change is complete, call finish_task with a short summary and a " +
-    "one-line commit message describing the change. If there is nothing " +
-    "worth keeping, do NOT call finish_task — reply with a plain-text " +
-    "explanation instead and the job ends without a commit."
+    "one-line commit message describing the change. If you have made no " +
+    "changes worth keeping, reply with a plain-text explanation instead " +
+    "of calling finish_task."
   );
 }
 
@@ -343,16 +348,17 @@ export class WriteExecutor implements Executor<"write"> {
     switch (outcome.kind) {
       case "terminal_call": {
         // Only finish_task is terminal, and the loop hands over its args
-        // JSON-parsed but unvalidated. Invalid args cannot go back to the
-        // model — the conversation is already over — so they fail the job
-        // before any commit happens.
+        // JSON-parsed but unvalidated. A bad commitMessage is absorbed by
+        // the schema's catch (fallback seam); a missing/non-string summary
+        // cannot go back to the model — the conversation is already over —
+        // so it fails the job before any commit happens.
         const parsed = FinishTaskArgsSchema.safeParse(
           outcome.terminalCall.args,
         );
         if (!parsed.success) {
           return failed(
             "INTERNAL",
-            `the model called finish_task with invalid arguments: ${parsed.error.message}`,
+            `the model called finish_task with invalid arguments: ${z.prettifyError(parsed.error)}`,
             stats(),
           );
         }
@@ -436,7 +442,7 @@ export class WriteExecutor implements Executor<"write"> {
           code: "INTERNAL",
           message: `finalize failed after the model declared done: ${
             error instanceof Error ? error.message : String(error)
-          }`,
+          }; the workspace may contain a committed but undelivered change`,
         },
       };
     }
