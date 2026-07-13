@@ -443,8 +443,20 @@ export interface WorkerGit {
  *   Harmless on POSIX, where the limit does not exist. (M8 two-machine rig find.)
  */
 function workerConfig(worker: WorkerGit): string[] {
+  return delegatorConfig(worker.hooksPath);
+}
+
+/**
+ * DELEGATING side (write-job apply): the SAME four security pins as
+ * {@link workerConfig}, taken as a bare hooks-dir path because the delegator
+ * has no {@link WorkerGit} — it runs against the user's own source repo.
+ * Exported for `artifact-apply.ts`, the only code that fetches worker-produced
+ * content into a user repository; workerConfig delegates here so the two
+ * sides can never drift apart.
+ */
+export function delegatorConfig(hooksPath: string): string[] {
   return [
-    `core.hooksPath=${worker.hooksPath}`,
+    `core.hooksPath=${hooksPath}`,
     "protocol.ext.allow=never",
     "fetch.recurseSubmodules=false",
     "core.longpaths=true",
