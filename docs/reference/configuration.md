@@ -190,7 +190,7 @@ loopback enforcement as `mcp`.
 
 ## `executors`
 
-Which job executors this node offers. **Both sub-keys are optional and absent
+Which job executors this node offers. **All sub-keys are optional and absent
 by default — a fresh install runs no executors and accepts no jobs** until one
 is configured (fail closed, same posture as `workspace.allowedRepoIds`).
 
@@ -198,6 +198,7 @@ is configured (fail closed, same posture as `workspace.allowedRepoIds`).
 | --------- | --------------------------- | ---------- | ------- |
 | `command` | object, optional (see below) | *(absent)* | Runs allowlisted shell commands (tests, builds). No LLM involved. |
 | `agent`   | object, optional (see below) | *(absent)* | Runs a minimal tool-calling agent loop against an OpenAI-compatible endpoint (recon jobs). |
+| `write`   | object, optional (see below) | *(absent)* | Runs code-**writing** jobs: the model edits the synced repo in an isolated worktree and the result comes back to the delegator as a reviewable branch. Absent means write jobs are rejected (`UNSUPPORTED_JOB_TYPE`) — fail closed. |
 
 ### `executors.command`
 
@@ -219,6 +220,77 @@ Example: `{ "allowlist": { "pnpm": {}, "pytest": { "executable": "python -m pyte
 | `endpoint.contextWindow`     | integer ≥ 16384               | *(required)* | Context window served by the endpoint, in tokens. The 16384 floor is enforced at config-parse time: smaller windows silently break agentic tool use (truncated histories, dropped tool schemas), so the daemon refuses to start rather than fail confusingly mid-job. |
 | `commandAllowlist`           | same shape as `executors.command.allowlist`, optional | *(absent, tool disabled)* | Allowlist for the agent's own `run_command` tool. Absent disables that tool entirely (the agent can still `read_file`/`grep`/`glob`/`list_dir`). |
 
+### `executors.write`
+
+Code-writing delegation (v0.2). The shape is the same as `executors.agent`
+today — an OpenAI-compatible endpoint plus an optional command allowlist —
+but it is a **separate section on purpose** (the two may diverge), and the
+default is the same fail-closed absence: a node without `executors.write`
+rejects write jobs outright.
+
+| Key                          | Type                        | Default    | Meaning |
+| ---------------------------- | ---------------------------- | ---------- | ------- |
+| `endpoint.baseUrl`           | URL string                   | *(required)* | OpenAI-compatible base URL; `/chat/completions` is appended by the executor. |
+| `endpoint.apiKey`            | string, optional              | *(none)*   | Sent as a Bearer token when present. |
+| `endpoint.model`             | string                        | *(required)* | The model write jobs run on. Unlike recon, a write task carries no per-job `model` override in this milestone — the endpoint default is always used. |
+| `endpoint.contextWindow`     | integer ≥ 16384               | *(required)* | Same floor and rationale as `executors.agent.endpoint.contextWindow`. |
+| `commandAllowlist`           | same shape as `executors.command.allowlist`, optional | *(absent, disabled)* | Gates **two** things: the write agent's own `run_command` tool, and the task's optional `verifyCommand` (a job naming a verify command not on this list fails with `COMMAND_NOT_ALLOWED` before any model traffic). Absent disables both. |
+
+The write agent works in a dedicated, throwaway worktree of the synced repo
+(never a shared checkout), its `write_file`/`edit_file` tools are contained
+to that worktree, and anything at or under `.git` is refused — a model
+cannot plant hooks or rewrite git metadata. When the model declares the task
+done, the daemon commits **everything changed in the worktree** as author
+`HomeFleet Worker <worker@<deviceId8>.invalid>` and bundles the result; the
+optional `verifyCommand` then runs **report-only** (its exit code and output
+tail ride back in the job result; a failing verify never fails the job).
+
+> **Warning — `git` in the allowlist.** Putting `git` (or any tool that can
+> drive git) in `commandAllowlist` lets the model mint **its own commits**
+> inside the worktree. Finalize bundles whatever is committed under the job
+> branch, so those commits are delivered verbatim — the
+> `HomeFleet Worker <worker@<deviceId8>.invalid>` identity guarantee covers
+> only the finalize commit, not commits the model made itself. Leave `git`
+> off the allowlist unless you have thought this through.
+
+## Write-job artifacts and the `homefleet/` branch namespace
+
+What happens to a write job's output, on both sides:
+
+- **On the worker**, a succeeded write job's artifact (a git bundle) is kept
+  on disk until its job record is evicted — retention is governed by
+  [`jobs.maxRetainedJobs`](#jobs) — or until the daemon restarts (an
+  in-flight write job never survives a restart; startup purges every
+  leftover job worktree and bundle, and sweeps any leaked
+  `refs/heads/homefleet/*` ref from the worker's cache). After eviction, the
+  job — and its artifact download — answers `UNKNOWN_JOB` (HTTP 404),
+  indistinguishable from a job that never existed.
+- **On the delegator**, the artifact is fetched and applied lazily: the
+  first `job_result` call that sees the terminal result downloads the bundle
+  and lands it in your mapped repo (`repos`) as the branch
+  `homefleet/<jobId12>`. Poll `job_result` reasonably soon after a write job
+  finishes — wait past the worker's retention window and the artifact is
+  gone with the record.
+- **The namespace promise:** HomeFleet only ever writes refs under
+  `refs/heads/homefleet/` in your repo, and even there only ever creates or
+  fast-forwards a ref (anything else is refused as `NON_FAST_FORWARD`). Your own
+  branches, your working tree, and your index are **never touched**. Review
+  a delivered change with the exact command `job_result` returns:
+  `git diff <baseCommit>...homefleet/<jobId12>` — then merge it, cherry-pick
+  it, or delete the branch.
+- **A successful apply is remembered** (per daemon process) and never
+  re-runs: `job_result` keeps reporting `artifactStatus: "applied"` without
+  re-downloading. That means "applied" can be *stale* if you deleted the
+  branch afterwards — deleting the branch is how you discard the change, and
+  HomeFleet will not resurrect it.
+- **A failed apply is not a dead end**: `job_result` reports
+  `artifactStatus: "failed"` with an `applyError` reason, and the **next**
+  `job_result` call retries the fetch-and-apply. One edge case: a
+  `REF_MISMATCH` failure detected *after* the fetch can leave the reserved
+  ref pointing at an unverified tip — the error message says so explicitly
+  and tells you to inspect or delete that branch; HomeFleet never
+  auto-deletes refs in your repo, even on its own error paths.
+
 ## `models`
 
 | Key      | Type                            | Default | Meaning |
@@ -235,7 +307,7 @@ that module's single source of truth rather than duplicated here).
 | ------------------- | ---------------- | ------------------ | ------- |
 | `maxConcurrentJobs` | integer ≥ 1, optional | `2`            | Jobs this node runs at once before rejecting new ones with `BUSY`. |
 | `maxQueuedJobs`     | integer ≥ 1, optional | `64`           | Jobs held pending a free execution slot before further submissions are rejected. |
-| `maxRetainedJobs`   | integer ≥ 1, optional | `256`          | Terminal jobs kept in memory (for `job_status`/`job_result` polling) before the oldest are evicted. |
+| `maxRetainedJobs`   | integer ≥ 1, optional | `256`          | Terminal jobs kept in memory (for `job_status`/`job_result` polling) before the oldest are evicted. Evicting a write job also deletes its artifact bundle from disk — see [Write-job artifacts](#write-job-artifacts-and-the-homefleet-branch-namespace). |
 
 ## `repos`
 

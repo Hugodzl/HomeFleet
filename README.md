@@ -47,7 +47,7 @@ HomeFleet is that missing thin layer:
 └────────────────────────────────────────┘      └────────────────────────────────────────┘
 ```
 
-One daemon per machine. On your machine it faces your agent as an MCP server; on workers it executes delegated jobs — read-only repo recon driven by a local model, or allowlisted commands (test suites, builds). Code travels as git bundles; nothing needs a shared remote.
+One daemon per machine. On your machine it faces your agent as an MCP server; on workers it executes delegated jobs — read-only repo recon driven by a local model, allowlisted commands (test suites, builds), or code-**writing** tasks that come back as reviewable `homefleet/<id>` branches (v0.2). Code travels as git bundles; nothing needs a shared remote.
 
 ## v0.1 scope
 
@@ -56,7 +56,11 @@ One daemon per machine. On your machine it faces your agent as an MCP server; on
 - Live node list with capability info, job status/streaming, cancellation
 - Windows-first reference setup; code is cross-platform TypeScript
 
-Explicit non-goals for v0.1: code-*writing* delegation, GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
+Explicit non-goals for v0.1: code-*writing* delegation (added in v0.2, below), GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
+
+## v0.2: code-writing delegation
+
+Workers can now *write* code, not just read it. Configure `executors.write` on a worker (an OpenAI-compatible endpoint plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo, the daemon commits the result as `HomeFleet Worker`, and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
 
 ## Quickstart
 
@@ -233,7 +237,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → code-writing delegation (diffs/branches back) → packaging & painless install → dashboard (read-only, then fleet management) → per-node model catalog → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md).
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → packaging & painless install → dashboard (read-only, then fleet management) → per-node model catalog → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md).
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
