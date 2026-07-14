@@ -15,7 +15,12 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { MockOpenAiEndpoint, type MockScriptEntry } from "@homefleet/executors";
-import { JobResultSchema, jobId12, writeBranchName } from "@homefleet/protocol";
+import {
+  JobResultSchema,
+  type JobStatus,
+  jobId12,
+  writeBranchName,
+} from "@homefleet/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, expect, test } from "vitest";
@@ -227,7 +232,9 @@ async function pollResult(
 async function pollStatus(
   mcp: Client,
   jobId: string,
-  status: string,
+  // The protocol union, not string: a typo'd status is a compile error
+  // instead of a 60s poll timeout.
+  status: JobStatus,
   timeoutMs = 60_000,
 ): Promise<void> {
   await waitUntil(
@@ -657,6 +664,9 @@ test("a scripted .git write attempt is refused as a tool error: the job still co
     deletions: 0,
   });
   const branchRef = `refs/heads/${writeBranchName(jobId)}`;
+  // The git helper trims, so the blob's trailing newline is not asserted
+  // here; exact-byte content fidelity is proven by the E2E test's readFile
+  // checkout above — keep that heavier check, it is not redundant with this.
   expect(await src.git(["show", `${branchRef}:safe.txt`])).toBe("legit change");
   const treePaths = await src.git(["ls-tree", "-r", "--name-only", branchRef]);
   expect(treePaths.split("\n").sort()).toEqual(["data.txt", "safe.txt"]);

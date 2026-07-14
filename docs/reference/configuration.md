@@ -46,8 +46,9 @@ same machine (each instance needs its own data directory).
 
 ## Full example
 
-A realistic **worker** config: offers an agent executor against a local
-OpenAI-compatible server, a small command allowlist, and accepts one repo.
+A realistic **worker** config: offers agent (recon), command, and write
+executors against a local OpenAI-compatible server, a small command
+allowlist, and accepts one repo.
 
 ```json
 {
@@ -67,6 +68,16 @@ OpenAI-compatible server, a small command allowlist, and accepts one repo.
       "allowlist": {
         "pnpm": {},
         "git": {}
+      }
+    },
+    "write": {
+      "endpoint": {
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "model": "qwen3.5-9b",
+        "contextWindow": 32768
+      },
+      "commandAllowlist": {
+        "pnpm": {}
       }
     }
   },
@@ -250,8 +261,11 @@ tail ride back in the job result; a failing verify never fails the job).
 > inside the worktree. Finalize bundles whatever is committed under the job
 > branch, so those commits are delivered verbatim — the
 > `HomeFleet Worker <worker@<deviceId8>.invalid>` identity guarantee covers
-> only the finalize commit, not commits the model made itself. Leave `git`
-> off the allowlist unless you have thought this through.
+> only the finalize commit, not commits the model made itself. The mirror
+> case is just as surprising: if the model commits *everything* itself and
+> leaves a clean tree, finalize has nothing to commit, produces no bundle,
+> and those commits are dropped rather than delivered. Leave `git` off the
+> allowlist unless you have thought this through.
 
 ## Write-job artifacts and the `homefleet/` branch namespace
 

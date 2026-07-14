@@ -250,6 +250,12 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
   await worker.stop();
 }, 90_000);
 
+// This test owns the APPLY LIFECYCLE (sabotage -> failed apply -> retry ->
+// no re-download once applied). The delivery assertions (author identity,
+// diffStat fidelity, checked-out content, untouched source tree) and the
+// hostile/edge set (cancel, verify failure, eviction, .git writes, restart)
+// live in workspace/write-delegation.integration.test.ts — don't duplicate
+// them here.
 test("write delegation end to end: delegate through MCP, lazy apply on job_result, retry after a failed apply, no re-download once applied", async () => {
   const src = await makeSrcRepo("original contents\n");
   const gitIn = async (args: string[]): Promise<string> => {

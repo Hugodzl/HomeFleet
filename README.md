@@ -56,11 +56,11 @@ One daemon per machine. On your machine it faces your agent as an MCP server; on
 - Live node list with capability info, job status/streaming, cancellation
 - Windows-first reference setup; code is cross-platform TypeScript
 
-Explicit non-goals for v0.1: code-*writing* delegation (added in v0.2, below), GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
+Explicit non-goals for v0.1: code-**writing** delegation (added in v0.2, below), GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
 
 ## v0.2: code-writing delegation
 
-Workers can now *write* code, not just read it. Configure `executors.write` on a worker (an OpenAI-compatible endpoint plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo, the daemon commits the result as `HomeFleet Worker`, and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
+Workers can now *write* code, not just read it. Configure `executors.write` on a worker (an OpenAI-compatible endpoint plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
 
 ## Quickstart
 
