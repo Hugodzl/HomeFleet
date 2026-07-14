@@ -13,129 +13,21 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
 import path from "node:path";
-import { MockOpenAiEndpoint, type MockScriptEntry } from "@homefleet/executors";
+import type { MockScriptEntry } from "@homefleet/executors";
 import { JobResultSchema, writeBranchName } from "@homefleet/protocol";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, expect, test } from "vitest";
-import { DaemonConfigSchema } from "./config/config.js";
+import { expect, test } from "vitest";
 import { resolveDataDir } from "./config/paths.js";
 import { Daemon } from "./daemon.js";
 import { JobResultOutputSchema, ListNodesOutputSchema } from "./mcp/tools.js";
-import { makeTempDataDir, removeTempDataDir } from "./test-fixtures.js";
-import { ok, resolveHeadCommit, runGit } from "./workspace/git.js";
+import {
+  createDaemonHarness,
+  delegatorOverrides,
+  HOST,
+  writeExecutorConfig,
+} from "./test-fixtures.js";
+import { ok, runGit } from "./workspace/git.js";
 
-const HOST = "127.0.0.1";
-const cleanups: Array<() => Promise<void>> = [];
-
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) {
-    await cleanup();
-  }
-});
-
-async function tempDir(prefix: string): Promise<string> {
-  const dir = await makeTempDataDir(prefix);
-  cleanups.push(() => removeTempDataDir(dir));
-  return dir;
-}
-
-/**
- * Raw config input for a test daemon: loopback HFP + MCP + control on
- * ephemeral ports (two daemons run side by side in this suite; the config
- * schema's default control port is a single fixed value, so leaving it
- * unset would collide the moment a second daemon tried to bind it), live
- * discovery channels OFF (no real mDNS/UDP in tests — Windows CI and
- * parallel suites would cross-talk), everything else from `overrides`.
- */
-function testConfig(name: string, overrides: Record<string, unknown> = {}) {
-  return DaemonConfigSchema.parse({
-    node: { name },
-    hfp: { host: HOST, port: 0 },
-    mcp: { host: HOST, port: 0 },
-    control: { host: HOST, port: 0 },
-    discovery: { mdnsEnabled: false, udpEnabled: false },
-    ...overrides,
-  });
-}
-
-async function startDaemon(
-  name: string,
-  overrides: Record<string, unknown> = {},
-): Promise<Daemon> {
-  const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR: await tempDir(`homefleet-daemon-${name}-`),
-  });
-  const daemon = new Daemon({ dataDir, config: testConfig(name, overrides) });
-  await daemon.start();
-  cleanups.push(() => daemon.stop());
-  return daemon;
-}
-
-/** Pairs `a` -> `b`: afterwards `b` trusts `a` and `a` trusts (pins) `b`. */
-async function pair(a: Daemon, b: Daemon): Promise<void> {
-  const { code } = b.pairingManager.beginPairing();
-  const { response, serverDeviceId } = await a.hfpClient.pair(
-    { host: HOST, port: b.hfpPort },
-    code,
-    a.nodeInfo(),
-  );
-  expect(response.accepted).toBe(true);
-  await a.trustStore.add({
-    deviceId: serverDeviceId,
-    name: response.nodeInfo?.name ?? "peer",
-    addedAt: new Date().toISOString(),
-  });
-}
-
-/** Connects a real MCP client to a daemon's HTTP front. */
-async function connectMcp(daemon: Daemon): Promise<Client> {
-  const client = new Client({ name: "daemon-test", version: "0.0.0" });
-  const transport = new StreamableHTTPClientTransport(
-    new URL(`http://${HOST}:${daemon.mcpPort}/mcp`),
-  );
-  await client.connect(transport);
-  cleanups.push(async () => {
-    await client.close();
-    await transport.close();
-  });
-  return client;
-}
-
-/** A tiny source repo with one file, committed; returns path + head commit. */
-async function makeSrcRepo(
-  contents: string,
-): Promise<{ repoPath: string; head: string }> {
-  const repoPath = await tempDir("homefleet-daemon-src-");
-  const run = async (args: string[]): Promise<void> => {
-    const r = await runGit(args, { cwd: repoPath, timeoutMs: 30_000 });
-    if (!ok(r)) {
-      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
-    }
-  };
-  await run(["init", "--quiet"]);
-  await run(["config", "user.email", "t@example.com"]);
-  await run(["config", "user.name", "Test"]);
-  await run(["config", "commit.gpgsign", "false"]);
-  await writeFile(path.join(repoPath, "data.txt"), contents);
-  await run(["add", "-A"]);
-  await run(["commit", "--quiet", "-m", "c1"]);
-  return { repoPath, head: await resolveHeadCommit(repoPath, 30_000) };
-}
-
-async function waitUntil(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 15_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error("waitUntil timed out");
-}
+const h = createDaemonHarness({ tempPrefix: "homefleet-daemon" });
 
 /** Reserves an ephemeral port by binding and releasing it (test-only race). */
 async function reserveLoopbackPort(): Promise<number> {
@@ -169,10 +61,10 @@ function portAccepts(port: number): Promise<boolean> {
 test("two assembled daemons: pair, delegate_task auto-syncs the workspace through the MCP HTTP front, clean stop", async () => {
   // The source repo exists BEFORE either daemon starts, since it is now the
   // delegator's config (not a manual pre-sync) that makes it available.
-  const src = await makeSrcRepo("hello from the assembled daemon");
+  const src = await h.makeSrcRepo("hello from the assembled daemon");
 
   // Worker: offers a command executor (node) and allows repo-x syncs.
-  const worker = await startDaemon("worker", {
+  const { daemon: worker } = await h.startDaemon("worker", {
     executors: {
       command: { allowlist: { node: { executable: process.execPath } } },
     },
@@ -182,19 +74,13 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
   // (the deterministic stand-in for mDNS/UDP on a test box); maps "repo-x" to
   // the source repo's local path so delegate_task can sync it on its own
   // (M9 Unit 6 — no manual pre-sync from the test).
-  const delegator = await startDaemon("delegator", {
-    discovery: {
-      mdnsEnabled: false,
-      udpEnabled: false,
-      staticNodes: [
-        { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
-      ],
-    },
-    repos: [{ repoId: "repo-x", path: src.repoPath }],
-  });
-  await pair(delegator, worker);
+  const { daemon: delegator } = await h.startDaemon(
+    "delegator",
+    delegatorOverrides(worker, src),
+  );
+  await h.pair(delegator, worker);
 
-  const mcp = await connectMcp(delegator);
+  const mcp = await h.connectMcp(delegator);
 
   // list_nodes: the worker is reachable with its REAL config-driven NodeInfo.
   const listed = await mcp.callTool({ name: "list_nodes", arguments: {} });
@@ -231,7 +117,7 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
 
   // Poll job_result through the MCP front until the job is terminal.
   let structured: unknown;
-  await waitUntil(async () => {
+  await h.waitUntil(async () => {
     const r = await mcp.callTool({ name: "job_result", arguments: { jobId } });
     structured = r.structuredContent;
     return JobResultOutputSchema.parse(r.structuredContent).result !== null;
@@ -257,14 +143,7 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
 // live in workspace/write-delegation.integration.test.ts — don't duplicate
 // them here.
 test("write delegation end to end: delegate through MCP, lazy apply on job_result, retry after a failed apply, no re-download once applied", async () => {
-  const src = await makeSrcRepo("original contents\n");
-  const gitIn = async (args: string[]): Promise<string> => {
-    const r = await runGit(args, { cwd: src.repoPath, timeoutMs: 30_000 });
-    if (!ok(r)) {
-      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
-    }
-    return r.stdout.trim();
-  };
+  const src = await h.makeSrcRepo("original contents\n");
 
   // The worker's write model: one edit with DISTINCTIVE content, then done.
   const script: MockScriptEntry[] = [
@@ -293,34 +172,18 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
       ],
     },
   ];
-  const mock = await MockOpenAiEndpoint.start(script);
-  cleanups.push(() => mock.close());
+  const mock = await h.startMockEndpoint(script);
 
-  const worker = await startDaemon("worker", {
-    executors: {
-      write: {
-        endpoint: {
-          baseUrl: mock.baseUrl,
-          model: "test-model",
-          contextWindow: 32_768,
-        },
-        commandAllowlist: { node: { executable: process.execPath } },
-      },
-    },
+  const { daemon: worker } = await h.startDaemon("worker", {
+    executors: { write: writeExecutorConfig(mock) },
     workspace: { allowedRepoIds: ["repo-x"] },
   });
-  const delegator = await startDaemon("delegator", {
-    discovery: {
-      mdnsEnabled: false,
-      udpEnabled: false,
-      staticNodes: [
-        { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
-      ],
-    },
-    repos: [{ repoId: "repo-x", path: src.repoPath }],
-  });
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  const { daemon: delegator } = await h.startDaemon(
+    "delegator",
+    delegatorOverrides(worker, src),
+  );
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator);
 
   const delegated = await mcp.callTool({
     name: "delegate_task",
@@ -345,14 +208,14 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
   // commit (a new commit on the source repo's main line, made after the
   // sync), so the non-forced fetch refuses it as non-fast-forward.
   await writeFile(path.join(src.repoPath, "diverge.txt"), "diverged\n");
-  await gitIn(["add", "-A"]);
-  await gitIn(["commit", "--quiet", "-m", "diverge"]);
-  const divergedTip = await gitIn(["rev-parse", "HEAD"]);
-  await gitIn(["update-ref", branchRef, divergedTip]);
+  await src.git(["add", "-A"]);
+  await src.git(["commit", "--quiet", "-m", "diverge"]);
+  const divergedTip = await src.git(["rev-parse", "HEAD"]);
+  await src.git(["update-ref", branchRef, divergedTip]);
 
   // Poll job_result until terminal; the terminal call attempts the apply.
   let structured: unknown;
-  await waitUntil(async () => {
+  await h.waitUntil(async () => {
     const r = await mcp.callTool({ name: "job_result", arguments: { jobId } });
     structured = r.structuredContent;
     return JobResultOutputSchema.parse(r.structuredContent).result !== null;
@@ -382,10 +245,10 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
   expect(firstTerminal.artifactStatus).toBe("failed");
   expect(firstTerminal.applyError).toMatch(/NON_FAST_FORWARD/);
   expect(firstTerminal.reviewCommand).toBeUndefined();
-  expect(await gitIn(["rev-parse", branchRef])).toBe(divergedTip);
+  expect(await src.git(["rev-parse", branchRef])).toBe(divergedTip);
 
   // Clear the saboteur ref; the NEXT job_result call retries and applies.
-  await gitIn(["update-ref", "-d", branchRef]);
+  await src.git(["update-ref", "-d", branchRef]);
   const retried = await mcp.callTool({
     name: "job_result",
     arguments: { jobId },
@@ -399,17 +262,17 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
 
   // The branch now exists at EXACTLY the artifact's head, carrying the
   // model's file with the model's content, committed under its message.
-  expect(await gitIn(["rev-parse", branchRef])).toBe(artifact.headCommit);
-  expect(await gitIn(["show", `${branchRef}:src/added.txt`])).toBe(
+  expect(await src.git(["rev-parse", branchRef])).toBe(artifact.headCommit);
+  expect(await src.git(["show", `${branchRef}:src/added.txt`])).toBe(
     "written by the worker model",
   );
-  expect(await gitIn(["log", "-1", "--format=%s", branchRef])).toBe(
+  expect(await src.git(["log", "-1", "--format=%s", branchRef])).toBe(
     "feat: add added.txt",
   );
 
   // No re-download once applied: delete the ref, ask again — the registry
   // remembers the apply, so nothing re-fetches or re-creates the ref.
-  await gitIn(["update-ref", "-d", branchRef]);
+  await src.git(["update-ref", "-d", branchRef]);
   const remembered = await mcp.callTool({
     name: "job_result",
     arguments: { jobId },
@@ -427,7 +290,7 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
 
 test("a legacy pre-0.1 workspace cache dir surfaces its warning through onDiagnostic", async () => {
   const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR: await tempDir("homefleet-daemon-legacy-"),
+    HOMEFLEET_DATA_DIR: await h.tempDir("homefleet-daemon-legacy-"),
   });
   // A pre-0.1 cache layout leftover: a full-64-hex-named repo dir under the
   // default cache root (<dataDir>/workspaces). The WorkspaceStore logs an
@@ -440,11 +303,11 @@ test("a legacy pre-0.1 workspace cache dir surfaces its warning through onDiagno
   const diagnostics: string[] = [];
   const daemon = new Daemon({
     dataDir,
-    config: testConfig("legacy"),
+    config: h.testConfig("legacy"),
     onDiagnostic: (message) => diagnostics.push(message),
   });
   await daemon.start();
-  cleanups.push(() => daemon.stop());
+  h.onCleanup(() => daemon.stop());
 
   const legacyWarnings = diagnostics.filter((m) =>
     m.includes("legacy workspace cache layout"),
@@ -468,18 +331,18 @@ test("partial start failure unwinds: MCP port in use rejects start() and release
       resolve(address.port);
     });
   });
-  cleanups.push(() => new Promise((resolve) => blocker.close(() => resolve())));
+  h.onCleanup(() => new Promise((resolve) => blocker.close(() => resolve())));
 
   // A known HFP port (reserved then released) so we can probe it afterwards —
   // with `hfp.port: 0` the failed daemon's bound port would be unknowable.
   const hfpPort = await reserveLoopbackPort();
 
   const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR: await tempDir("homefleet-daemon-unwind-"),
+    HOMEFLEET_DATA_DIR: await h.tempDir("homefleet-daemon-unwind-"),
   });
   const daemon = new Daemon({
     dataDir,
-    config: testConfig("unwind", {
+    config: h.testConfig("unwind", {
       hfp: { host: HOST, port: hfpPort },
       mcp: { host: HOST, port: blockedPort },
     }),

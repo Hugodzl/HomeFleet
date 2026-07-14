@@ -21,58 +21,12 @@
  * control-API HTTP ports via `ControlClient` (the same client the CLI uses),
  * not the daemon's in-process getters.
  */
-import { afterEach, expect, test } from "vitest";
+import { expect, test } from "vitest";
 import { ControlClient } from "./cli/control-client.js";
-import { DaemonConfigSchema } from "./config/config.js";
-import { resolveDataDir } from "./config/paths.js";
-import { Daemon } from "./daemon.js";
-import { makeTempDataDir, removeTempDataDir } from "./test-fixtures.js";
+import type { Daemon } from "./daemon.js";
+import { createDaemonHarness, HOST } from "./test-fixtures.js";
 
-const HOST = "127.0.0.1";
-const cleanups: Array<() => Promise<void>> = [];
-
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) {
-    await cleanup();
-  }
-});
-
-async function tempDir(prefix: string): Promise<string> {
-  const dir = await makeTempDataDir(prefix);
-  cleanups.push(() => removeTempDataDir(dir));
-  return dir;
-}
-
-/**
- * Raw config input for a test daemon: loopback HFP + MCP + control on
- * ephemeral ports, and every live discovery channel OFF — no mDNS, no UDP,
- * and (unlike daemon.integration.test.ts) no `staticNodes` entry either, so
- * NOTHING besides the known-nodes seeding under test can make the peer
- * reachable.
- */
-function testConfig(name: string, overrides: Record<string, unknown> = {}) {
-  return DaemonConfigSchema.parse({
-    node: { name },
-    hfp: { host: HOST, port: 0 },
-    mcp: { host: HOST, port: 0 },
-    control: { host: HOST, port: 0 },
-    discovery: { mdnsEnabled: false, udpEnabled: false },
-    ...overrides,
-  });
-}
-
-async function startDaemon(
-  name: string,
-  overrides: Record<string, unknown> = {},
-): Promise<Daemon> {
-  const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR: await tempDir(`homefleet-daemon-control-${name}-`),
-  });
-  const daemon = new Daemon({ dataDir, config: testConfig(name, overrides) });
-  await daemon.start();
-  cleanups.push(() => daemon.stop());
-  return daemon;
-}
+const h = createDaemonHarness({ tempPrefix: "homefleet-daemon-control" });
 
 /** A real control-API client pointed at `daemon`'s bound control port. */
 function controlClientFor(daemon: Daemon): ControlClient {
@@ -82,7 +36,7 @@ function controlClientFor(daemon: Daemon): ControlClient {
 test("pairing through the real control-API HTTP surface seeds known-nodes, so the peer is immediately reachable with live discovery fully disabled", async () => {
   // Worker: offers a command executor (so its NodeInfo carries the
   // execution role/capability the assertions below check propagated).
-  const worker = await startDaemon("worker", {
+  const { daemon: worker } = await h.startDaemon("worker", {
     executors: {
       command: { allowlist: { node: { executable: process.execPath } } },
     },
@@ -90,7 +44,7 @@ test("pairing through the real control-API HTTP surface seeds known-nodes, so th
   // Delegator: no executors, no discovery config of any kind (not even a
   // staticNodes entry) — its only path to the worker's endpoint is
   // whatever pairing itself seeds.
-  const delegator = await startDaemon("delegator");
+  const { daemon: delegator } = await h.startDaemon("delegator");
 
   const workerControl = controlClientFor(worker);
   const delegatorControl = controlClientFor(delegator);

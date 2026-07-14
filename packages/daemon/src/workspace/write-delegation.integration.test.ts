@@ -14,178 +14,30 @@
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { MockOpenAiEndpoint, type MockScriptEntry } from "@homefleet/executors";
+import type { MockScriptEntry } from "@homefleet/executors";
 import {
   JobResultSchema,
   type JobStatus,
   jobId12,
   writeBranchName,
 } from "@homefleet/protocol";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, expect, test } from "vitest";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { expect, test } from "vitest";
 import type { z } from "zod";
-import { DaemonConfigSchema } from "../config/config.js";
-import { resolveDataDir } from "../config/paths.js";
-import { Daemon } from "../daemon.js";
 import { JobResultOutputSchema } from "../mcp/tools.js";
-import { makeTempDataDir, removeTempDataDir } from "../test-fixtures.js";
+import {
+  createDaemonHarness,
+  delegatorOverrides,
+  HOST,
+  REPO_ID,
+  writeExecutorConfig,
+} from "../test-fixtures.js";
 import { HfpRequestError } from "../transport/client.js";
-import { ok, resolveHeadCommit, runGit } from "./git.js";
+import { ok, runGit } from "./git.js";
 import { pathExists } from "./workspace-init.js";
 import { repoKey } from "./workspace-store.js";
 
-const HOST = "127.0.0.1";
-const REPO_ID = "repo-x";
-const cleanups: Array<() => Promise<void>> = [];
-
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) {
-    await cleanup();
-  }
-});
-
-async function tempDir(prefix: string): Promise<string> {
-  const dir = await makeTempDataDir(prefix);
-  cleanups.push(() => removeTempDataDir(dir));
-  return dir;
-}
-
-function testConfig(name: string, overrides: Record<string, unknown> = {}) {
-  return DaemonConfigSchema.parse({
-    node: { name },
-    hfp: { host: HOST, port: 0 },
-    mcp: { host: HOST, port: 0 },
-    control: { host: HOST, port: 0 },
-    discovery: { mdnsEnabled: false, udpEnabled: false },
-    ...overrides,
-  });
-}
-
-/**
- * Starts an assembled daemon on ephemeral loopback ports. Returns the data
- * dir too — the hostile-set assertions look at the worker's on-disk
- * workspace cache (`<dataDir>/workspaces/...`). `dataDirOverride` lets the
- * restart test bring a SECOND daemon up over the SAME data dir.
- */
-async function startDaemon(
-  name: string,
-  overrides: Record<string, unknown> = {},
-  dataDirOverride?: string,
-): Promise<{ daemon: Daemon; dataDir: string }> {
-  const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR:
-      dataDirOverride ?? (await tempDir(`homefleet-wd-${name}-`)),
-  });
-  const daemon = new Daemon({ dataDir, config: testConfig(name, overrides) });
-  await daemon.start();
-  cleanups.push(() => daemon.stop());
-  return { daemon, dataDir };
-}
-
-/** Pairs `a` -> `b`: afterwards `b` trusts `a` and `a` trusts (pins) `b`. */
-async function pair(a: Daemon, b: Daemon): Promise<void> {
-  const { code } = b.pairingManager.beginPairing();
-  const { response, serverDeviceId } = await a.hfpClient.pair(
-    { host: HOST, port: b.hfpPort },
-    code,
-    a.nodeInfo(),
-  );
-  expect(response.accepted).toBe(true);
-  await a.trustStore.add({
-    deviceId: serverDeviceId,
-    name: response.nodeInfo?.name ?? "peer",
-    addedAt: new Date().toISOString(),
-  });
-}
-
-/** Connects a real MCP client to a daemon's HTTP front. */
-async function connectMcp(daemon: Daemon): Promise<Client> {
-  const client = new Client({ name: "wd-test", version: "0.0.0" });
-  const transport = new StreamableHTTPClientTransport(
-    new URL(`http://${HOST}:${daemon.mcpPort}/mcp`),
-  );
-  await client.connect(transport);
-  cleanups.push(async () => {
-    await client.close();
-    await transport.close();
-  });
-  return client;
-}
-
-interface SrcRepo {
-  repoPath: string;
-  head: string;
-  git: (args: string[]) => Promise<string>;
-}
-
-/** A tiny source repo with one committed file (`data.txt`). */
-async function makeSrcRepo(contents: string): Promise<SrcRepo> {
-  const repoPath = await tempDir("homefleet-wd-src-");
-  const git = async (args: string[]): Promise<string> => {
-    const r = await runGit(args, { cwd: repoPath, timeoutMs: 30_000 });
-    if (!ok(r)) {
-      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
-    }
-    return r.stdout.trim();
-  };
-  await git(["init", "--quiet"]);
-  await git(["config", "user.email", "t@example.com"]);
-  await git(["config", "user.name", "Test"]);
-  await git(["config", "commit.gpgsign", "false"]);
-  await writeFile(path.join(repoPath, "data.txt"), contents);
-  await git(["add", "-A"]);
-  await git(["commit", "--quiet", "-m", "c1"]);
-  return { repoPath, git, head: await resolveHeadCommit(repoPath, 30_000) };
-}
-
-async function waitUntil(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 15_000,
-  label = "condition",
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`waitUntil timed out: ${label}`);
-}
-
-/** The worker-side write executor config against a scripted mock endpoint. */
-async function startMockEndpoint(
-  script: MockScriptEntry[],
-): Promise<MockOpenAiEndpoint> {
-  const mock = await MockOpenAiEndpoint.start(script);
-  cleanups.push(() => mock.close());
-  return mock;
-}
-
-function writeExecutorConfig(mock: MockOpenAiEndpoint) {
-  return {
-    endpoint: {
-      baseUrl: mock.baseUrl,
-      model: "test-model",
-      contextWindow: 32_768,
-    },
-    commandAllowlist: { node: { executable: process.execPath } },
-  };
-}
-
-function delegatorOverrides(worker: Daemon, src: SrcRepo) {
-  return {
-    discovery: {
-      mdnsEnabled: false,
-      udpEnabled: false,
-      staticNodes: [
-        { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
-      ],
-    },
-    repos: [{ repoId: REPO_ID, path: src.repoPath }],
-  };
-}
+const h = createDaemonHarness({ tempPrefix: "homefleet-wd" });
 
 /** Delegates a write task through the MCP front; returns the jobId. */
 async function delegateWrite(
@@ -213,7 +65,7 @@ async function pollResult(
   timeoutMs = 60_000,
 ): Promise<z.infer<typeof JobResultOutputSchema>> {
   let structured: unknown;
-  await waitUntil(
+  await h.waitUntil(
     async () => {
       const r = await mcp.callTool({
         name: "job_result",
@@ -237,7 +89,7 @@ async function pollStatus(
   status: JobStatus,
   timeoutMs = 60_000,
 ): Promise<void> {
-  await waitUntil(
+  await h.waitUntil(
     async () => {
       const r = await mcp.callTool({
         name: "job_status",
@@ -266,7 +118,7 @@ async function dirNames(dir: string): Promise<string[]> {
 }
 
 test("write delegation E2E: branch at headCommit with the scripted edits, matching diffStat, worker author identity, untouched source tree; failing verify is report-only", async () => {
-  const src = await makeSrcRepo("original contents\n");
+  const src = await h.makeSrcRepo("original contents\n");
   const refsBefore = await src.git(["for-each-ref", "--format=%(refname)"]);
 
   const script: MockScriptEntry[] = [
@@ -303,18 +155,18 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
       ],
     },
   ];
-  const mock = await startMockEndpoint(script);
+  const mock = await h.startMockEndpoint(script);
 
-  const { daemon: worker } = await startDaemon("worker", {
+  const { daemon: worker } = await h.startDaemon("worker", {
     executors: { write: writeExecutorConfig(mock) },
     workspace: { allowedRepoIds: [REPO_ID] },
   });
-  const { daemon: delegator } = await startDaemon(
+  const { daemon: delegator } = await h.startDaemon(
     "delegator",
     delegatorOverrides(worker, src),
   );
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator, "wd-test");
 
   const jobId = await delegateWrite(mcp, worker.deviceId, {
     instructions: "Add src/added.txt and edit data.txt.",
@@ -394,7 +246,7 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
   });
 
   // Checked-out content of the branch carries the scripted edits verbatim.
-  const checkoutDir = path.join(await tempDir("homefleet-wd-co-"), "co");
+  const checkoutDir = path.join(await h.tempDir("homefleet-wd-co-"), "co");
   await src.git([
     "worktree",
     "add",
@@ -415,10 +267,10 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
 }, 120_000);
 
 test("cancel mid-write: canceled result with no artifact, and the worker's jobs dir is left with no worktree or bundle", async () => {
-  const src = await makeSrcRepo("original contents\n");
+  const src = await h.makeSrcRepo("original contents\n");
   // The model's very first response is held back longer than the test would
   // ever wait — the job can only end via cancellation.
-  const mock = await startMockEndpoint([
+  const mock = await h.startMockEndpoint([
     {
       kind: "tool_calls",
       toolCalls: [
@@ -431,19 +283,19 @@ test("cancel mid-write: canceled result with no artifact, and the worker's jobs 
     },
   ]);
 
-  const { daemon: worker, dataDir: workerDataDir } = await startDaemon(
+  const { daemon: worker, dataDir: workerDataDir } = await h.startDaemon(
     "worker",
     {
       executors: { write: writeExecutorConfig(mock) },
       workspace: { allowedRepoIds: [REPO_ID] },
     },
   );
-  const { daemon: delegator } = await startDaemon(
+  const { daemon: delegator } = await h.startDaemon(
     "delegator",
     delegatorOverrides(worker, src),
   );
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator, "wd-test");
 
   const jobId = await delegateWrite(mcp, worker.deviceId, {
     instructions: "Stalls forever; will be canceled.",
@@ -452,7 +304,7 @@ test("cancel mid-write: canceled result with no artifact, and the worker's jobs 
   // The job is running and its dedicated write worktree is on disk.
   const jobsRoot = path.join(workerRepoRoot(workerDataDir), "jobs");
   await pollStatus(mcp, jobId, "running");
-  await waitUntil(
+  await h.waitUntil(
     async () => (await dirNames(jobsRoot)).includes(jobId12(jobId)),
     15_000,
     "write worktree materialized",
@@ -476,7 +328,7 @@ test("cancel mid-write: canceled result with no artifact, and the worker's jobs 
 
   // The release path reclaimed the worktree, and no bundle was ever minted:
   // nothing is left under <repoRoot>/jobs.
-  await waitUntil(
+  await h.waitUntil(
     async () => (await dirNames(jobsRoot)).length === 0,
     15_000,
     "jobs dir empty after release",
@@ -484,8 +336,8 @@ test("cancel mid-write: canceled result with no artifact, and the worker's jobs 
 }, 90_000);
 
 test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artifact bundle, and both job_result and the artifact route answer UNKNOWN_JOB", async () => {
-  const src = await makeSrcRepo("original contents\n");
-  const mock = await startMockEndpoint([
+  const src = await h.makeSrcRepo("original contents\n");
+  const mock = await h.startMockEndpoint([
     {
       kind: "tool_calls",
       toolCalls: [
@@ -506,7 +358,7 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
     },
   ]);
 
-  const { daemon: worker, dataDir: workerDataDir } = await startDaemon(
+  const { daemon: worker, dataDir: workerDataDir } = await h.startDaemon(
     "worker",
     {
       executors: {
@@ -517,12 +369,12 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
       jobs: { maxRetainedJobs: 1 },
     },
   );
-  const { daemon: delegator } = await startDaemon(
+  const { daemon: delegator } = await h.startDaemon(
     "delegator",
     delegatorOverrides(worker, src),
   );
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator, "wd-test");
 
   // Job 1 (write) runs to success, but its artifact is NEVER applied — the
   // test polls job_status only, so the bundle just sits registered on the
@@ -557,7 +409,7 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
     jobId: string;
   };
   await pollStatus(mcp, secondJobId, "succeeded");
-  await waitUntil(
+  await h.waitUntil(
     async () => !(await pathExists(bundlePath)),
     15_000,
     "evicted bundle deleted",
@@ -574,7 +426,7 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
   expect(JSON.stringify(evicted.content)).toContain("UNKNOWN_JOB");
 
   const destPath = path.join(
-    await tempDir("homefleet-wd-dl-"),
+    await h.tempDir("homefleet-wd-dl-"),
     "post-eviction.bundle",
   );
   const download = delegator.hfpClient.fetchJobArtifact(
@@ -592,8 +444,8 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
 }, 120_000);
 
 test("a scripted .git write attempt is refused as a tool error: the job still completes and the hook file is absent from the artifact branch", async () => {
-  const src = await makeSrcRepo("original contents\n");
-  const mock = await startMockEndpoint([
+  const src = await h.makeSrcRepo("original contents\n");
+  const mock = await h.startMockEndpoint([
     {
       kind: "tool_calls",
       toolCalls: [
@@ -629,16 +481,16 @@ test("a scripted .git write attempt is refused as a tool error: the job still co
     },
   ]);
 
-  const { daemon: worker } = await startDaemon("worker", {
+  const { daemon: worker } = await h.startDaemon("worker", {
     executors: { write: writeExecutorConfig(mock) },
     workspace: { allowedRepoIds: [REPO_ID] },
   });
-  const { daemon: delegator } = await startDaemon(
+  const { daemon: delegator } = await h.startDaemon(
     "delegator",
     delegatorOverrides(worker, src),
   );
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator, "wd-test");
 
   const jobId = await delegateWrite(mcp, worker.deviceId, {
     instructions: "Plant a hook, then write safe.txt.",
@@ -677,8 +529,8 @@ test("a scripted .git write attempt is refused as a tool error: the job still co
 }, 120_000);
 
 test("restart after a mid-write shutdown: the assembled daemon's init purges the jobs dir and sweeps leaked homefleet refs", async () => {
-  const src = await makeSrcRepo("original contents\n");
-  const mock = await startMockEndpoint([
+  const src = await h.makeSrcRepo("original contents\n");
+  const mock = await h.startMockEndpoint([
     {
       kind: "tool_calls",
       toolCalls: [
@@ -695,16 +547,16 @@ test("restart after a mid-write shutdown: the assembled daemon's init purges the
     executors: { write: writeExecutorConfig(mock) },
     workspace: { allowedRepoIds: [REPO_ID] },
   };
-  const { daemon: worker, dataDir: workerDataDir } = await startDaemon(
+  const { daemon: worker, dataDir: workerDataDir } = await h.startDaemon(
     "worker",
     workerOverrides,
   );
-  const { daemon: delegator } = await startDaemon(
+  const { daemon: delegator } = await h.startDaemon(
     "delegator",
     delegatorOverrides(worker, src),
   );
-  await pair(delegator, worker);
-  const mcp = await connectMcp(delegator);
+  await h.pair(delegator, worker);
+  const mcp = await h.connectMcp(delegator, "wd-test");
 
   const workerDeviceId = worker.deviceId;
   const jobId = await delegateWrite(mcp, workerDeviceId, {
@@ -714,7 +566,7 @@ test("restart after a mid-write shutdown: the assembled daemon's init purges the
   const jobsRoot = path.join(repoRoot, "jobs");
   const bareRepo = path.join(repoRoot, "repo.git");
   await pollStatus(mcp, jobId, "running");
-  await waitUntil(
+  await h.waitUntil(
     async () => (await dirNames(jobsRoot)).includes(jobId12(jobId)),
     15_000,
     "write worktree materialized",
@@ -741,7 +593,7 @@ test("restart after a mid-write shutdown: the assembled daemon's init purges the
   // Restart: a FRESH Daemon over the SAME data dir. start() awaits the
   // workspace store's init, so once it returns, the purge + sweep have run
   // through the assembled daemon.
-  const { daemon: restarted } = await startDaemon(
+  const { daemon: restarted } = await h.startDaemon(
     "worker",
     workerOverrides,
     workerDataDir,
