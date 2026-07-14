@@ -130,7 +130,9 @@ removed immediately after bundling. Size is capped by the existing
 
 **Artifact endpoint.** New route `GET /jobs/:id/artifact` on the node
 service: mTLS + owner-gated exactly like `result`, streams the bundle,
-404 when the job has no artifact, 410 after eviction.
+404 `NO_ARTIFACT` when the job has no bundle and 404 `UNKNOWN_JOB` when the
+job is absent, non-owned, or evicted (eviction is indistinguishable from
+never-existed).
 
 **Fetch-in (delegator, automatic).** On job completion the delegating daemon
 fetches the artifact and applies it in one attempt:
@@ -174,7 +176,7 @@ not `baseRef` — the ref may have moved locally since delegation).
 - Integration (single machine, N daemons): delegate a write task → branch
   appears in the source repo with the expected content and diffstat; cancel
   mid-write leaves no worktree behind; verify-command reporting; artifact
-  410 after eviction.
+  404 `UNKNOWN_JOB` after eviction.
 - Real-model smoke on the rig (human-gated, benchmark devlog): tower's
   Qwen3.6-35B on a scoped task in this repo; success/failure rates recorded
   honestly.
