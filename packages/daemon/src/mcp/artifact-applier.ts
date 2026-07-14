@@ -20,7 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import type { WriteArtifact } from "@homefleet/protocol";
 import type { HfpTarget } from "../transport/client.js";
-import { applyWriteArtifact } from "../workspace/artifact-apply.js";
+import { ApplyError, applyWriteArtifact } from "../workspace/artifact-apply.js";
 
 /**
  * The one HfpClient method this module needs (HfpClient satisfies it
@@ -90,7 +90,11 @@ export function createArtifactApplier(
         { maxBytes: options.maxBundleBytes },
       );
       if (headCommit !== artifact.headCommit) {
-        throw new Error(
+        // Typed like every other apply refusal (the download's advertised
+        // tip disagrees with the artifact's claim = REF_MISMATCH), so the
+        // MCP surface renders the uniform "CODE: message" reason.
+        throw new ApplyError(
+          "REF_MISMATCH",
           `the worker's artifact download claims head ${headCommit} but the ` +
             `job result claims ${artifact.headCommit}; refusing to apply an ` +
             "artifact the worker cannot describe consistently",

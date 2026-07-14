@@ -299,7 +299,9 @@ function argsSummaryFor(tool: AgentTool | undefined, rawArgs: string): string {
   const record = parsed as Record<string, unknown>;
   const redacted: Record<string, unknown> = {};
   for (const key of keep) {
-    if (key in record) {
+    // Object.hasOwn, not `in`: model-controlled args must never match
+    // prototype-chain keys (the same hygiene as safeSpawn's allowlist).
+    if (Object.hasOwn(record, key)) {
       redacted[key] = record[key];
     }
   }

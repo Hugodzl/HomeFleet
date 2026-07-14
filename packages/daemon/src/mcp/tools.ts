@@ -482,8 +482,16 @@ export function registerHomeFleetTools(
    * remembered apply (delegation registry) answers WITHOUT re-downloading;
    * a FAILED apply is reported (never a tool error — the job result itself
    * is valid) and simply retried on the next call.
+   *
+   * CONCURRENCY: MCP clients may legally parallelize calls, and two
+   * overlapping `job_result`s racing git's ref lock could otherwise report
+   * contradictory surfaces (one "failed", its sibling "applied"). The whole
+   * computation therefore runs single-flight per jobId — overlapping
+   * callers share ONE fetch+apply and report the same outcome. The gate
+   * lives on the delegation registry, the cross-request state (the MCP
+   * HTTP front builds a fresh server per request).
    */
-  const writeArtifactSurface = async (
+  const writeArtifactSurface = (
     jobId: string,
     route: DelegationRoute,
     result: JobResult,
@@ -491,57 +499,58 @@ export function registerHomeFleetTools(
     artifactStatus: ArtifactStatus;
     reviewCommand?: string;
     applyError?: string;
-  }> => {
-    const remembered = delegations.appliedArtifact(jobId);
-    if (remembered !== undefined) {
-      return {
-        artifactStatus: "applied",
-        reviewCommand: reviewCommandFor(remembered),
-      };
-    }
-    const artifact: WriteArtifact | null | undefined = result.artifact;
-    if (
-      result.status !== "succeeded" ||
-      artifact === null ||
-      artifact === undefined
-    ) {
-      // Clean tree (artifact: null) or a failed/canceled job: nothing to
-      // fetch or apply — by the result schema's rules, committed work is
-      // never delivered from a non-succeeded job.
-      return { artifactStatus: "none" };
-    }
-    // Fail closed, like delegate_task's sync gate: the artifact only ever
-    // lands in a repo THIS daemon has mapped for the job's repoId.
-    const repoPath = repoResolver.resolveRepoPath(route.repoId);
-    if (repoPath === undefined) {
-      return {
-        artifactStatus: "failed",
-        applyError:
-          `this daemon has no local repo mapped to "${route.repoId}"; ` +
-          "restore the entry in this daemon's config repos list, then call " +
-          "job_result again to retry the apply",
-      };
-    }
-    try {
-      const { branchName } = await applyArtifact({
-        target: targetFor(route),
-        jobId,
-        artifact,
-        repoPath,
-      });
-      const applied = { branchName, baseCommit: artifact.baseCommit };
-      delegations.recordApplied(jobId, applied);
-      return {
-        artifactStatus: "applied",
-        reviewCommand: reviewCommandFor(applied),
-      };
-    } catch (error) {
-      return {
-        artifactStatus: "failed",
-        applyError: describeApplyFailure(error),
-      };
-    }
-  };
+  }> =>
+    delegations.singleFlightApply(jobId, async () => {
+      const remembered = delegations.appliedArtifact(jobId);
+      if (remembered !== undefined) {
+        return {
+          artifactStatus: "applied" as const,
+          reviewCommand: reviewCommandFor(remembered),
+        };
+      }
+      const artifact: WriteArtifact | null | undefined = result.artifact;
+      if (
+        result.status !== "succeeded" ||
+        artifact === null ||
+        artifact === undefined
+      ) {
+        // Clean tree (artifact: null) or a failed/canceled job: nothing to
+        // fetch or apply — by the result schema's rules, committed work is
+        // never delivered from a non-succeeded job.
+        return { artifactStatus: "none" as const };
+      }
+      // Fail closed, like delegate_task's sync gate: the artifact only ever
+      // lands in a repo THIS daemon has mapped for the job's repoId.
+      const repoPath = repoResolver.resolveRepoPath(route.repoId);
+      if (repoPath === undefined) {
+        return {
+          artifactStatus: "failed" as const,
+          applyError:
+            `this daemon has no local repo mapped to "${route.repoId}"; ` +
+            "restore the entry in this daemon's config repos list, then call " +
+            "job_result again to retry the apply",
+        };
+      }
+      try {
+        const { branchName } = await applyArtifact({
+          target: targetFor(route),
+          jobId,
+          artifact,
+          repoPath,
+        });
+        const applied = { branchName, baseCommit: artifact.baseCommit };
+        delegations.recordApplied(jobId, applied);
+        return {
+          artifactStatus: "applied" as const,
+          reviewCommand: reviewCommandFor(applied),
+        };
+      } catch (error) {
+        return {
+          artifactStatus: "failed" as const,
+          applyError: describeApplyFailure(error),
+        };
+      }
+    });
 
   server.registerTool(
     "list_nodes",
@@ -709,7 +718,9 @@ export function registerHomeFleetTools(
         "If the job is still queued or running, result is null. For a " +
         "succeeded write job this also fetches the artifact and applies it " +
         "into the local repo as a refs/heads/homefleet/ branch, reporting " +
-        "artifactStatus and (when applied) the git diff reviewCommand.",
+        "artifactStatus and (when applied) the git diff reviewCommand. A " +
+        "successful apply is remembered and never re-runs, so 'applied' can " +
+        "be stale if the branch was deleted afterwards.",
       inputSchema: JobIdInputShape,
       outputSchema: JobResultOutputSchema.shape,
     },

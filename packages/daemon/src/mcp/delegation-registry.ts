@@ -12,7 +12,10 @@
  * artifact has been fetched and applied into the local repo, the entry
  * remembers it so a repeated `job_result` call reports `applied` WITHOUT
  * re-downloading the bundle. A FAILED apply is deliberately not recorded —
- * the next `job_result` call simply retries.
+ * the next `job_result` call simply retries. OVERLAPPING calls share one
+ * in-flight apply ({@link DelegationRegistry.singleFlightApply}), so two
+ * concurrent `job_result`s can never race git and report contradictory
+ * outcomes.
  *
  * State is bounded (mirroring the M3/M5 discipline): past
  * {@link MAX_TRACKED_DELEGATIONS} entries the oldest is evicted. A `Map`
@@ -57,6 +60,13 @@ interface DelegationEntry {
 
 export class DelegationRegistry {
   private readonly entries = new Map<string, DelegationEntry>();
+  /**
+   * In-flight apply computations, for {@link singleFlightApply}. Kept
+   * SEPARATE from {@link entries}: flights are transient (deleted when they
+   * settle) and bounded by the number of concurrently-executing MCP calls,
+   * so they need no cap or eviction of their own.
+   */
+  private readonly applyFlights = new Map<string, Promise<unknown>>();
 
   /** Number of tracked delegations. */
   get size(): number {
@@ -105,5 +115,30 @@ export class DelegationRegistry {
   appliedArtifact(jobId: string): AppliedArtifact | undefined {
     const applied = this.entries.get(jobId)?.applied;
     return applied === undefined ? undefined : { ...applied };
+  }
+
+  /**
+   * Single-flight gate for the per-job apply computation: overlapping
+   * callers for one jobId share ONE `run()` (they all await — and report —
+   * the same outcome), and the slot is freed when it settles, so a later
+   * call starts a fresh run (which is exactly the failed-apply retry
+   * semantics). Lives on the registry because the registry is the
+   * CROSS-REQUEST state: the MCP HTTP front builds a fresh McpServer per
+   * request, so any per-server bookkeeping would never see the sibling call.
+   *
+   * The unchecked cast is sound as long as every caller uses one result
+   * type per jobId — true today: `job_result`'s write surface is the only
+   * call site.
+   */
+  singleFlightApply<T>(jobId: string, run: () => Promise<T>): Promise<T> {
+    const existing = this.applyFlights.get(jobId);
+    if (existing !== undefined) {
+      return existing as Promise<T>;
+    }
+    const flight = (async () => run())().finally(() => {
+      this.applyFlights.delete(jobId);
+    });
+    this.applyFlights.set(jobId, flight);
+    return flight;
   }
 }

@@ -156,6 +156,46 @@ test("write-tool tool_call events carry path-only argsSummary — file content n
   }
 });
 
+test("unparseable or non-object args on a write tool fail closed to '{}' — never the raw text", async () => {
+  const secretish = "not json { SECRET-LEAK-CHECK";
+  const endpoint = await startEndpoint([
+    {
+      kind: "tool_calls",
+      toolCalls: [{ name: "write_file", argumentsRaw: secretish }],
+    },
+    {
+      kind: "tool_calls",
+      // Valid JSON but not an object: the allowlist has nothing to pick.
+      toolCalls: [{ name: "write_file", argumentsRaw: '"just a string"' }],
+    },
+    { kind: "content", content: "done" },
+  ]);
+  const events: ExecutorEventPayload[] = [];
+
+  const outcome = await runToolLoop({
+    client: new OpenAiClient({ baseUrl: endpoint.baseUrl }),
+    model: "test-model",
+    systemPrompt: "system prompt",
+    userPrompt: "user prompt",
+    tools: [writeFileTool],
+    budgets: { maxToolCalls: 10, maxWallMs: 30_000 },
+    // Never touched: both calls die in argument parsing before any fs work.
+    toolContext: { workspaceDir: "unused-by-failing-args" },
+    emit: (event) => events.push(event),
+    signal: new AbortController().signal,
+  });
+  expect(outcome.kind).toBe("content");
+
+  const toolCalls = events.filter((event) => event.type === "tool_call");
+  expect(toolCalls).toHaveLength(2);
+  for (const event of toolCalls) {
+    if (event.type !== "tool_call") {
+      throw new Error("unreachable");
+    }
+    expect(event.argsSummary).toBe("{}");
+  }
+});
+
 test("read-only tool tool_call events keep the full raw-args summary", async () => {
   const marker = "grep-pattern-XYZZY";
   const endpoint = await startEndpoint([

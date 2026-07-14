@@ -12,7 +12,10 @@ import path from "node:path";
 import type { WriteArtifact } from "@homefleet/protocol";
 import { expect, test, vi } from "vitest";
 import type { HfpTarget } from "../transport/client.js";
-import type { ApplyWriteArtifactInput } from "../workspace/artifact-apply.js";
+import {
+  ApplyError,
+  type ApplyWriteArtifactInput,
+} from "../workspace/artifact-apply.js";
 import {
   type ArtifactFetchClient,
   createArtifactApplier,
@@ -104,20 +107,26 @@ test("apply fetches with the configured maxBytes, applies WITHOUT the test seam,
   expect(existsSync(path.dirname(input.bundlePath))).toBe(false);
 });
 
-test("a header tip disagreeing with the artifact's claimed headCommit refuses before any apply", async () => {
+test("a header tip disagreeing with the artifact's claimed headCommit refuses before any apply, as a typed REF_MISMATCH", async () => {
   applyCalls.inputs.length = 0;
   applyCalls.nextError = undefined;
   const { client, calls } = fakeFetch("e".repeat(40));
   const apply = createArtifactApplier({ client, maxBundleBytes: 1024 });
 
-  await expect(
-    apply({
-      target: TARGET,
-      jobId: "job-2",
-      artifact: ARTIFACT,
-      repoPath: "/src/repo",
-    }),
-  ).rejects.toThrow(/head/i);
+  const thrown = await apply({
+    target: TARGET,
+    jobId: "job-2",
+    artifact: ARTIFACT,
+    repoPath: "/src/repo",
+  }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  // Same failure taxonomy as every other apply refusal: a typed ApplyError,
+  // so the MCP surface renders the uniform "CODE: message" reason.
+  expect(thrown).toBeInstanceOf(ApplyError);
+  expect((thrown as ApplyError).code).toBe("REF_MISMATCH");
+  expect((thrown as ApplyError).message).toMatch(/head/i);
   expect(applyCalls.inputs).toHaveLength(0);
   // The temp download is cleaned up on the failure path too.
   expect(existsSync(path.dirname(calls[0]?.destPath ?? ""))).toBe(false);

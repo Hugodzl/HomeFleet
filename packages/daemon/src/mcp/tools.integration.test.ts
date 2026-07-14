@@ -40,7 +40,11 @@ import {
   makeTempDataDir,
   removeTempDataDir,
 } from "../test-fixtures.js";
-import { HfpClient, HfpRequestError } from "../transport/client.js";
+import {
+  HfpClient,
+  HfpRequestError,
+  type HfpTarget,
+} from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
 import { GitError } from "../workspace/git.js";
@@ -1054,6 +1058,78 @@ test("a failed apply reports artifactStatus failed with the reason, and the next
   expect(parsedRetry.artifactStatus).toBe("applied");
   expect(parsedRetry.reviewCommand).toMatch(/^git diff /);
   expect(parsedRetry.applyError).toBeUndefined();
+});
+
+test("two overlapping job_result calls share ONE apply (single-flight) and report identical surfaces", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createWriteWorker(fakeFinalize());
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  // A GATED applier: the first caller blocks inside the apply until the test
+  // releases it, giving the second job_result call time to overlap.
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const applied: string[] = [];
+  const applyArtifact: ApplyDelegatedArtifactFn = async ({
+    jobId,
+    artifact,
+  }) => {
+    applied.push(jobId);
+    await gate;
+    return { branchName: artifact.branchName };
+  };
+  const { client } = await connectAgent(agent, endpoints, { applyArtifact });
+
+  const delegated = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "write",
+      workspace: WORKSPACE,
+      instructions: "Apply the requested change.",
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = DelegateTaskOutputSchema.parse(delegated.structuredContent);
+
+  // Wait for the job to be terminal WITHOUT job_result (each terminal
+  // job_result call triggers the gated apply under test), by snapshotting
+  // over HFP directly.
+  const target: HfpTarget = {
+    host: HOST,
+    port: worker.port,
+    expectedDeviceId: worker.identity.deviceId,
+  };
+  await waitUntil(
+    async () => (await agent.client.jobSnapshot(target, jobId)).result != null,
+  );
+
+  const first = call(client, "job_result", { jobId });
+  const second = call(client, "job_result", { jobId });
+  await waitUntil(() => applied.length >= 1);
+  // Let the second handler reach the single-flight gate before opening it.
+  // (If it arrives only after the flight settles, the remembered apply
+  // answers it — either way the assertions below must hold.)
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  // Exactly one fetch+apply ran, and both callers report the SAME surface —
+  // never one "failed" (git ref lock) alongside one "applied".
+  expect(applied).toEqual([jobId]);
+  const firstParsed = JobResultOutputSchema.parse(
+    firstResult.structuredContent,
+  );
+  const secondParsed = JobResultOutputSchema.parse(
+    secondResult.structuredContent,
+  );
+  expect(firstParsed.artifactStatus).toBe("applied");
+  expect(secondParsed.artifactStatus).toBe("applied");
+  expect(firstParsed.reviewCommand).toBe(secondParsed.reviewCommand);
+  expect(firstParsed.applyError).toBeUndefined();
+  expect(secondParsed.applyError).toBeUndefined();
 });
 
 test("a write job that changed nothing (artifact null) reports artifactStatus none and never applies", async () => {

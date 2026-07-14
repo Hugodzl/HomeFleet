@@ -76,6 +76,35 @@ describe("DelegationRegistry", () => {
     expect(registry.size).toBe(0);
   });
 
+  test("singleFlightApply shares ONE in-flight run between overlapping callers, then allows a fresh one", async () => {
+    const registry = new DelegationRegistry();
+    let runs = 0;
+    let release: (value: string) => void = () => {};
+    const slow = (): Promise<string> => {
+      runs += 1;
+      return new Promise<string>((resolve) => {
+        release = resolve;
+      });
+    };
+
+    const first = registry.singleFlightApply("job-1", slow);
+    const second = registry.singleFlightApply("job-1", slow);
+    // A different jobId is its own flight, never joined to job-1's.
+    const other = registry.singleFlightApply("job-2", async () => "other");
+    release("applied");
+
+    expect(await first).toBe("applied");
+    expect(await second).toBe("applied");
+    expect(await other).toBe("other");
+    expect(runs).toBe(1);
+
+    // Settled: the next call starts a FRESH run (retry semantics).
+    expect(
+      await registry.singleFlightApply("job-1", async () => "retried"),
+    ).toBe("retried");
+    expect(runs).toBe(1);
+  });
+
   test("re-recording an existing job protects it from eviction (moves to newest)", () => {
     const registry = new DelegationRegistry();
     registry.record("keep-me", route(1));
