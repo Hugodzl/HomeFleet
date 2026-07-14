@@ -13,7 +13,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
 import path from "node:path";
-import { JobResultSchema } from "@homefleet/protocol";
+import { MockOpenAiEndpoint, type MockScriptEntry } from "@homefleet/executors";
+import { JobResultSchema, writeBranchName } from "@homefleet/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, expect, test } from "vitest";
@@ -248,6 +249,175 @@ test("two assembled daemons: pair, delegate_task auto-syncs the workspace throug
   await delegator.stop();
   await worker.stop();
 }, 90_000);
+
+test("write delegation end to end: delegate through MCP, lazy apply on job_result, retry after a failed apply, no re-download once applied", async () => {
+  const src = await makeSrcRepo("original contents\n");
+  const gitIn = async (args: string[]): Promise<string> => {
+    const r = await runGit(args, { cwd: src.repoPath, timeoutMs: 30_000 });
+    if (!ok(r)) {
+      throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    }
+    return r.stdout.trim();
+  };
+
+  // The worker's write model: one edit with DISTINCTIVE content, then done.
+  const script: MockScriptEntry[] = [
+    {
+      kind: "tool_calls",
+      toolCalls: [
+        {
+          name: "write_file",
+          arguments: {
+            path: "src/added.txt",
+            content: "written by the worker model\n",
+          },
+        },
+      ],
+    },
+    {
+      kind: "tool_calls",
+      toolCalls: [
+        {
+          name: "finish_task",
+          arguments: {
+            summary: "added src/added.txt",
+            commitMessage: "feat: add added.txt",
+          },
+        },
+      ],
+    },
+  ];
+  const mock = await MockOpenAiEndpoint.start(script);
+  cleanups.push(() => mock.close());
+
+  const worker = await startDaemon("worker", {
+    executors: {
+      write: {
+        endpoint: {
+          baseUrl: mock.baseUrl,
+          model: "test-model",
+          contextWindow: 32_768,
+        },
+        commandAllowlist: { node: { executable: process.execPath } },
+      },
+    },
+    workspace: { allowedRepoIds: ["repo-x"] },
+  });
+  const delegator = await startDaemon("delegator", {
+    discovery: {
+      mdnsEnabled: false,
+      udpEnabled: false,
+      staticNodes: [
+        { host: HOST, port: worker.hfpPort, expectedDeviceId: worker.deviceId },
+      ],
+    },
+    repos: [{ repoId: "repo-x", path: src.repoPath }],
+  });
+  await pair(delegator, worker);
+  const mcp = await connectMcp(delegator);
+
+  const delegated = await mcp.callTool({
+    name: "delegate_task",
+    arguments: {
+      node: worker.deviceId,
+      task: {
+        type: "write",
+        workspace: { repoId: "repo-x" },
+        instructions: "Add src/added.txt with the given content.",
+        pathHints: ["src/added.txt"],
+        verifyCommand: { name: "node", args: ["-e", "process.exit(0)"] },
+      },
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = (delegated.structuredContent ?? {}) as { jobId: string };
+  expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
+  const branchName = writeBranchName(jobId);
+  const branchRef = `refs/heads/${branchName}`;
+
+  // Sabotage the FIRST apply: plant the job's reserved ref at a DIVERGED
+  // commit (a new commit on the source repo's main line, made after the
+  // sync), so the non-forced fetch refuses it as non-fast-forward.
+  await writeFile(path.join(src.repoPath, "diverge.txt"), "diverged\n");
+  await gitIn(["add", "-A"]);
+  await gitIn(["commit", "--quiet", "-m", "diverge"]);
+  const divergedTip = await gitIn(["rev-parse", "HEAD"]);
+  await gitIn(["update-ref", branchRef, divergedTip]);
+
+  // Poll job_result until terminal; the terminal call attempts the apply.
+  let structured: unknown;
+  await waitUntil(async () => {
+    const r = await mcp.callTool({ name: "job_result", arguments: { jobId } });
+    structured = r.structuredContent;
+    return JobResultOutputSchema.parse(r.structuredContent).result !== null;
+  }, 60_000);
+  const firstTerminal = JobResultOutputSchema.parse(structured);
+  expect(firstTerminal.status).toBe("succeeded");
+  const jobResult = JobResultSchema.parse(firstTerminal.result);
+  expect(jobResult.type).toBe("write");
+  expect(jobResult.summary).toBe("added src/added.txt");
+  const artifact = jobResult.artifact;
+  if (artifact === null || artifact === undefined) {
+    throw new Error("expected a write artifact");
+  }
+  expect(artifact.branchName).toBe(branchName);
+  expect(artifact.baseCommit).toBe(src.head);
+  expect(artifact.commitMessage).toBe("feat: add added.txt");
+  expect(artifact.diffStat).toEqual({
+    filesChanged: 1,
+    insertions: 1,
+    deletions: 0,
+  });
+  // The verify command ran (report-only) with the configured allowlist.
+  expect(jobResult.verify).toMatchObject({ name: "node", exitCode: 0 });
+
+  // First apply FAILED (diverged ref, non-fast-forward), with the reason;
+  // the diverged ref is untouched.
+  expect(firstTerminal.artifactStatus).toBe("failed");
+  expect(firstTerminal.applyError).toMatch(/NON_FAST_FORWARD/);
+  expect(firstTerminal.reviewCommand).toBeUndefined();
+  expect(await gitIn(["rev-parse", branchRef])).toBe(divergedTip);
+
+  // Clear the saboteur ref; the NEXT job_result call retries and applies.
+  await gitIn(["update-ref", "-d", branchRef]);
+  const retried = await mcp.callTool({
+    name: "job_result",
+    arguments: { jobId },
+  });
+  const retriedParsed = JobResultOutputSchema.parse(retried.structuredContent);
+  expect(retriedParsed.artifactStatus).toBe("applied");
+  expect(retriedParsed.reviewCommand).toBe(
+    `git diff ${artifact.baseCommit}...${branchName}`,
+  );
+  expect(retriedParsed.applyError).toBeUndefined();
+
+  // The branch now exists at EXACTLY the artifact's head, carrying the
+  // model's file with the model's content, committed under its message.
+  expect(await gitIn(["rev-parse", branchRef])).toBe(artifact.headCommit);
+  expect(await gitIn(["show", `${branchRef}:src/added.txt`])).toBe(
+    "written by the worker model",
+  );
+  expect(await gitIn(["log", "-1", "--format=%s", branchRef])).toBe(
+    "feat: add added.txt",
+  );
+
+  // No re-download once applied: delete the ref, ask again — the registry
+  // remembers the apply, so nothing re-fetches or re-creates the ref.
+  await gitIn(["update-ref", "-d", branchRef]);
+  const remembered = await mcp.callTool({
+    name: "job_result",
+    arguments: { jobId },
+  });
+  const rememberedParsed = JobResultOutputSchema.parse(
+    remembered.structuredContent,
+  );
+  expect(rememberedParsed.artifactStatus).toBe("applied");
+  const refCheck = await runGit(["rev-parse", "--verify", branchRef], {
+    cwd: src.repoPath,
+    timeoutMs: 30_000,
+  });
+  expect(ok(refCheck)).toBe(false);
+}, 120_000);
 
 test("a legacy pre-0.1 workspace cache dir surfaces its warning through onDiagnostic", async () => {
   const dataDir = resolveDataDir({

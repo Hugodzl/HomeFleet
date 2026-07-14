@@ -8,6 +8,7 @@ const route = (n: number) => ({
   deviceId: "d".repeat(64),
   host: "127.0.0.1",
   port: 40000 + n,
+  repoId: "repo-x",
 });
 
 describe("DelegationRegistry", () => {
@@ -42,6 +43,37 @@ describe("DelegationRegistry", () => {
     expect(registry.lookup("job-0")).toBeUndefined();
     expect(registry.lookup("job-1")).toBeDefined();
     expect(registry.lookup("job-overflow")).toBeDefined();
+  });
+
+  test("recordApplied remembers a write job's applied artifact until the entry is evicted", () => {
+    const registry = new DelegationRegistry();
+    registry.record("job-w", route(1));
+    expect(registry.appliedArtifact("job-w")).toBeUndefined();
+
+    const applied = {
+      branchName: "homefleet/abcdefabcdef",
+      baseCommit: "a".repeat(40),
+    };
+    registry.recordApplied("job-w", applied);
+    expect(registry.appliedArtifact("job-w")).toEqual(applied);
+    // A copy, not the live object: mutating the result must not corrupt state.
+    const got = registry.appliedArtifact("job-w");
+    if (got !== undefined) {
+      got.branchName = "mutated";
+    }
+    expect(registry.appliedArtifact("job-w")?.branchName).toBe(
+      "homefleet/abcdefabcdef",
+    );
+  });
+
+  test("recordApplied for an untracked jobId is a no-op (evicted entries stay evicted)", () => {
+    const registry = new DelegationRegistry();
+    registry.recordApplied("never-recorded", {
+      branchName: "homefleet/abcdefabcdef",
+      baseCommit: "a".repeat(40),
+    });
+    expect(registry.appliedArtifact("never-recorded")).toBeUndefined();
+    expect(registry.size).toBe(0);
   });
 
   test("re-recording an existing job protects it from eviction (moves to newest)", () => {

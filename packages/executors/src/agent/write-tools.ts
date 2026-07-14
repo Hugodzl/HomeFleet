@@ -170,6 +170,9 @@ export const writeFileTool: AgentTool = makeTool({
     required: ["path", "content"],
   },
   argsSchema: z.object({ path: z.string().min(1), content: z.string() }),
+  // Progress events carry {tool, path} only — file content must never reach
+  // the event stream (design spec §2; see AgentTool.eventArgsKeys).
+  eventArgsKeys: ["path"],
   run: async (args, context) => {
     const bytes = Buffer.byteLength(args.content, "utf8");
     if (bytes > MAX_WRITE_FILE_BYTES) {
@@ -245,6 +248,8 @@ export const editFileTool: AgentTool = makeTool({
     oldText: z.string().min(1).max(MAX_EDIT_TEXT_CHARS),
     newText: z.string().max(MAX_EDIT_TEXT_CHARS),
   }),
+  // oldText/newText are repo content: path-only events, like write_file.
+  eventArgsKeys: ["path"],
   run: async (args, context) => {
     const resolved = await resolveWritablePath(context.workspaceDir, args.path);
     let info: Awaited<ReturnType<typeof stat>>;

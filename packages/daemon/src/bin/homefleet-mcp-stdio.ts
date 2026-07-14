@@ -28,6 +28,7 @@ import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { KnownNodesRegistry } from "../discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
+import { createArtifactApplier } from "../mcp/artifact-applier.js";
 import { DelegationRegistry } from "../mcp/delegation-registry.js";
 import {
   endpointSourceFromDiscovery,
@@ -78,6 +79,12 @@ export async function buildStdioMcpServer(dataDir: string): Promise<{
     repoResolver: createRepoResolver(config.repos),
     nodeDirectory,
     delegations: new DelegationRegistry(),
+    // The same lazy-apply plumbing the daemon assembly wires: the bundle
+    // byte cap reuses the workspace sync cap (one knob for both directions).
+    applyArtifact: createArtifactApplier({
+      client: hfpClient,
+      maxBundleBytes: config.workspace.maxBundleBytes,
+    }),
   });
   return {
     server,

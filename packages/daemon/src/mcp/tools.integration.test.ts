@@ -13,14 +13,18 @@ import {
   AgentExecutor,
   CommandExecutor,
   type Executor,
+  type FinalizeWriteFn,
   MockOpenAiEndpoint,
   type MockScriptEntry,
+  WriteExecutor,
 } from "@homefleet/executors";
 import {
   type JobParams,
   JobResultSchema,
   JobStatusSchema,
   type NodeInfo,
+  type WriteArtifact,
+  writeBranchName,
 } from "@homefleet/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -40,6 +44,7 @@ import { HfpClient, HfpRequestError } from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
 import { GitError } from "../workspace/git.js";
+import type { ApplyDelegatedArtifactFn } from "./artifact-applier.js";
 import { DelegationRegistry } from "./delegation-registry.js";
 import { NodeDirectory, type NodeEndpoint } from "./node-directory.js";
 import { createMcpServer } from "./server.js";
@@ -193,6 +198,8 @@ interface ConnectAgentOverrides {
   workspaceSync?: WorkspaceSyncClient;
   /** Overrides the repo-resolver fake (default: maps `WORKSPACE.repoId`). */
   repoResolver?: RepoResolver;
+  /** Overrides the artifact applier (default: fails loudly if ever called). */
+  applyArtifact?: ApplyDelegatedArtifactFn;
 }
 
 /** Wires an MCP server for `agent`, connects a Client over a linked transport. */
@@ -215,6 +222,11 @@ async function connectAgent(
     repoResolver: overrides.repoResolver ?? fakeRepoResolver(),
     nodeDirectory,
     delegations,
+    applyArtifact:
+      overrides.applyArtifact ??
+      (async () => {
+        throw new Error("applyArtifact should not be called in this test");
+      }),
     requestTimeoutMs: 8000,
   });
 
@@ -365,6 +377,9 @@ test("delegate_task (command) end-to-end: jobId, then job_status and job_result"
   expect(jobResult.type).toBe("command");
   expect(jobResult.output?.stdout).toBe("hello mcp");
   expect(jobResult.output?.exitCode).toBe(0);
+  // Non-write jobs carry NO artifact surface.
+  expect(finished.artifactStatus).toBeUndefined();
+  expect(finished.reviewCommand).toBeUndefined();
 });
 
 test("delegate_task (recon) end-to-end via the mock model endpoint", async () => {
@@ -804,4 +819,299 @@ test("delegate_task: a RAW (non-Git, non-HFP) local error during sync yields a n
   expect(text).not.toMatch(/against the worker/i);
   expect(delegateCalled).toBe(false);
   expect(delegations.size).toBe(0);
+});
+
+// --- Write delegation: the v0.2 MCP surface (Task 11) ---------------------
+
+/** A worker daemon whose WriteExecutor runs the scripted mock model. */
+async function createWriteWorker(
+  finalize: FinalizeWriteFn,
+  script?: MockScriptEntry[],
+): Promise<Daemon> {
+  const mock = await MockOpenAiEndpoint.start(
+    script ?? [
+      {
+        kind: "tool_calls",
+        toolCalls: [
+          {
+            name: "finish_task",
+            arguments: {
+              summary: "changed one file",
+              commitMessage: "test: one change",
+            },
+          },
+        ],
+      },
+    ],
+  );
+  cleanups.push(() => mock.close());
+  return createDaemon("write-worker", {
+    executors: [
+      new WriteExecutor({
+        endpoint: {
+          baseUrl: mock.baseUrl,
+          model: "test-model",
+          contextWindow: 32_768,
+        },
+        finalize,
+      }),
+    ],
+  });
+}
+
+/** A finalize stub minting a schema-valid artifact for the job. */
+function fakeFinalize(): FinalizeWriteFn {
+  return async ({ jobId, commitMessage }) => ({
+    branchName: writeBranchName(jobId),
+    baseCommit: FAKE_SYNCED_HEAD_COMMIT,
+    headCommit: "c".repeat(40),
+    diffStat: { filesChanged: 1, insertions: 2, deletions: 0 },
+    commitMessage,
+  });
+}
+
+/** Records applyArtifact calls; `failFirst` rejects only the first call. */
+function recordingApplier(options: { failFirst?: string } = {}): {
+  applyArtifact: ApplyDelegatedArtifactFn;
+  calls: Array<{ jobId: string; artifact: WriteArtifact; repoPath: string }>;
+} {
+  const calls: Array<{
+    jobId: string;
+    artifact: WriteArtifact;
+    repoPath: string;
+  }> = [];
+  let failNext = options.failFirst;
+  return {
+    calls,
+    applyArtifact: async ({ jobId, artifact, repoPath }) => {
+      calls.push({ jobId, artifact, repoPath });
+      if (failNext !== undefined) {
+        const message = failNext;
+        failNext = undefined;
+        throw new Error(message);
+      }
+      return { branchName: artifact.branchName };
+    },
+  };
+}
+
+/** Delegates a write task and polls job_result to the terminal structured output. */
+async function runWriteJob(
+  client: Client,
+  workerDeviceId: string,
+): Promise<{ jobId: string; structured: unknown }> {
+  const delegated = await call(client, "delegate_task", {
+    node: workerDeviceId,
+    task: {
+      type: "write",
+      workspace: WORKSPACE,
+      instructions: "Apply the requested change.",
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = DelegateTaskOutputSchema.parse(delegated.structuredContent);
+  let structured: unknown;
+  await waitUntil(async () => {
+    const r = await call(client, "job_result", { jobId });
+    structured = r.structuredContent;
+    return JobResultOutputSchema.parse(r.structuredContent).result !== null;
+  });
+  return { jobId, structured };
+}
+
+test("delegate_task (write) passes pathHints and verifyCommand through UNTOUCHED and flattens budgets", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker");
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+
+  const delegateCalls: JobParams[] = [];
+  const hfpClient: DelegationClient = {
+    delegate: async (_target, params) => {
+      delegateCalls.push(params);
+      // Never reaches the real worker: the pass-through is the assertion.
+      return { jobId: randomUUID() };
+    },
+    jobSnapshot: (target, jobId) => agent.client.jobSnapshot(target, jobId),
+    cancelJob: (target, jobId) => agent.client.cancelJob(target, jobId),
+  };
+  const { client } = await connectAgent(agent, endpoints, { hfpClient });
+
+  const delegated = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "write",
+      workspace: WORKSPACE,
+      instructions: "Rename the config key.",
+      pathHints: ["src/config.ts", "docs/reference/configuration.md"],
+      verifyCommand: { name: "pnpm", args: ["test", "--filter", "config"] },
+      maxToolCalls: 42,
+      maxWallMs: 120_000,
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+
+  expect(delegateCalls).toHaveLength(1);
+  const params = delegateCalls[0];
+  if (params?.type !== "write") {
+    throw new Error("expected write JobParams");
+  }
+  expect(params.instructions).toBe("Rename the config key.");
+  // Pure pass-through: the MCP layer never rewrites task content (the write
+  // executor incorporates pathHints into the model prompt worker-side).
+  expect(params.pathHints).toEqual([
+    "src/config.ts",
+    "docs/reference/configuration.md",
+  ]);
+  expect(params.verifyCommand).toEqual({
+    name: "pnpm",
+    args: ["test", "--filter", "config"],
+  });
+  // Flattened budgets land in the protocol budgets object; headCommit is the
+  // SYNCED one, never agent-supplied.
+  expect(params.budgets).toEqual({ maxToolCalls: 42, maxWallMs: 120_000 });
+  expect(params.workspace).toEqual({
+    repoId: WORKSPACE.repoId,
+    headCommit: FAKE_SYNCED_HEAD_COMMIT,
+  });
+});
+
+test("job_result on a succeeded write job applies the artifact lazily and does not re-download on a second call", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createWriteWorker(fakeFinalize());
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+  const { applyArtifact, calls } = recordingApplier();
+  const { client } = await connectAgent(agent, endpoints, { applyArtifact });
+
+  const { jobId, structured } = await runWriteJob(
+    client,
+    worker.identity.deviceId,
+  );
+  const finished = JobResultOutputSchema.parse(structured);
+  expect(finished.status).toBe("succeeded");
+  const jobResult = JobResultSchema.parse(finished.result);
+  expect(jobResult.type).toBe("write");
+  const artifact = jobResult.artifact;
+  if (artifact === null || artifact === undefined) {
+    throw new Error("expected a write artifact on the result");
+  }
+  expect(artifact.branchName).toBe(writeBranchName(jobId));
+
+  // The lazy apply ran against the repo mapped for the job's repoId, with
+  // the artifact from the result.
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    jobId,
+    repoPath: FAKE_REPO_PATH,
+  });
+  expect(calls[0]?.artifact).toEqual(artifact);
+  expect(finished.artifactStatus).toBe("applied");
+  expect(finished.reviewCommand).toBe(
+    `git diff ${artifact.baseCommit}...${artifact.branchName}`,
+  );
+  expect(finished.applyError).toBeUndefined();
+
+  // A second job_result call remembers the apply — no re-download, no
+  // second apply — and still reports the same surface.
+  const again = await call(client, "job_result", { jobId });
+  expect(again.isError).toBeFalsy();
+  const parsedAgain = JobResultOutputSchema.parse(again.structuredContent);
+  expect(calls).toHaveLength(1);
+  expect(parsedAgain.artifactStatus).toBe("applied");
+  expect(parsedAgain.reviewCommand).toBe(
+    `git diff ${artifact.baseCommit}...${artifact.branchName}`,
+  );
+});
+
+test("a failed apply reports artifactStatus failed with the reason, and the next call retries", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createWriteWorker(fakeFinalize());
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+  const { applyArtifact, calls } = recordingApplier({
+    failFirst: "NON_FAST_FORWARD: the ref already exists and diverged",
+  });
+  const { client } = await connectAgent(agent, endpoints, { applyArtifact });
+
+  const { jobId, structured } = await runWriteJob(
+    client,
+    worker.identity.deviceId,
+  );
+  const failedApply = JobResultOutputSchema.parse(structured);
+  // The JOB result is intact and the tool call is NOT an error — only the
+  // apply failed, and the reason is surfaced.
+  expect(failedApply.status).toBe("succeeded");
+  expect(failedApply.artifactStatus).toBe("failed");
+  expect(failedApply.applyError).toContain("NON_FAST_FORWARD");
+  expect(failedApply.reviewCommand).toBeUndefined();
+  expect(calls).toHaveLength(1);
+
+  // The retry (next job_result call) applies successfully.
+  const retried = await call(client, "job_result", { jobId });
+  const parsedRetry = JobResultOutputSchema.parse(retried.structuredContent);
+  expect(calls).toHaveLength(2);
+  expect(parsedRetry.artifactStatus).toBe("applied");
+  expect(parsedRetry.reviewCommand).toMatch(/^git diff /);
+  expect(parsedRetry.applyError).toBeUndefined();
+});
+
+test("a write job that changed nothing (artifact null) reports artifactStatus none and never applies", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createWriteWorker(async () => null);
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+  const { applyArtifact, calls } = recordingApplier();
+  const { client } = await connectAgent(agent, endpoints, { applyArtifact });
+
+  const { structured } = await runWriteJob(client, worker.identity.deviceId);
+  const finished = JobResultOutputSchema.parse(structured);
+  expect(finished.status).toBe("succeeded");
+  expect(JobResultSchema.parse(finished.result).artifact).toBeNull();
+  expect(finished.artifactStatus).toBe("none");
+  expect(finished.reviewCommand).toBeUndefined();
+  expect(calls).toHaveLength(0);
+});
+
+test("an apply against a repoId no longer mapped locally reports failed without calling the applier", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createWriteWorker(fakeFinalize());
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+  const { applyArtifact, calls } = recordingApplier();
+  // The mapping exists at delegate time but is gone by job_result time
+  // (config edited between the two): the apply must fail closed.
+  const mapping: Record<string, string | undefined> = {
+    "test-repo": FAKE_REPO_PATH,
+  };
+  const repoResolver: RepoResolver = {
+    resolveRepoPath: (repoId) => mapping[repoId],
+  };
+  const { client } = await connectAgent(agent, endpoints, {
+    applyArtifact,
+    repoResolver,
+  });
+
+  const delegated = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "write",
+      workspace: WORKSPACE,
+      instructions: "Apply the requested change.",
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = DelegateTaskOutputSchema.parse(delegated.structuredContent);
+  mapping["test-repo"] = undefined;
+
+  let structured: unknown;
+  await waitUntil(async () => {
+    const r = await call(client, "job_result", { jobId });
+    structured = r.structuredContent;
+    return JobResultOutputSchema.parse(r.structuredContent).result !== null;
+  });
+  const finished = JobResultOutputSchema.parse(structured);
+  expect(finished.artifactStatus).toBe("failed");
+  expect(finished.applyError).toMatch(/no local repo mapped/i);
+  expect(calls).toHaveLength(0);
 });

@@ -32,12 +32,14 @@ import {
   JobIdSchema,
   type JobParams,
   JobParamsSchema,
+  type JobResult,
   JobResultSchema,
   type JobSnapshot,
   JobStatusSchema,
   ModelInfoSchema,
   NodeRoleSchema,
   RepoIdSchema,
+  type WriteArtifact,
 } from "@homefleet/protocol";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -49,7 +51,9 @@ import {
   HfpTimeoutError,
   MissingServerCertificateError,
 } from "../transport/client.js";
+import { ApplyError } from "../workspace/artifact-apply.js";
 import { GitError } from "../workspace/git.js";
+import type { ApplyDelegatedArtifactFn } from "./artifact-applier.js";
 import type {
   DelegationRegistry,
   DelegationRoute,
@@ -93,6 +97,14 @@ export interface McpToolCollaborators {
   nodeDirectory: Pick<NodeDirectory, "list" | "resolve">;
   delegations: DelegationRegistry;
   /**
+   * The write-artifact fetch-and-apply plumbing `job_result` drives lazily
+   * on a succeeded write job (production: `createArtifactApplier` over the
+   * HfpClient + `config.workspace.maxBundleBytes`). Required, mirroring
+   * `registerJobRoutes`' artifact-store posture: an assembly must decide,
+   * never silently forget.
+   */
+  applyArtifact: ApplyDelegatedArtifactFn;
+  /**
    * Per-request HFP timeout applied to delegate/status/result/cancel calls.
    * Omitted → the HfpClient default. (The directory's `hello` uses its own,
    * shorter, timeout.)
@@ -130,11 +142,31 @@ export const JobStatusOutputSchema = z.object({
   status: JobStatusSchema,
 });
 
-/** job_result: the terminal JobResult (protocol schema) or null when unfinished. */
+/**
+ * Whether a terminal write job's artifact has been applied into this
+ * daemon's local repo: `applied` (branch created/verified — review it),
+ * `failed` (fetch or apply refused; `applyError` says why and the next
+ * `job_result` call retries), or `none` (the job produced no artifact —
+ * clean tree, or a failed/canceled job).
+ */
+export const ArtifactStatusSchema = z.enum(["applied", "failed", "none"]);
+export type ArtifactStatus = z.infer<typeof ArtifactStatusSchema>;
+
+/**
+ * job_result: the terminal JobResult (protocol schema) or null when
+ * unfinished. Write jobs additionally surface the lazy-apply outcome —
+ * `artifactStatus` (always, once terminal), `reviewCommand` (only when
+ * applied), and `applyError` (only when the apply failed). The artifact and
+ * verify report themselves ride inside `result` (protocol fields).
+ */
 export const JobResultOutputSchema = z.object({
   jobId: JobIdSchema,
   status: JobStatusSchema,
   result: JobResultSchema.nullable(),
+  artifactStatus: ArtifactStatusSchema.optional(),
+  /** `git diff <base>...<branch>` — how to review the applied change. */
+  reviewCommand: z.string().optional(),
+  applyError: z.string().optional(),
 });
 
 // --- Input schemas (new, local to the daemon: the agent-facing API) ---
@@ -168,9 +200,33 @@ const CommandTaskInputSchema = z.object({
   timeoutMs: z.int().min(1000).max(3_600_000).optional(),
 });
 
+/**
+ * Code-writing delegation (v0.2). `pathHints` and `verifyCommand` pass
+ * through to the protocol fields UNTOUCHED — the worker's write executor is
+ * what incorporates pathHints into the model prompt; this layer never
+ * rewrites task content. Deliberately NO `model?` in this milestone (unlike
+ * recon): the write executor always uses its endpoint's default model.
+ * Adding `model?` later is a wire-compatible minor addition.
+ */
+const WriteTaskInputSchema = z.object({
+  type: z.literal("write"),
+  workspace: TaskWorkspaceInputSchema,
+  instructions: z.string().min(1).max(16384),
+  /** Advisory starting points only — never an access restriction. */
+  pathHints: z.array(z.string().min(1).max(1024)).max(32).optional(),
+  /** Post-commit verify run (report-only); must be on the worker's allowlist. */
+  verifyCommand: z
+    .object({ name: z.string().min(1), args: z.array(z.string()).optional() })
+    .optional(),
+  /** Flattened budgets (defaults applied by the protocol schema when omitted). */
+  maxToolCalls: z.int().min(1).max(200).optional(),
+  maxWallMs: z.int().min(1000).max(3_600_000).optional(),
+});
+
 const TaskInputSchema = z.discriminatedUnion("type", [
   ReconTaskInputSchema,
   CommandTaskInputSchema,
+  WriteTaskInputSchema,
 ]);
 type TaskInput = z.infer<typeof TaskInputSchema>;
 
@@ -214,6 +270,23 @@ function toJobParams(task: TaskInput, headCommit: string): JobParams {
       workspace,
       prompt: task.prompt,
       ...(task.model !== undefined ? { model: task.model } : {}),
+      budgets,
+    });
+  }
+  if (task.type === "write") {
+    const budgets: Record<string, number> = {};
+    if (task.maxToolCalls !== undefined)
+      budgets.maxToolCalls = task.maxToolCalls;
+    if (task.maxWallMs !== undefined) budgets.maxWallMs = task.maxWallMs;
+    return JobParamsSchema.parse({
+      type: "write",
+      workspace,
+      instructions: task.instructions,
+      // Pass-through, untouched: this layer never rewrites task content.
+      ...(task.pathHints !== undefined ? { pathHints: task.pathHints } : {}),
+      ...(task.verifyCommand !== undefined
+        ? { verifyCommand: task.verifyCommand }
+        : {}),
       budgets,
     });
   }
@@ -304,6 +377,37 @@ function describeSyncFailure(
   );
 }
 
+/** The reviewer's command for an applied artifact (three-dot: base to branch). */
+function reviewCommandFor(applied: {
+  branchName: string;
+  baseCommit: string;
+}): string {
+  return `git diff ${applied.baseCommit}...${applied.branchName}`;
+}
+
+/**
+ * A clean, non-leaking reason for a failed artifact apply. An
+ * {@link ApplyError} keeps its typed code + message — the REF_MISMATCH
+ * backstop's message already spells out that the reserved ref may now exist
+ * at an UNVERIFIED tip and should be inspected or deleted (never auto-
+ * deleted here: deleting refs in the user's repo on an error path is riskier
+ * than reporting). Worker/network failures reuse {@link describeHfpFailure}.
+ */
+function describeApplyFailure(error: unknown): string {
+  if (error instanceof ApplyError) {
+    return `${error.code}: ${error.message}`;
+  }
+  if (
+    error instanceof HfpRequestError ||
+    error instanceof HfpTimeoutError ||
+    error instanceof FingerprintMismatchError ||
+    error instanceof MissingServerCertificateError
+  ) {
+    return describeHfpFailure(error);
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 function unknownJob(jobId: string): CallToolResult {
   return fail(
     `Unknown job "${jobId}". It was not delegated through this MCP server ` +
@@ -360,6 +464,7 @@ export function registerHomeFleetTools(
     repoResolver,
     nodeDirectory,
     delegations,
+    applyArtifact,
     requestTimeoutMs,
   } = collaborators;
 
@@ -369,6 +474,74 @@ export function registerHomeFleetTools(
     expectedDeviceId: route.deviceId,
     ...(requestTimeoutMs !== undefined ? { timeoutMs: requestTimeoutMs } : {}),
   });
+
+  /**
+   * The lazy apply `job_result` drives on a terminal WRITE result: fetch
+   * the job's bundle from the worker and land it as a local
+   * `refs/heads/homefleet/<jobId12>` branch. Idempotent bookkeeping — a
+   * remembered apply (delegation registry) answers WITHOUT re-downloading;
+   * a FAILED apply is reported (never a tool error — the job result itself
+   * is valid) and simply retried on the next call.
+   */
+  const writeArtifactSurface = async (
+    jobId: string,
+    route: DelegationRoute,
+    result: JobResult,
+  ): Promise<{
+    artifactStatus: ArtifactStatus;
+    reviewCommand?: string;
+    applyError?: string;
+  }> => {
+    const remembered = delegations.appliedArtifact(jobId);
+    if (remembered !== undefined) {
+      return {
+        artifactStatus: "applied",
+        reviewCommand: reviewCommandFor(remembered),
+      };
+    }
+    const artifact: WriteArtifact | null | undefined = result.artifact;
+    if (
+      result.status !== "succeeded" ||
+      artifact === null ||
+      artifact === undefined
+    ) {
+      // Clean tree (artifact: null) or a failed/canceled job: nothing to
+      // fetch or apply — by the result schema's rules, committed work is
+      // never delivered from a non-succeeded job.
+      return { artifactStatus: "none" };
+    }
+    // Fail closed, like delegate_task's sync gate: the artifact only ever
+    // lands in a repo THIS daemon has mapped for the job's repoId.
+    const repoPath = repoResolver.resolveRepoPath(route.repoId);
+    if (repoPath === undefined) {
+      return {
+        artifactStatus: "failed",
+        applyError:
+          `this daemon has no local repo mapped to "${route.repoId}"; ` +
+          "restore the entry in this daemon's config repos list, then call " +
+          "job_result again to retry the apply",
+      };
+    }
+    try {
+      const { branchName } = await applyArtifact({
+        target: targetFor(route),
+        jobId,
+        artifact,
+        repoPath,
+      });
+      const applied = { branchName, baseCommit: artifact.baseCommit };
+      delegations.recordApplied(jobId, applied);
+      return {
+        artifactStatus: "applied",
+        reviewCommand: reviewCommandFor(applied),
+      };
+    } catch (error) {
+      return {
+        artifactStatus: "failed",
+        applyError: describeApplyFailure(error),
+      };
+    }
+  };
 
   server.registerTool(
     "list_nodes",
@@ -409,8 +582,9 @@ export function registerHomeFleetTools(
       title: "Delegate a task to a node",
       description:
         "Delegate a job to a paired worker node: a read-only repo 'recon' " +
-        "analysis by the worker's local model, or an allowlisted 'command' " +
-        "execution. The named repo (workspace.repoId) is synced from this " +
+        "analysis by the worker's local model, an allowlisted 'command' " +
+        "execution, or a code-'write' task that produces a reviewable " +
+        "branch. The named repo (workspace.repoId) is synced from this " +
         "daemon's local mapping to the worker before the job is delegated. " +
         "Returns a jobId; poll it with job_status / job_result.",
       inputSchema: DelegateTaskInputShape,
@@ -481,11 +655,13 @@ export function registerHomeFleetTools(
       try {
         const { jobId } = await hfpClient.delegate(target, params);
         // Record ONLY on success, so a failed delegation leaves no phantom
-        // route and the registry stays bounded to real jobs.
+        // route and the registry stays bounded to real jobs. repoId rides
+        // along for job_result's write-artifact apply (local repo lookup).
         delegations.record(jobId, {
           deviceId: node,
           host: resolved.host,
           port: resolved.port,
+          repoId,
         });
         return ok(
           `Delegated ${task.type} job ${jobId} to "${resolved.name}".`,
@@ -530,7 +706,10 @@ export function registerHomeFleetTools(
       title: "Fetch a delegated job's result",
       description:
         "Return the full result of a delegated job when it has finished. " +
-        "If the job is still queued or running, result is null.",
+        "If the job is still queued or running, result is null. For a " +
+        "succeeded write job this also fetches the artifact and applies it " +
+        "into the local repo as a refs/heads/homefleet/ branch, reporting " +
+        "artifactStatus and (when applied) the git diff reviewCommand.",
       inputSchema: JobIdInputShape,
       outputSchema: JobResultOutputSchema.shape,
     },
@@ -542,11 +721,30 @@ export function registerHomeFleetTools(
       try {
         const snapshot = await hfpClient.jobSnapshot(targetFor(route), jobId);
         const result = snapshot.result ?? null;
-        const text =
-          result === null
-            ? `Job ${jobId} is ${snapshot.status}; no result yet.`
-            : `Job ${jobId} finished with status ${snapshot.status}.`;
-        return ok(text, { jobId, status: snapshot.status, result });
+        if (result === null) {
+          return ok(`Job ${jobId} is ${snapshot.status}; no result yet.`, {
+            jobId,
+            status: snapshot.status,
+            result,
+          });
+        }
+        let text = `Job ${jobId} finished with status ${snapshot.status}.`;
+        if (result.type !== "write") {
+          return ok(text, { jobId, status: snapshot.status, result });
+        }
+        const surface = await writeArtifactSurface(jobId, route, result);
+        switch (surface.artifactStatus) {
+          case "applied":
+            text += ` Artifact applied; review with: ${surface.reviewCommand}`;
+            break;
+          case "failed":
+            text += ` Artifact apply FAILED (call job_result again to retry): ${surface.applyError}`;
+            break;
+          case "none":
+            text += " No artifact to apply.";
+            break;
+        }
+        return ok(text, { jobId, status: snapshot.status, result, ...surface });
       } catch (error) {
         return fail(describeHfpFailure(error));
       }

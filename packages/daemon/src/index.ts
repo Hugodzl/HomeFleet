@@ -162,6 +162,8 @@ export {
   MCP_SERVER_VERSION,
 } from "./mcp/server.js";
 export {
+  type ArtifactStatus,
+  ArtifactStatusSchema,
   DelegateTaskOutputSchema,
   type DelegationClient,
   JobResultOutputSchema,

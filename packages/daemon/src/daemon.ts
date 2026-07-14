@@ -1,15 +1,18 @@
 /**
  * The daemon assembly (M9): one `Daemon` class that wires every module —
- * identity, trust, pairing, HFP transport, discovery, workspace store, job
- * manager, NodeInfo, and the MCP front — into a runnable `homefleetd`
- * process. Construction order is load-bearing and documented inline; the
- * matching teardown order lives in {@link Daemon.stop}.
+ * identity, trust, pairing, HFP transport, discovery, workspace store,
+ * write-artifact store, job manager, NodeInfo, and the MCP front — into a
+ * runnable `homefleetd` process. Construction order is load-bearing and
+ * documented inline; the matching teardown order lives in
+ * {@link Daemon.stop}.
  */
 import path from "node:path";
 import {
   AgentExecutor,
   CommandExecutor,
   type Executor,
+  type FinalizeWriteFn,
+  WriteExecutor,
 } from "@homefleet/executors";
 import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
@@ -24,6 +27,7 @@ import { KnownNodesRegistry } from "./discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "./identity/identity.js";
 import { JobManager } from "./jobs/job-manager.js";
 import { registerJobRoutes } from "./jobs/routes.js";
+import { createArtifactApplier } from "./mcp/artifact-applier.js";
 import { DelegationRegistry } from "./mcp/delegation-registry.js";
 import { startMcpHttpServer } from "./mcp/http-transport.js";
 import {
@@ -38,6 +42,7 @@ import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
 import { DAEMON_VERSION } from "./version.js";
+import { ArtifactStore } from "./workspace/artifact-store.js";
 import { registerWorkspaceRoutes } from "./workspace/routes.js";
 import { WorkspaceStore } from "./workspace/workspace-store.js";
 
@@ -217,10 +222,18 @@ export async function pairWithPeer(options: {
   };
 }
 
-/** Builds the executor list from config. Nothing configured = run no jobs. */
-function buildExecutors(config: DaemonConfig): Executor[] {
+/**
+ * Builds the executor list from config. Nothing configured = run no jobs.
+ * `finalizeWrite` is the daemon-assembled write-job finalize closure
+ * (workspace-store commit/bundle + ArtifactStore registration); it is only
+ * consumed when `executors.write` is configured.
+ */
+function buildExecutors(
+  config: DaemonConfig,
+  finalizeWrite: FinalizeWriteFn,
+): Executor[] {
   const executors: Executor[] = [];
-  const { command, agent } = config.executors;
+  const { command, agent, write } = config.executors;
   if (command !== undefined) {
     executors.push(new CommandExecutor({ allowlist: command.allowlist }));
   }
@@ -231,6 +244,17 @@ function buildExecutors(config: DaemonConfig): Executor[] {
         ...(agent.commandAllowlist !== undefined
           ? { commandAllowlist: agent.commandAllowlist }
           : {}),
+      }),
+    );
+  }
+  if (write !== undefined) {
+    executors.push(
+      new WriteExecutor({
+        endpoint: write.endpoint,
+        ...(write.commandAllowlist !== undefined
+          ? { commandAllowlist: write.commandAllowlist }
+          : {}),
+        finalize: finalizeWrite,
       }),
     );
   }
@@ -314,12 +338,63 @@ export class Daemon {
     await workspaceStore.init();
     this.teardown.push(() => workspaceStore.stop());
 
+    // Write-job artifact bundles (v0.2): an in-memory index over the bundle
+    // files finalizeWriteJob leaves under the workspace cache. Its teardown
+    // is a sweep of every registered bundle; pushed here so it runs AFTER
+    // jobManager.stop() in the LIFO unwind (stop-fired eviction hooks and
+    // removeAll overlap — remove tolerates unknown ids, so the double-reap
+    // is a designed no-op).
+    const artifactStore = new ArtifactStore({ logger: this.onDiagnostic });
+    this.teardown.push(() => artifactStore.removeAll());
+
+    // The write executor's finalize step: commit the job's worktree, bundle
+    // the result branch, register the bundle for the artifact route, hand
+    // the wire artifact back. Author email uses the daemon's short device id.
+    const deviceId8 = identity.deviceId.slice(0, 8);
+    const finalizeWrite: FinalizeWriteFn = async (input) => {
+      // Free lifecycle invariant (the FinalizeWriteFn doc): the executor's
+      // informational workspaceDir must be the very worktree the store
+      // registered for this job — a mismatch means the write-job lifecycle
+      // (resolve -> execute -> finalize -> release) broke somewhere.
+      const registered = workspaceStore.writeJobWorkspace(input.jobId);
+      if (registered !== undefined && registered.dir !== input.workspaceDir) {
+        throw new Error(
+          `write-job finalize invariant violated: executor workspaceDir ` +
+            `"${input.workspaceDir}" is not the registered write worktree ` +
+            `"${registered.dir}" for job ${input.jobId}`,
+        );
+      }
+      // An unknown jobId falls through to finalizeWriteJob, whose typed
+      // NO_WRITE_WORKSPACE error is the documented contract.
+      const finalized = await workspaceStore.finalizeWriteJob({
+        jobId: input.jobId,
+        commitMessage: input.commitMessage,
+        deviceId8,
+        signal: input.signal,
+      });
+      if (finalized === null) {
+        return null; // clean tree: nothing to register or deliver
+      }
+      artifactStore.register(input.jobId, {
+        bundlePath: finalized.bundlePath,
+        headCommit: finalized.artifact.headCommit,
+        byteLength: finalized.byteLength,
+      });
+      return finalized.artifact;
+    };
+
     // JobManager: config overrides are spread only when present so the
     // manager's own defaults stay the single owner of those numbers.
     const jobs = config.jobs;
     const jobManager = new JobManager({
-      executors: buildExecutors(config),
+      executors: buildExecutors(config, finalizeWrite),
       resolveWorkspace: workspaceStore.createResolver(),
+      // Evicted job records take their artifact bundle with them. Kept SYNC
+      // by ratified design: remove() deletes its map entry before its only
+      // await and never rejects, so nothing here can dangle or throw.
+      onJobEvicted: (jobId) => {
+        void artifactStore.remove(jobId);
+      },
       ...(jobs.maxConcurrentJobs !== undefined
         ? { maxConcurrentJobs: jobs.maxConcurrentJobs }
         : {}),
@@ -355,11 +430,10 @@ export class Daemon {
       host: config.hfp.host,
       port: config.hfp.port,
     });
-    // Artifact store deliberately absent until the write-job assembly lands
-    // (Task 11): the artifact route gates on ownership but always answers
-    // 404 NO_ARTIFACT. Task 11 constructs the ArtifactStore here and wires
-    // it to finalize registration and the manager's onJobEvicted hook.
-    registerJobRoutes(nodeServer, jobManager, undefined);
+    // The artifact route serves write-job bundles from the store finalize
+    // registers into; unknown jobIds AND post-eviction both answer 404
+    // (eviction is indistinguishable from "never existed" by design).
+    registerJobRoutes(nodeServer, jobManager, artifactStore);
     registerWorkspaceRoutes(nodeServer, workspaceStore);
     const { port: hfpPort } = await nodeServer.start();
     this.teardown.push(() => nodeServer.stop());
@@ -403,6 +477,13 @@ export class Daemon {
           repoResolver,
           nodeDirectory,
           delegations,
+          // job_result's lazy write-artifact apply (v0.2): fetch over the
+          // pinned HFP client, capped by the same bundle byte limit the
+          // worker side puts on inbound sync bundles.
+          applyArtifact: createArtifactApplier({
+            client: hfpClient,
+            maxBundleBytes: config.workspace.maxBundleBytes,
+          }),
         }),
       host: config.mcp.host,
       port: config.mcp.port,

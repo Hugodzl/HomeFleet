@@ -248,7 +248,7 @@ export async function runToolLoop(
       emit({
         type: "tool_call",
         name: call.name,
-        argsSummary: truncateChars(call.arguments, EVENT_SUMMARY_MAX_CHARS),
+        argsSummary: argsSummaryFor(toolsByName.get(call.name), call.arguments),
       });
       const result = await invokeTool(toolsByName, call, {
         workspaceDir: options.toolContext.workspaceDir,
@@ -271,6 +271,39 @@ export async function runToolLoop(
       }
     }
   }
+}
+
+/**
+ * The `tool_call` event's argsSummary. A tool WITHOUT
+ * {@link AgentTool.eventArgsKeys} keeps the raw-args summary (read tools).
+ * A tool WITH it is content-carrying (write_file, edit_file): the summary is
+ * rebuilt from ONLY the allowlisted keys — e.g. `{"path":"src/x.ts"}` — so
+ * file content never reaches the event stream (design spec §2). Fails
+ * closed: if the raw arguments do not parse to a JSON object, the summary is
+ * `{}` — never the raw string, which is exactly what could leak.
+ */
+function argsSummaryFor(tool: AgentTool | undefined, rawArgs: string): string {
+  const keep = tool?.eventArgsKeys;
+  if (keep === undefined) {
+    return truncateChars(rawArgs, EVENT_SUMMARY_MAX_CHARS);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArgs);
+  } catch {
+    return "{}";
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return "{}";
+  }
+  const record = parsed as Record<string, unknown>;
+  const redacted: Record<string, unknown> = {};
+  for (const key of keep) {
+    if (key in record) {
+      redacted[key] = record[key];
+    }
+  }
+  return truncateChars(JSON.stringify(redacted), EVENT_SUMMARY_MAX_CHARS);
 }
 
 /**

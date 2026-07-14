@@ -53,6 +53,9 @@ function emptyServerFactory(): McpHttpServerOptions["createServer"] {
       repoResolver: { resolveRepoPath: () => undefined },
       nodeDirectory: { list: async () => [], resolve: () => undefined },
       delegations,
+      applyArtifact: async () => {
+        throw new Error("unused");
+      },
     });
 }
 

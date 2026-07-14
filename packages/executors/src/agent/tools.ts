@@ -82,6 +82,15 @@ export interface AgentTool {
   name: string;
   /** OpenAI function-calling definition advertised to the model. */
   definition: ToolDefinition;
+  /**
+   * Event-redaction allowlist for the loop's `tool_call` events. When set,
+   * the emitted `argsSummary` is rebuilt from ONLY these argument keys —
+   * everything else (file content, edit text) never reaches the event
+   * stream. Content-carrying tools (write_file, edit_file) set this to
+   * `["path"]` so progress events are `{tool, path}` with NO content (the
+   * design spec's §2 promise); absent = the raw-args summary (read tools).
+   */
+  eventArgsKeys?: readonly string[];
   execute(
     args: unknown,
     context: ToolExecutionContext,
@@ -223,6 +232,8 @@ export interface ToolSpec<T> {
   /** JSON Schema for the arguments object. */
   parameters: Record<string, unknown>;
   argsSchema: z.ZodType<T>;
+  /** See {@link AgentTool.eventArgsKeys}; absent = raw-args event summaries. */
+  eventArgsKeys?: readonly string[];
   run: (args: T, context: ToolExecutionContext) => Promise<ToolResultPayload>;
 }
 
@@ -242,6 +253,9 @@ export function makeTool<T>(spec: ToolSpec<T>): AgentTool {
         parameters: spec.parameters,
       },
     },
+    ...(spec.eventArgsKeys !== undefined
+      ? { eventArgsKeys: spec.eventArgsKeys }
+      : {}),
     async execute(args, context) {
       const parsed = spec.argsSchema.safeParse(args);
       if (!parsed.success) {
