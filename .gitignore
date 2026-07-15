@@ -6,3 +6,7 @@ coverage/
 .env
 .env.*
 .DS_Store
+
+# Claude Code - personal / local, not shared
+CLAUDE.md
+.claude/settings.local.json
