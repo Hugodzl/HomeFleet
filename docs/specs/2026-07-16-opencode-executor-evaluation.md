@@ -153,7 +153,35 @@ Mapped to the evaluation gates, hardest-hitting first:
   data-loss bugs are **still open this month**. ADR-0003's original objection —
   "we inherit its event schema and release cadence" — is confirmed and amplified.
 
-## 6. The pivotal insight
+## 6. Why git-free-by-construction is the invariant to protect
+
+Gate #1 turns on a distinction worth making explicit, because the whole
+recommendation defends it. Git is not a file editor — it runs hooks, executes
+commands via config/aliases, rewrites refs, pushes to remotes, and rewrites
+history. So *where* git capability sits decides the blast radius of untrusted
+model output:
+
+- **git-free-by-construction** (today): the executor has no git code, so the
+  worst a malicious or confused edit can do is write bytes into a throwaway
+  worktree we diff anyway — it cannot plant a hook, rewrite config to run a
+  command, move a ref, or push. The daemon then makes exactly **one** commit
+  under a known author (`HomeFleet Worker`), giving clean, verifiable provenance;
+  reject/crash is just `rm` on the worktree; and the edit loop is testable
+  in-process with no git in the path.
+- **git-free-by-configuration** (opencode): git-*capable*, muzzled by settings
+  (`snapshot:false` + bash `git *` deny) that can regress, with a known env
+  footgun (`GIT_INDEX_FILE`) that already corrupts the real index.
+
+The framing that captures it: HomeFleet crosses a **trust boundary** — a remote
+worker runs a local model we don't fully control, and the result lands in someone
+else's repo. Git-free editing keeps the untrusted side producing only *file
+bytes*; the trusted daemon decides how those become history and whether to accept
+them. It downgrades the operation from *privileged action* to *data we review as
+a diff* — the "gate is the feature" thesis in one line. Config-based muzzling
+weakens a property we hold structurally today, which is why "conditional" on
+gate #1 is a real cost, not a checkbox.
+
+## 7. The pivotal insight
 
 **The only upside is portable; none of the costs are.** The replacer is MIT,
 self-contained, and explicitly documented in opencode's own source as a synthesis
@@ -170,7 +198,7 @@ on safety-by-construction, the harvested matcher must keep **exact-match-first
 ordering** and port opencode's **runaway-match guard**, so a fuzzy strategy can
 never silently swallow an unintended span.
 
-## 7. Criteria scorecard
+## 8. Criteria scorecard
 
 | # | Criterion | Verdict | Note |
 |---|-----------|---------|------|
@@ -187,7 +215,7 @@ pass but upside low → defer; gates pass + upside high + cost bounded →
 adapt-as-option. **Result:** gate #2 is weak on our target and the upside is
 portable → **defer wrapping + harvest the technique.**
 
-## 8. The harvest follow-up (if ratified)
+## 9. The harvest follow-up (if ratified)
 
 A scoped, low-risk robustness upgrade to the custom executor — *not* part of this
 gate; its own TDD task with spec + quality review:
@@ -199,11 +227,11 @@ gate; its own TDD task with spec + quality review:
 - Keep it git-free and in-process; extend the existing `write-tools.test.ts` with
   the near-miss cases (whitespace/indentation/escaped-newline/CRLF) and an
   adversarial "wrong-block" case asserting the guard refuses it.
-- Measure on the rig against the T1–T3 task set (§9) — this becomes the empirical
+- Measure on the rig against the T1–T3 task set (§10) — this becomes the empirical
   check on whether the harvested matcher closes the gap, and the trigger to
   reopen §Triggers if it doesn't.
 
-## 9. Triggers that would reopen "wrap opencode"
+## 10. Triggers that would reopen "wrap opencode"
 
 - HomeFleet gains a **frontier/hosted-model** delegation path (opencode's
   recommended models and native-tool-calling assumption then hold).

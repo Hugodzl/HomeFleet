@@ -49,9 +49,18 @@ correctly foresaw is better closed by harvesting than by wrapping.
 
 ## Consequences
 
-- The custom git-free `WriteExecutor` remains the sole write executor. The
-  git-free-by-construction safety model, first-party containment, and hermetic
-  in-process test story are all preserved.
+- The custom git-free `WriteExecutor` remains the sole write executor,
+  preserving the git-free-*by-construction* safety model, first-party
+  containment, and hermetic in-process tests. This is the property worth
+  defending: HomeFleet crosses a trust boundary — a remote, not-fully-trusted
+  local model whose output lands in someone else's repo — and git-free editing
+  keeps the untrusted side producing only file *bytes* while the daemon owns
+  turning them into one auditable `HomeFleet Worker` commit. That bounds the
+  blast radius of untrusted output to "files in a throwaway worktree we diff
+  anyway" (not "ran a hook, moved a ref, or pushed"), yields clean provenance,
+  and makes reject/crash a trivial `rm`. opencode's git-free-*by-configuration*
+  (muzzled by settings, with a `GIT_INDEX_FILE` index-corruption footgun) only
+  weakens a property we hold structurally today.
 - A **scoped harvest follow-up** is authorized (separate TDD task, not this gate):
   port the strategy ladder into `edit_file` — **exact-match-first**, with
   opencode's **runaway-match guard** and CRLF/LF normalization, so fuzzy matching
