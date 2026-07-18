@@ -1,7 +1,7 @@
 # Evaluation: opencode as an optional second write executor
 
-**Status:** paper eval complete; recommendation **PROPOSED — pending Hugo's
-ratification** (2026-07-16). This is the decision gate deferred from the v0.2
+**Status:** paper eval complete; recommendation **ratified — accepted** (Hugo,
+2026-07-16), recorded in ADR-0007. This is the decision gate deferred from the v0.2
 plan ("Opencode adapter — separate decision gate + bake-off devlog"). It
 revisits the prediction in [ADR-0003](../adr/0003-custom-minimal-agent-executor.md)
 and is recorded as [ADR-0007](../adr/0007-opencode-optional-executor.md).

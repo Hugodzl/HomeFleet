@@ -1,6 +1,6 @@
 # ADR-0007: Defer wrapping opencode; harvest its edit-application technique
 
-- **Status:** proposed (pending Hugo's ratification)
+- **Status:** accepted (ratified by Hugo, 2026-07-16)
 - **Date:** 2026-07-16
 
 ## Context
