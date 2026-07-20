@@ -6,17 +6,21 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.1 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.2 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
-> `homefleet` operator CLI — and the two-machine acceptance demo has run on
-> real hardware: recon delegated laptop → tower against a local
-> Qwen3.6-35B-A3B returned an accurate architecture summary in ~105 s end to
-> end, and a repeat delegation re-synced in 129 ms vs ~6 s cold (details in
-> the [rig devlog](devlog/2026-07-09-m8-rig-bringup.md)). v0.1 is a tagged
-> release you install from source, Windows-first; npm packages come later.
-> The [Quickstart](#quickstart) below runs today on a single machine;
-> pairing two real machines is the [two-machine demo](#two-machine-demo).
+> `homefleet` operator CLI — and **v0.2 adds code-writing delegation**: a
+> worker's local model edits code in a throwaway worktree and the change comes
+> back as a reviewable `homefleet/<id>` branch in your own repo, landed by a
+> non-forced fetch that never touches your branches or working tree. Both
+> capabilities have run on real hardware, laptop → tower against a local
+> Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
+> ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), and a scoped write task
+> wrote a new test file that landed and passed, end to end in ~169 s
+> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)). v0.2 is
+> a tagged release you install from source, Windows-first; npm packages come
+> later. The [Quickstart](#quickstart) runs today on a single machine; pairing
+> two real machines is the [two-machine demo](#two-machine-demo).
 
 Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
 [ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),

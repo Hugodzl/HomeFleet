@@ -134,7 +134,7 @@ What a node advertises about itself during `hello` and pairing.
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
-  "daemonVersion": "0.1.0",
+  "daemonVersion": "0.2.0",
   "protocolVersion": "0.2.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
