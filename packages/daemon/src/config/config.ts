@@ -16,21 +16,16 @@
  *
  * Sections: `discovery` (M3), `workspace` (M7, worker side), and the M9
  * daemon-assembly set — `node`, `hfp`, `mcp`, `control`, `executors`,
- * `models`, `jobs`, `repos`.
+ * `catalog`, `jobs`, `repos`.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  type AgentEndpointOptions,
-  type CommandAllowlistEntry,
-  MIN_AGENT_CONTEXT_WINDOW,
-} from "@homefleet/executors";
+import type { CommandAllowlistEntry } from "@homefleet/executors";
 import {
   DeviceIdSchema,
   DISCOVERY_MULTICAST_GROUP,
   DISCOVERY_UDP_PORT,
   HFP_DEFAULT_PORT,
-  ModelInfoSchema,
   NodeNameSchema,
   RepoIdSchema,
 } from "@homefleet/protocol";
@@ -242,46 +237,50 @@ export const CommandExecutorConfigSchema = z.strictObject({
 });
 export type CommandExecutorConfig = z.infer<typeof CommandExecutorConfigSchema>;
 
-/** Mirrors `AgentEndpointOptions` in @homefleet/executors (guard below). */
-export const AgentEndpointConfigSchema = z.strictObject({
-  /** OpenAI-compatible base URL; `/chat/completions` is appended. */
+/** An OpenAI-compatible endpoint a catalog model is served from. */
+export const CatalogEndpointConfigSchema = z.strictObject({
   baseUrl: z.url(),
-  /** Sent as a Bearer token when present. */
   apiKey: z.string().min(1).optional(),
-  /** Default model ID; a job's `params.model` overrides it (same endpoint). */
-  model: z.string().min(1),
-  /**
-   * Context window served by the endpoint, in tokens. The floor mirrors
-   * `MIN_AGENT_CONTEXT_WINDOW` in @homefleet/executors: model servers
-   * commonly default to ~4k contexts, which silently break agentic tool use
-   * (truncated histories, dropped tool schemas) — refuse at config time
-   * instead of failing confusingly mid-job.
-   */
-  contextWindow: z.int().min(MIN_AGENT_CONTEXT_WINDOW),
 });
-export type AgentEndpointConfig = z.infer<typeof AgentEndpointConfigSchema>;
-// Compile error here = the schema above drifted from AgentEndpointOptions.
-type _AgentEndpointMirrorGuard = Expect<
-  MutuallyAssignable<AgentEndpointConfig, AgentEndpointOptions>
->;
+export type CatalogEndpointConfig = z.infer<typeof CatalogEndpointConfigSchema>;
+
+/**
+ * One offered model. `endpoint` overrides `catalog.defaultEndpoint`.
+ * `contextWindow` is optional here; the >= MIN_AGENT_CONTEXT_WINDOW floor is
+ * enforced at model-resolution time for agent/write use (see node/catalog.ts).
+ */
+export const CatalogModelConfigSchema = z.strictObject({
+  id: z.string().min(1),
+  label: z.string().min(1).optional(),
+  contextWindow: z.int().min(1).optional(),
+  endpoint: CatalogEndpointConfigSchema.optional(),
+});
+export type CatalogModelConfig = z.infer<typeof CatalogModelConfigSchema>;
+
+/** The node's model catalog: the single source of model truth. */
+export const CatalogConfigSchema = z.strictObject({
+  defaultEndpoint: CatalogEndpointConfigSchema.optional(),
+  models: z.array(CatalogModelConfigSchema).default([]),
+});
+export type CatalogConfig = z.infer<typeof CatalogConfigSchema>;
 
 export const AgentExecutorConfigSchema = z.strictObject({
-  endpoint: AgentEndpointConfigSchema,
-  /** Allowlist for the agent's run_command tool; absent disables the tool. */
+  /** Catalog model id used when a recon task names no model. Optional; a
+   *  single-entry catalog is the implicit default (resolved at dispatch). */
+  defaultModel: z.string().min(1).optional(),
   commandAllowlist: CommandAllowlistConfigSchema.optional(),
 });
 export type AgentExecutorConfig = z.infer<typeof AgentExecutorConfigSchema>;
 
 /**
  * Write-executor config (code-writing jobs that produce commits). The shape
- * is coincidentally IDENTICAL to `AgentExecutorConfigSchema` today — an
- * OpenAI-compatible endpoint plus an optional command allowlist — but
- * declared separately on purpose: the two may diverge (e.g. a future
- * write-specific budget cap), so this is NOT an alias.
+ * is coincidentally IDENTICAL to `AgentExecutorConfigSchema` today — a
+ * catalog `defaultModel` plus an optional command allowlist — but declared
+ * separately on purpose: the two may diverge (e.g. a future write-specific
+ * budget cap), so this is NOT an alias.
  */
 export const WriteExecutorConfigSchema = z.strictObject({
-  endpoint: AgentEndpointConfigSchema,
-  /** Allowlist for the write agent's run_command tool; absent disables the tool. */
+  defaultModel: z.string().min(1).optional(),
   commandAllowlist: CommandAllowlistConfigSchema.optional(),
 });
 export type WriteExecutorConfig = z.infer<typeof WriteExecutorConfigSchema>;
@@ -342,24 +341,56 @@ export const ReposConfigSchema = z
     },
   );
 
-export const DaemonConfigSchema = z.strictObject({
-  // prefault: a config file without a `discovery` key gets the sub-object's
-  // field-level defaults applied, same as an empty file.
-  discovery: DiscoveryConfigSchema.prefault({}),
-  // Same treatment for `workspace`: absent -> the fail-closed defaults (empty
-  // allowlist, so the worker accepts no repos until one is configured).
-  workspace: WorkspaceConfigSchema.prefault({}),
-  // M9 sections, same prefault treatment (absent key = section defaults).
-  node: NodeConfigSchema.prefault({}),
-  hfp: HfpConfigSchema.prefault({}),
-  mcp: McpConfigSchema.prefault({}),
-  control: ControlConfigSchema.prefault({}),
-  executors: ExecutorsConfigSchema.prefault({}),
-  /** Models this node advertises in NodeInfo (protocol `ModelInfoSchema`). */
-  models: z.array(ModelInfoSchema).default([]),
-  jobs: JobsConfigSchema.prefault({}),
-  repos: ReposConfigSchema,
-});
+export const DaemonConfigSchema = z
+  .strictObject({
+    // prefault: a config file without a `discovery` key gets the sub-object's
+    // field-level defaults applied, same as an empty file.
+    discovery: DiscoveryConfigSchema.prefault({}),
+    // Same treatment for `workspace`: absent -> the fail-closed defaults (empty
+    // allowlist, so the worker accepts no repos until one is configured).
+    workspace: WorkspaceConfigSchema.prefault({}),
+    // M9 sections, same prefault treatment (absent key = section defaults).
+    node: NodeConfigSchema.prefault({}),
+    hfp: HfpConfigSchema.prefault({}),
+    mcp: McpConfigSchema.prefault({}),
+    control: ControlConfigSchema.prefault({}),
+    executors: ExecutorsConfigSchema.prefault({}),
+    /** The node's model catalog: the single source of model truth. */
+    catalog: CatalogConfigSchema.prefault({}),
+    jobs: JobsConfigSchema.prefault({}),
+    repos: ReposConfigSchema,
+  })
+  .superRefine((config, ctx) => {
+    const seen = new Set<string>();
+    config.catalog.models.forEach((m, i) => {
+      if (seen.has(m.id)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["catalog", "models", i, "id"],
+          message: `duplicate catalog model id "${m.id}"`,
+        });
+      }
+      seen.add(m.id);
+    });
+    for (const kind of ["agent", "write"] as const) {
+      const ex = config.executors[kind];
+      if (ex === undefined) continue;
+      if (config.catalog.models.length === 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["executors", kind],
+          message: `executors.${kind} is configured but catalog.models is empty`,
+        });
+      }
+      if (ex.defaultModel !== undefined && !seen.has(ex.defaultModel)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["executors", kind, "defaultModel"],
+          message: `executors.${kind}.defaultModel "${ex.defaultModel}" is not a catalog model id`,
+        });
+      }
+    }
+  });
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 
 const CONFIG_FILE = "config.json";

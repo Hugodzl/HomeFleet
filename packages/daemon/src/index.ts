@@ -33,10 +33,14 @@ export {
   publicProfileCheckCommand,
 } from "./cli/setup-commands.js";
 export {
-  type AgentEndpointConfig,
-  AgentEndpointConfigSchema,
   type AgentExecutorConfig,
   AgentExecutorConfigSchema,
+  type CatalogConfig,
+  CatalogConfigSchema,
+  type CatalogEndpointConfig,
+  CatalogEndpointConfigSchema,
+  type CatalogModelConfig,
+  CatalogModelConfigSchema,
   type CommandAllowlistEntryConfig,
   CommandAllowlistEntryConfigSchema,
   type CommandExecutorConfig,

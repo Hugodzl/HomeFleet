@@ -57,7 +57,7 @@ test("a missing config file yields all defaults", async () => {
     mcp: { host: "127.0.0.1", port: DEFAULT_MCP_PORT },
     control: { host: "127.0.0.1", port: DEFAULT_CONTROL_PORT },
     executors: {},
-    models: [],
+    catalog: { models: [] },
     jobs: {},
     repos: [],
   });
@@ -200,16 +200,17 @@ test("a full valid config round-trips every M9 section", async () => {
         },
       },
       agent: {
-        endpoint: {
-          baseUrl: "http://192.168.1.9:1234/v1",
-          apiKey: "sk-local",
-          model: "qwen3-coder",
-          contextWindow: 65536,
-        },
+        defaultModel: "qwen3-coder",
         commandAllowlist: { pnpm: { executable: "pnpm.cmd" } },
       },
     },
-    models: [{ id: "qwen3-coder", contextWindow: 65536 }, { id: "llama3" }],
+    catalog: {
+      defaultEndpoint: {
+        baseUrl: "http://192.168.1.9:1234/v1",
+        apiKey: "sk-local",
+      },
+      models: [{ id: "qwen3-coder", contextWindow: 65536 }, { id: "llama3" }],
+    },
     jobs: { maxConcurrentJobs: 2, maxQueuedJobs: 8, maxRetainedJobs: 100 },
     repos: [{ repoId: "homefleet", path: "D:/Git/HomeFleet" }],
   };
@@ -262,43 +263,38 @@ test("a command executor with only an empty allowlist parses (allows nothing)", 
   expect(config.executors.agent).toBeUndefined();
 });
 
-test("an agent endpoint contextWindow below the floor throws", async () => {
+test("an agent executor without a defaultModel parses", async () => {
   const dir = await newDataDir();
   await writeConfig(
     dir,
     JSON.stringify({
-      executors: {
-        agent: {
-          endpoint: {
-            baseUrl: "http://localhost:1234/v1",
-            model: "m",
-            contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
-          },
+      executors: { agent: {} },
+      catalog: { models: [{ id: "m", contextWindow: 32768 }] },
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.executors.agent).toEqual({});
+});
+
+test("a write executor parses defaultModel + commandAllowlist (same shape as agent)", async () => {
+  const dir = await newDataDir();
+  const write = {
+    defaultModel: "qwen3-coder",
+    commandAllowlist: { pnpm: { executable: "pnpm.cmd" } },
+  };
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: { write },
+      catalog: {
+        defaultEndpoint: {
+          baseUrl: "http://192.168.1.9:1234/v1",
+          apiKey: "sk-local",
         },
+        models: [{ id: "qwen3-coder", contextWindow: 65536 }],
       },
     }),
   );
-  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
-});
-
-test("an agent executor without an endpoint throws", async () => {
-  const dir = await newDataDir();
-  await writeConfig(dir, JSON.stringify({ executors: { agent: {} } }));
-  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
-});
-
-test("a write executor parses endpoint + commandAllowlist (same shapes as agent)", async () => {
-  const dir = await newDataDir();
-  const write = {
-    endpoint: {
-      baseUrl: "http://192.168.1.9:1234/v1",
-      apiKey: "sk-local",
-      model: "qwen3-coder",
-      contextWindow: 65536,
-    },
-    commandAllowlist: { pnpm: { executable: "pnpm.cmd" } },
-  };
-  await writeConfig(dir, JSON.stringify({ executors: { write } }));
   const config = await loadDaemonConfig(dir);
   expect(config.executors.write).toEqual(write);
   // Configuring write does not implicitly enable the other executors.
@@ -336,6 +332,81 @@ test("a model entry with a non-positive contextWindow throws", async () => {
   await writeConfig(
     dir,
     JSON.stringify({ models: [{ id: "m", contextWindow: 0 }] }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a catalog with a shared default endpoint and per-entry override parses", async () => {
+  const dir = await newDataDir();
+  const cfg = {
+    catalog: {
+      defaultEndpoint: { baseUrl: "http://127.0.0.1:8080/v1" },
+      models: [
+        { id: "qwen3.5-9b", label: "Qwen 3.5 9B", contextWindow: 32768 },
+        {
+          id: "sdxl",
+          contextWindow: 4096,
+          endpoint: { baseUrl: "http://127.0.0.1:7860/v1" },
+        },
+      ],
+    },
+    executors: { agent: { defaultModel: "qwen3.5-9b" } },
+    repos: [],
+  };
+  await writeConfig(dir, JSON.stringify(cfg));
+  const config = await loadDaemonConfig(dir);
+  expect(config.catalog.models).toHaveLength(2);
+  expect(config.executors.agent?.defaultModel).toBe("qwen3.5-9b");
+});
+
+test("a duplicate catalog model id throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      catalog: { models: [{ id: "m" }, { id: "m" }] },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("a defaultModel that is not a catalog id throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      catalog: { models: [{ id: "a", contextWindow: 32768 }] },
+      executors: { agent: { defaultModel: "b" } },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("an agent executor with an empty catalog throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: { agent: { defaultModel: "a" } },
+      catalog: { models: [] },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("an unknown key inside a catalog entry throws (strict)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      catalog: {
+        models: [{ id: "a", contextWindow: 32768, provider: "ollama" }],
+      },
+      repos: [],
+    }),
   );
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
