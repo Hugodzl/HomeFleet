@@ -18,7 +18,7 @@ disagree, the schemas win and this document has a bug.
 
 ## Status of This Document
 
-Draft. Describes protocol version **0.2.0** as implemented by the
+Draft. Describes protocol version **0.3.0** as implemented by the
 `@homefleet/protocol` package. Everything in a v0.x protocol version is
 subject to change until v1.
 
@@ -118,7 +118,7 @@ What a node advertises about itself during `hello` and pairing.
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
 | `name`              | string                                  | Human-readable, 1–64 chars, no control characters (C0 or DEL) |
 | `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
-| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.2.0"` for this document |
+| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.3.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
 | `executors`         | `("command" \| "agent" \| "write")[]`   | Executor kinds this node offers                |
@@ -140,7 +140,7 @@ catalog-derived model. `GpuInfo` is `{ name: string, vramBytes?: integer ≥ 0 }
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "daemonVersion": "0.2.0",
-  "protocolVersion": "0.2.0",
+  "protocolVersion": "0.3.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
   "executors": ["command", "agent"],
@@ -648,14 +648,14 @@ LocalSend ships); response rate-limiting is a possible future hardening.
 | `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
 | `name`            | string  | Human-readable, 1–64 chars, no control characters (same constraints as `NodeInfo.name`) |
 | `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
-| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.2.0"` for this document            |
+| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.3.0"` for this document            |
 
 ```json
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "port": 47113,
-  "protocolVersion": "0.2.0"
+  "protocolVersion": "0.3.0"
 }
 ```
 
@@ -702,7 +702,7 @@ as one JSON document per datagram, at most 4096 bytes.
 | `kind` | `"announce" \| "response"`  | See exchange rules below     |
 
 ```json
-{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.2.0" }
+{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.3.0" }
 ```
 
 Exchange rules:
