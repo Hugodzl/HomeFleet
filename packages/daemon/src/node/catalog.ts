@@ -7,7 +7,7 @@ import {
   type AgentEndpointOptions,
   MIN_AGENT_CONTEXT_WINDOW,
 } from "@homefleet/executors";
-import type { HfpErrorCode, JobType } from "@homefleet/protocol";
+import type { HfpErrorCode, JobType, ModelStatus } from "@homefleet/protocol";
 import type { DaemonConfig } from "../config/config.js";
 
 /** A catalog entry with its endpoint resolved (entry.endpoint ?? defaultEndpoint). */
@@ -138,4 +138,89 @@ export function makeModelResolver(catalog: CatalogRuntime): ModelResolver {
       },
     };
   };
+}
+
+export interface ValidateOptions {
+  /** Per-endpoint probe timeout in ms. */
+  timeoutMs: number;
+  /** Injectable for tests; defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Best-effort startup probe. For each DISTINCT endpoint, GET `{baseUrl}/models`
+ * and map declared ids to ok/not_served/unreachable. Never throws — a down or
+ * slow server just yields `unreachable` for its models. Endpoint-less entries
+ * are `unreachable` without a probe.
+ */
+export async function validateCatalog(
+  catalog: CatalogRuntime,
+  opts: ValidateOptions,
+): Promise<Map<string, ModelStatus>> {
+  const f = opts.fetchImpl ?? fetch;
+  const status = new Map<string, ModelStatus>();
+  const byBase = new Map<string, { ids: string[]; apiKey?: string }>();
+  for (const e of catalog.entries.values()) {
+    if (e.baseUrl === undefined) {
+      status.set(e.id, "unreachable");
+      continue;
+    }
+    const g = byBase.get(e.baseUrl);
+    if (g === undefined) {
+      byBase.set(e.baseUrl, {
+        ids: [e.id],
+        ...(e.apiKey !== undefined ? { apiKey: e.apiKey } : {}),
+      });
+    } else {
+      g.ids.push(e.id);
+    }
+  }
+  await Promise.all(
+    [...byBase.entries()].map(async ([baseUrl, { ids, apiKey }]) => {
+      const served = await probeServed(f, baseUrl, apiKey, opts.timeoutMs);
+      for (const id of ids) {
+        status.set(
+          id,
+          served === null
+            ? "unreachable"
+            : served.has(id)
+              ? "ok"
+              : "not_served",
+        );
+      }
+    }),
+  );
+  return status;
+}
+
+async function probeServed(
+  f: typeof fetch,
+  baseUrl: string,
+  apiKey: string | undefined,
+  timeoutMs: number,
+): Promise<Set<string> | null> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/models`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await f(url, {
+      signal: controller.signal,
+      ...(apiKey !== undefined
+        ? { headers: { authorization: `Bearer ${apiKey}` } }
+        : {}),
+    });
+    if (!res.ok) return null;
+    const body: unknown = await res.json();
+    const data = (body as { data?: unknown }).data;
+    if (!Array.isArray(data)) return null;
+    return new Set(
+      data
+        .map((m) => (m as { id?: unknown }).id)
+        .filter((id): id is string => typeof id === "string"),
+    );
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }

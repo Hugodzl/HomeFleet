@@ -4,6 +4,7 @@ import {
   buildCatalog,
   type CatalogRuntime,
   makeModelResolver,
+  validateCatalog,
 } from "./catalog.js";
 
 function runtime(
@@ -161,4 +162,90 @@ test("write resolves against the write default, not the agent default", () => {
     ok: true,
     endpoint: { model: "writer" },
   });
+});
+
+/** A fake fetch mapping baseUrl -> served ids; "THROW" simulates a down server. */
+function fakeFetch(byUrl: Record<string, string[] | "THROW">): typeof fetch {
+  return (async (input: string | URL) => {
+    const url = String(input);
+    const base = url.replace(/\/models$/, "");
+    const served = byUrl[base];
+    if (served === undefined)
+      return { ok: false, json: async () => ({}) } as Response;
+    if (served === "THROW") throw new Error("connection refused");
+    return {
+      ok: true,
+      json: async () => ({ data: served.map((id) => ({ id })) }),
+    } as Response;
+  }) as unknown as typeof fetch;
+}
+
+test("validateCatalog marks served models ok, absent models not_served", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://h/v1" },
+    { id: "b", contextWindow: 32768, baseUrl: "http://h/v1" },
+  ]);
+  const status = await validateCatalog(cat, {
+    timeoutMs: 1000,
+    fetchImpl: fakeFetch({ "http://h/v1": ["a"] }),
+  });
+  expect(status.get("a")).toBe("ok");
+  expect(status.get("b")).toBe("not_served");
+});
+
+test("validateCatalog marks entries on a down server unreachable", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://down/v1" },
+  ]);
+  const status = await validateCatalog(cat, {
+    timeoutMs: 1000,
+    fetchImpl: fakeFetch({ "http://down/v1": "THROW" }),
+  });
+  expect(status.get("a")).toBe("unreachable");
+});
+
+test("validateCatalog marks an endpoint-less entry unreachable without fetching", async () => {
+  const cat = runtime([{ id: "adv", contextWindow: 32768 }]);
+  let calls = 0;
+  const status = await validateCatalog(cat, {
+    timeoutMs: 1000,
+    fetchImpl: (async () => {
+      calls++;
+      return { ok: false, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch,
+  });
+  expect(status.get("adv")).toBe("unreachable");
+  expect(calls).toBe(0);
+});
+
+test("validateCatalog probes each distinct endpoint once", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://h/v1" },
+    { id: "b", contextWindow: 32768, baseUrl: "http://h/v1" },
+    { id: "c", contextWindow: 32768, baseUrl: "http://other/v1" },
+  ]);
+  const seen: string[] = [];
+  const impl = (async (input: string | URL) => {
+    seen.push(String(input));
+    return {
+      ok: true,
+      json: async () => ({ data: [{ id: "a" }, { id: "b" }, { id: "c" }] }),
+    } as Response;
+  }) as unknown as typeof fetch;
+  await validateCatalog(cat, { timeoutMs: 1000, fetchImpl: impl });
+  expect(seen.sort()).toEqual(["http://h/v1/models", "http://other/v1/models"]);
+});
+
+test("validateCatalog treats a timeout/abort as unreachable", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://slow/v1" },
+  ]);
+  const impl = ((_input: string | URL, init?: { signal?: AbortSignal }) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(new Error("aborted")),
+      );
+    })) as unknown as typeof fetch;
+  const status = await validateCatalog(cat, { timeoutMs: 5, fetchImpl: impl });
+  expect(status.get("a")).toBe("unreachable");
 });
