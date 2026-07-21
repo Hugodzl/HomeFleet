@@ -58,7 +58,9 @@ test("HfpErrorSchema rejects non-JSON-serializable details", () => {
 });
 
 test("HfpErrorCodeSchema includes the model-catalog codes", () => {
-  expect(HfpErrorCodeSchema.parse("MODEL_NOT_OFFERED")).toBe("MODEL_NOT_OFFERED");
+  expect(HfpErrorCodeSchema.parse("MODEL_NOT_OFFERED")).toBe(
+    "MODEL_NOT_OFFERED",
+  );
   expect(HfpErrorCodeSchema.parse("NO_MODEL_SPECIFIED")).toBe(
     "NO_MODEL_SPECIFIED",
   );

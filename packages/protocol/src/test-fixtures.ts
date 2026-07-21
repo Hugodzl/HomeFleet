@@ -26,7 +26,14 @@ export const validNodeInfo: NodeInfo = {
   platform: "win32",
   roles: ["inference", "execution"],
   executors: ["command", "agent"],
-  models: [{ id: "qwen3.5-9b", label: "Qwen 3.5 9B", contextWindow: 32768, status: "ok" }],
+  models: [
+    {
+      id: "qwen3.5-9b",
+      label: "Qwen 3.5 9B",
+      contextWindow: 32768,
+      status: "ok",
+    },
+  ],
   hardware: {
     cpu: "AMD Ryzen 5 5600X",
     ramBytes: 34359738368,
