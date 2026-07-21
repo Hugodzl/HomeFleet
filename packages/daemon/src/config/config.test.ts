@@ -519,6 +519,21 @@ test("a config mixing catalog and a legacy endpoint is rejected (no silent merge
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
+test("a malformed legacy endpoint (no model) is a clean rejection, not a crash", async () => {
+  const dir = await newDataDir();
+  // The normalizer folds this into a catalog entry with an undefined id; the
+  // schema then rejects it as a clean "Invalid daemon config" rather than
+  // throwing out of the normalizer.
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: { agent: { endpoint: { baseUrl: "http://h/v1" } } },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
 test("a non-ENOENT read failure throws instead of yielding defaults", async () => {
   const dir = await newDataDir();
   // A directory where the file should be makes readFile fail with a

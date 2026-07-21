@@ -26,6 +26,8 @@ export function normalizeLegacyConfig(raw: unknown): unknown {
 
   if (Array.isArray(clone.models)) {
     for (const m of clone.models as unknown[]) {
+      // A malformed advisory entry (non-object / missing string id) is skipped
+      // here; if it mattered it surfaces later via schema rejection.
       if (isRecord(m) && typeof m.id === "string") {
         const e: Record<string, unknown> = { id: m.id };
         if (typeof m.contextWindow === "number")

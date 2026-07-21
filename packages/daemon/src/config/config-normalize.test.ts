@@ -33,6 +33,20 @@ test("legacy agent endpoint becomes a catalog entry + defaultModel", () => {
   });
 });
 
+test("legacy write endpoint becomes a catalog entry + defaultModel", () => {
+  const out = normalizeLegacyConfig({
+    executors: {
+      write: {
+        endpoint: { baseUrl: "http://h/v1", model: "w", contextWindow: 32768 },
+      },
+    },
+  }) as any;
+  expect(out.catalog.models).toEqual([
+    { id: "w", endpoint: { baseUrl: "http://h/v1" }, contextWindow: 32768 },
+  ]);
+  expect(out.executors.write).toEqual({ defaultModel: "w" });
+});
+
 test("legacy advisory models[] fold in as endpoint-less entries", () => {
   const out = normalizeLegacyConfig({
     models: [{ id: "a", contextWindow: 8192 }, { id: "b" }],
