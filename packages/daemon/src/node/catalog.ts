@@ -1,7 +1,7 @@
 /**
  * The node's model catalog at runtime: config flattened into an id→entry map
  * with endpoints resolved, plus a pure resolver used for submit-time
- * enforcement. Startup validation (validateCatalog) lives here too (Task 5).
+ * enforcement. Startup validation is added alongside.
  */
 import {
   type AgentEndpointOptions,

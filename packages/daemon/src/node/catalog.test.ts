@@ -38,12 +38,44 @@ test("buildCatalog resolves per-entry endpoint over the default", () => {
   expect(cat.defaults).toEqual({ recon: "a", write: undefined });
 });
 
+test("buildCatalog maps both the agent and write executor defaults", () => {
+  const cat = buildCatalog({
+    catalog: {
+      models: [
+        { id: "a", contextWindow: 32768 },
+        { id: "b", contextWindow: 32768 },
+      ],
+    },
+    executors: { agent: { defaultModel: "a" }, write: { defaultModel: "b" } },
+  });
+  expect(cat.defaults).toEqual({ recon: "a", write: "b" });
+  expect(cat.entries.has("a")).toBe(true);
+  expect(cat.entries.has("b")).toBe(true);
+});
+
 test("resolver returns the endpoint for a requested model in the catalog", () => {
   const resolve = makeModelResolver(runtime([OK]));
   const r = resolve("recon", "qwen");
   expect(r).toEqual({
     ok: true,
     endpoint: { baseUrl: "http://h/v1", model: "qwen", contextWindow: 32768 },
+  });
+});
+
+test("resolver carries the entry apiKey onto the resolved endpoint", () => {
+  const resolve = makeModelResolver(
+    runtime([
+      { id: "qwen", contextWindow: 32768, baseUrl: "http://h/v1", apiKey: "k" },
+    ]),
+  );
+  expect(resolve("recon", "qwen")).toEqual({
+    ok: true,
+    endpoint: {
+      baseUrl: "http://h/v1",
+      model: "qwen",
+      contextWindow: 32768,
+      apiKey: "k",
+    },
   });
 });
 
