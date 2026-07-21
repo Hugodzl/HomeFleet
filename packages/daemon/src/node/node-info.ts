@@ -1,7 +1,9 @@
 /**
  * The real NodeInfo builder (M9): assembles the capability profile this
- * daemon advertises in `hello`/pairing from config (name, executors,
- * models), OS facts (hostname, platform, hardware), and live job load.
+ * daemon advertises in `hello`/pairing from config (name, executors),
+ * OS facts (hostname, platform, hardware), live job load, and the
+ * caller-supplied, status-stamped model catalog (built by the daemon from
+ * `buildCatalog` + `validateCatalog`; see `node/catalog.ts`).
  *
  * The provider is a `() => NodeInfo` closure so consumers (the node
  * directory's `hello`, discovery announcements) always see CURRENT load:
@@ -11,6 +13,7 @@ import os from "node:os";
 import {
   type ExecutorKind,
   HFP_PROTOCOL_VERSION,
+  type ModelInfo,
   type NodeInfo,
   NodeInfoSchema,
   type NodeRole,
@@ -18,10 +21,7 @@ import {
 import type { DaemonConfig } from "../config/config.js";
 
 /** The config sections the profile is derived from (DaemonConfig satisfies it). */
-export type NodeInfoConfig = Pick<
-  DaemonConfig,
-  "node" | "executors" | "models"
->;
+export type NodeInfoConfig = Pick<DaemonConfig, "node" | "executors">;
 
 /**
  * Live job-load surface the profile reads on every call. A `Pick`-style
@@ -38,7 +38,7 @@ export interface JobLoadSource {
 export interface NodeInfoProviderOptions {
   /** This node's device ID (SHA-256 cert fingerprint), from its identity. */
   deviceId: string;
-  /** The loaded daemon config (only `node`/`executors`/`models` are read). */
+  /** The loaded daemon config (only `node`/`executors` are read). */
   config: NodeInfoConfig;
   /** The daemon's own version, advertised as `daemonVersion` (semver). */
   daemonVersion: string;
@@ -51,6 +51,8 @@ export interface NodeInfoProviderOptions {
   jobs?: JobLoadSource;
   /** Test override for `os.hostname()` (the name-fallback chain is OS-dependent). */
   hostname?: string;
+  /** The status-stamped catalog to advertise (built by the daemon). */
+  models: ModelInfo[];
 }
 
 /** Node's platform coerced into the protocol's supported set. */
@@ -117,7 +119,7 @@ function resolveNodeName(
 export function createNodeInfoProvider(
   options: NodeInfoProviderOptions,
 ): () => NodeInfo {
-  const { deviceId, config, daemonVersion, jobs } = options;
+  const { deviceId, config, daemonVersion, jobs, models } = options;
   const name = resolveNodeName(config.node.name, options.hostname, deviceId);
 
   const executors: ExecutorKind[] = [];
@@ -158,7 +160,7 @@ export function createNodeInfoProvider(
       platform,
       roles,
       executors,
-      models: config.models,
+      models,
       hardware,
       // See {@link NodeInfoProviderOptions.jobs} for the 1/0 default.
       maxConcurrentJobs: jobs?.maxConcurrent ?? 1,

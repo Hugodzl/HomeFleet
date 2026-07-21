@@ -7,7 +7,12 @@ import {
   type AgentEndpointOptions,
   MIN_AGENT_CONTEXT_WINDOW,
 } from "@homefleet/executors";
-import type { HfpErrorCode, JobType, ModelStatus } from "@homefleet/protocol";
+import type {
+  HfpErrorCode,
+  JobType,
+  ModelInfo,
+  ModelStatus,
+} from "@homefleet/protocol";
 import type { DaemonConfig } from "../config/config.js";
 
 /** A catalog entry with its endpoint resolved (entry.endpoint ?? defaultEndpoint). */
@@ -226,4 +231,21 @@ async function probeServed(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export const DEFAULT_CATALOG_PROBE_TIMEOUT_MS = 3000;
+
+/** The catalog as advertised in NodeInfo: entries + their validation status. */
+export function advertisedModels(
+  catalog: CatalogRuntime,
+  statuses: Map<string, ModelStatus>,
+): ModelInfo[] {
+  return [...catalog.entries.values()].map((e) => ({
+    id: e.id,
+    ...(e.label !== undefined ? { label: e.label } : {}),
+    ...(e.contextWindow !== undefined
+      ? { contextWindow: e.contextWindow }
+      : {}),
+    status: statuses.get(e.id) ?? "unreachable",
+  }));
 }

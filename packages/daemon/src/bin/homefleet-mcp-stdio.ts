@@ -64,11 +64,13 @@ export async function buildStdioMcpServer(dataDir: string): Promise<{
     source: endpointSourceFromDiscovery({ knownNodes }),
     hfpClient,
     // The real config-driven profile; no `jobs` source, so the
-    // delegating-front defaults (1 slot, 0 active) apply.
+    // delegating-front defaults (1 slot, 0 active) apply. This shim runs no
+    // JobManager and probes no catalog, so it advertises no models.
     ourNodeInfo: createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
       daemonVersion: DAEMON_VERSION,
+      models: [],
     }),
   });
   const server = createMcpServer({

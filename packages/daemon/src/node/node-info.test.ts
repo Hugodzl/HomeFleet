@@ -4,7 +4,11 @@
  * defaults, and fail-closed schema validation of every emitted profile.
  */
 import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
-import { HFP_PROTOCOL_VERSION, NodeInfoSchema } from "@homefleet/protocol";
+import {
+  HFP_PROTOCOL_VERSION,
+  type ModelInfo,
+  NodeInfoSchema,
+} from "@homefleet/protocol";
 import { expect, test } from "vitest";
 import { DaemonConfigSchema } from "../config/config.js";
 import { JobManager } from "../jobs/job-manager.js";
@@ -12,28 +16,26 @@ import {
   createNodeInfoProvider,
   currentPlatform,
   type JobLoadSource,
+  type NodeInfoConfig,
 } from "./node-info.js";
 
 /** 64 lowercase hex chars — a valid DeviceIdSchema value. */
 const DEVICE_ID = "ab".repeat(32);
 
-/** Minimal valid agent-executor config (endpoint is required). */
-const AGENT_EXECUTOR = {
-  endpoint: {
-    baseUrl: "http://127.0.0.1:11434/v1",
-    model: "test-model",
-    contextWindow: MIN_AGENT_CONTEXT_WINDOW,
-  },
+/**
+ * A one-model catalog: agent/write executors are cross-validated against
+ * `catalog.models` (an executor configured with an empty catalog is a config
+ * error), so any test that configures one must supply this alongside.
+ */
+const CATALOG = {
+  models: [{ id: "test-model", contextWindow: MIN_AGENT_CONTEXT_WINDOW }],
 };
 
-/** Minimal valid write-executor config (same endpoint shape as agent today). */
-const WRITE_EXECUTOR = {
-  endpoint: {
-    baseUrl: "http://127.0.0.1:11434/v1",
-    model: "test-write-model",
-    contextWindow: MIN_AGENT_CONTEXT_WINDOW,
-  },
-};
+/** Minimal valid agent-executor config (defaultModel names a catalog id). */
+const AGENT_EXECUTOR = { defaultModel: "test-model" };
+
+/** Minimal valid write-executor config (same shape as agent today). */
+const WRITE_EXECUTOR = { defaultModel: "test-model" };
 
 /**
  * Builds a provider from a RAW config object (run through the real
@@ -44,6 +46,7 @@ function makeProvider(options: {
   jobs?: JobLoadSource;
   hostname?: string;
   daemonVersion?: string;
+  models?: ModelInfo[];
 }) {
   return createNodeInfoProvider({
     deviceId: DEVICE_ID,
@@ -51,6 +54,7 @@ function makeProvider(options: {
     daemonVersion: options.daemonVersion ?? "0.1.0",
     jobs: options.jobs,
     hostname: options.hostname,
+    models: options.models ?? [],
   });
 }
 
@@ -91,12 +95,14 @@ test("same hostname + different deviceIds yield distinct names (mDNS de-collisio
     config,
     daemonVersion: "0.1.0",
     hostname: "sharedhost",
+    models: [],
   })();
   const b = createNodeInfoProvider({
     deviceId: "bb".repeat(32),
     config,
     daemonVersion: "0.1.0",
     hostname: "sharedhost",
+    models: [],
   })();
   expect(a.name).toBe("sharedhost-aaaaaaaa");
   expect(b.name).toBe("sharedhost-bbbbbbbb");
@@ -127,7 +133,7 @@ test("command executor only -> execution role only", () => {
 
 test("agent executor only -> inference role only (agent does not imply execution)", () => {
   const info = makeProvider({
-    config: { executors: { agent: AGENT_EXECUTOR } },
+    config: { executors: { agent: AGENT_EXECUTOR }, catalog: CATALOG },
   })();
   expect(info.executors).toEqual(["agent"]);
   expect(info.roles).toEqual(["inference"]);
@@ -135,7 +141,10 @@ test("agent executor only -> inference role only (agent does not imply execution
 
 test("both executors -> both roles", () => {
   const info = makeProvider({
-    config: { executors: { command: {}, agent: AGENT_EXECUTOR } },
+    config: {
+      executors: { command: {}, agent: AGENT_EXECUTOR },
+      catalog: CATALOG,
+    },
   })();
   expect(info.executors).toEqual(["command", "agent"]);
   expect(info.roles).toEqual(["execution", "inference"]);
@@ -143,7 +152,7 @@ test("both executors -> both roles", () => {
 
 test("write executor only -> inference role only", () => {
   const info = makeProvider({
-    config: { executors: { write: WRITE_EXECUTOR } },
+    config: { executors: { write: WRITE_EXECUTOR }, catalog: CATALOG },
   })();
   expect(info.executors).toEqual(["write"]);
   expect(info.roles).toEqual(["inference"]);
@@ -153,6 +162,7 @@ test("all three executors -> all kinds advertised, roles deduplicated", () => {
   const info = makeProvider({
     config: {
       executors: { command: {}, agent: AGENT_EXECUTOR, write: WRITE_EXECUTOR },
+      catalog: CATALOG,
     },
   })();
   expect(info.executors).toEqual(["command", "agent", "write"]);
@@ -200,8 +210,24 @@ test("without a jobs source, delegating-front defaults apply (1 slot, 0 active)"
 
 test("configured models are advertised as-is", () => {
   const models = [{ id: "llama-3.1-8b", contextWindow: 131_072 }];
-  const info = makeProvider({ config: { models } })();
+  const info = makeProvider({ models })();
   expect(info.models).toEqual(models);
+});
+
+test("the provider advertises the models it is given, verbatim", () => {
+  const provider = createNodeInfoProvider({
+    deviceId: "a".repeat(64),
+    config: {
+      node: {},
+      executors: { agent: { defaultModel: "qwen" } },
+    } as NodeInfoConfig,
+    daemonVersion: "0.2.0",
+    hostname: "tower",
+    models: [{ id: "qwen", label: "Qwen", contextWindow: 32768, status: "ok" }],
+  });
+  expect(provider().models).toEqual([
+    { id: "qwen", label: "Qwen", contextWindow: 32768, status: "ok" },
+  ]);
 });
 
 test("versions, platform, and hardware facts are populated", () => {
@@ -222,8 +248,9 @@ test("every emitted profile parses NodeInfoSchema", () => {
     config: {
       node: { name: "n" },
       executors: { command: {}, agent: AGENT_EXECUTOR },
-      models: [{ id: "m" }],
+      catalog: CATALOG,
     },
+    models: [{ id: "m" }],
   })();
   expect(() => NodeInfoSchema.parse(info)).not.toThrow();
 });

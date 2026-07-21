@@ -36,6 +36,12 @@ import {
 } from "./mcp/node-directory.js";
 import { createRepoResolver } from "./mcp/repo-resolver.js";
 import { createMcpServer } from "./mcp/server.js";
+import {
+  advertisedModels,
+  buildCatalog,
+  DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
+  validateCatalog,
+} from "./node/catalog.js";
 import { createNodeInfoProvider } from "./node/node-info.js";
 import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
@@ -383,6 +389,11 @@ export class Daemon {
       return finalized.artifact;
     };
 
+    // The model catalog (config.catalog flattened, endpoints resolved). Built
+    // before the JobManager so a later resolveModel wiring (Task 8) and the
+    // NodeInfo provider below share the same runtime instance.
+    const catalog = buildCatalog(config);
+
     // JobManager: config overrides are spread only when present so the
     // manager's own defaults stay the single owner of those numbers.
     const jobs = config.jobs;
@@ -408,12 +419,18 @@ export class Daemon {
     this.teardown.push(() => jobManager.stop());
 
     // NodeInfo AFTER the JobManager (it advertises live load from it);
-    // validates eagerly, so a bad profile fails assembly right here.
+    // validates eagerly, so a bad profile fails assembly right here. The
+    // catalog is best-effort probed first so the advertised models carry a
+    // real ok/not_served/unreachable status from startup.
+    const modelStatuses = await validateCatalog(catalog, {
+      timeoutMs: DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
+    });
     const nodeInfoProvider = createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
       daemonVersion: DAEMON_VERSION,
       jobs: jobManager,
+      models: advertisedModels(catalog, modelStatuses),
     });
     const pairingManager = new PairingManager({
       trustStore,
