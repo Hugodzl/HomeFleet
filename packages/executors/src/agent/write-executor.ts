@@ -6,10 +6,11 @@
  * bundle bookkeeping — wired up by a later task) and an optional report-only
  * verify command.
  *
- * Policy owned here, mirroring what AgentExecutor owns for recon: the
- * context-window floor, the WRITE system prompt (never recon's read-only
- * one), summary capping, commit-message fallback and truncation, the
- * verifyCommand allowlist gate, and the ToolLoopOutcome → JobResult mapping.
+ * Policy owned here, mirroring what AgentExecutor owns for recon: the WRITE
+ * system prompt (never recon's read-only one), summary capping, commit-message
+ * fallback and truncation, the verifyCommand allowlist gate, and the
+ * ToolLoopOutcome → JobResult mapping. The context-window floor now lives in
+ * the daemon's model resolver (`node/catalog.ts`).
  *
  * The failure taxonomy is unchanged: tool-level failures (sandbox and
  * git-admin refusals, unknown tools, unparseable arguments) return to the
@@ -267,11 +268,7 @@ export class WriteExecutor implements Executor<"write"> {
     };
 
     const failed = (
-      code:
-        | "INVALID_REQUEST"
-        | "COMMAND_NOT_ALLOWED"
-        | "BUDGET_EXCEEDED"
-        | "INTERNAL",
+      code: "COMMAND_NOT_ALLOWED" | "BUDGET_EXCEEDED" | "INTERNAL",
       message: string,
       stats: JobStats,
     ): JobResult => ({

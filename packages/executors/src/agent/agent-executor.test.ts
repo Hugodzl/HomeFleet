@@ -682,6 +682,21 @@ test("token stats are omitted when the endpoint never reports usage", async () =
   expect(result.stats.completionTokens).toBeUndefined();
 });
 
+test("a missing context.endpoint fails the job with INTERNAL", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([{ kind: "content", content: "never" }]);
+  const executor = makeExecutor();
+  const { context } = harness(ws, { endpoint: undefined });
+
+  const result = await executor.execute(params(), context);
+
+  assertValid(result);
+  expect(result.status).toBe("failed");
+  expect(result.error?.code).toBe("INTERNAL");
+  // Bailed before any client was built — no model traffic.
+  expect(endpoint.requests).toHaveLength(0);
+});
+
 test("run_command is advertised only when the allowlist has entries", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([

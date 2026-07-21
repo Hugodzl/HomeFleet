@@ -4,9 +4,9 @@
  * budgets, and structured events — a purpose-built loop, deliberately NOT a
  * wrapper around an existing agent harness. The conversation loop itself
  * lives in loop.ts (shared with the v0.2 write executor); this executor
- * owns the recon-specific policy: the context-window floor, the read-only
- * system prompt, summary capping, and the ToolLoopOutcome → JobResult
- * mapping.
+ * owns the recon-specific policy: the read-only system prompt, summary
+ * capping, and the ToolLoopOutcome → JobResult mapping. The context-window
+ * floor now lives in the daemon's model resolver (`node/catalog.ts`).
  *
  * Failure taxonomy: tool-level failures (sandbox rejections, unknown tool
  * names, unparseable arguments, command refusals) are returned TO THE MODEL
@@ -125,7 +125,7 @@ export class AgentExecutor implements Executor<"recon"> {
     };
 
     const failed = (
-      code: "INVALID_REQUEST" | "BUDGET_EXCEEDED" | "INTERNAL",
+      code: "BUDGET_EXCEEDED" | "INTERNAL",
       message: string,
       stats: JobStats,
     ): JobResult => ({

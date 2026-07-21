@@ -204,6 +204,27 @@ test("an unknown verifyCommand name fails with COMMAND_NOT_ALLOWED before any mo
 });
 
 // ---------------------------------------------------------------------------
+// 1a. context.endpoint guard
+// ---------------------------------------------------------------------------
+
+test("a missing context.endpoint fails the job with INTERNAL", async () => {
+  const ws = await makeWorkspace();
+  const endpoint = await startEndpoint([{ kind: "content", content: "never" }]);
+  const finalize = fakeFinalize();
+  const executor = makeExecutor(finalize.fn);
+  const { context } = harness(ws, { endpoint: undefined });
+
+  const result = await executor.execute(params(), context);
+
+  assertValid(result);
+  expect(result.status).toBe("failed");
+  expect(result.error?.code).toBe("INTERNAL");
+  // Bailed before any model traffic and before finalize.
+  expect(endpoint.requests).toHaveLength(0);
+  expect(finalize.calls).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
 // 2. toolset + finish_task terminal protocol
 // ---------------------------------------------------------------------------
 

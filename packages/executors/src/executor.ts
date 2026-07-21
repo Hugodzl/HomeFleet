@@ -42,7 +42,11 @@ export interface AgentEndpointOptions {
   apiKey?: string;
   /** Model ID to request. */
   model: string;
-  /** Context window served by the endpoint, in tokens. */
+  /**
+   * Context window served by the endpoint, in tokens. Reserved for future
+   * history-trimming (ADR-0003); the executor does not read it today — the
+   * daemon's model resolver uses it to enforce the floor at dispatch.
+   */
   contextWindow: number;
 }
 
