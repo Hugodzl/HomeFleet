@@ -31,6 +31,7 @@ import {
 } from "@homefleet/protocol";
 import { z } from "zod";
 import { LOOPBACK_HOSTS } from "../mcp/http-transport.js";
+import { normalizeLegacyConfig } from "./config-normalize.js";
 
 /**
  * Compile-time exact-shape guard: `true` only when `A` and `B` are mutually
@@ -425,7 +426,7 @@ export async function loadDaemonConfig(dataDir: string): Promise<DaemonConfig> {
     return DaemonConfigSchema.parse({});
   }
   try {
-    return DaemonConfigSchema.parse(JSON.parse(text));
+    return DaemonConfigSchema.parse(normalizeLegacyConfig(JSON.parse(text)));
   } catch (cause) {
     throw new Error(
       `Invalid daemon config: ${filePath} is not a valid config file. ` +

@@ -469,6 +469,56 @@ test("partial jobs config leaves the other limits to the JobManager", async () =
   expect(config.jobs.maxRetainedJobs).toBeUndefined();
 });
 
+test("a legacy agent-endpoint config still loads (normalized to a catalog)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://127.0.0.1:8080/v1",
+            model: "qwen3.5-9b",
+            contextWindow: 32768,
+          },
+        },
+      },
+      workspace: { allowedRepoIds: ["homefleet"] },
+      repos: [],
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.catalog.models).toEqual([
+    {
+      id: "qwen3.5-9b",
+      endpoint: { baseUrl: "http://127.0.0.1:8080/v1" },
+      contextWindow: 32768,
+    },
+  ]);
+  expect(config.executors.agent?.defaultModel).toBe("qwen3.5-9b");
+});
+
+test("a config mixing catalog and a legacy endpoint is rejected (no silent merge)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      catalog: { models: [{ id: "a", contextWindow: 32768 }] },
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://h/v1",
+            model: "a",
+            contextWindow: 32768,
+          },
+        },
+      },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
 test("a non-ENOENT read failure throws instead of yielding defaults", async () => {
   const dir = await newDataDir();
   // A directory where the file should be makes readFile fail with a
