@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
 import {
   DISCOVERY_MULTICAST_GROUP,
   DISCOVERY_UDP_PORT,
@@ -302,36 +301,22 @@ test("a write executor parses defaultModel + commandAllowlist (same shape as age
   expect(config.executors.agent).toBeUndefined();
 });
 
-test("a write executor without an endpoint throws", async () => {
+test("a write executor with an empty catalog throws", async () => {
   const dir = await newDataDir();
   await writeConfig(dir, JSON.stringify({ executors: { write: {} } }));
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
-test("a write endpoint contextWindow below the floor throws", async () => {
+test("a catalog model entry with a non-positive contextWindow throws", async () => {
   const dir = await newDataDir();
+  // Single entry, no executor: only CatalogModelConfigSchema's `min(1)` fires
+  // (not the unknown-key or empty-catalog superRefine rules).
   await writeConfig(
     dir,
     JSON.stringify({
-      executors: {
-        write: {
-          endpoint: {
-            baseUrl: "http://localhost:1234/v1",
-            model: "m",
-            contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
-          },
-        },
-      },
+      catalog: { models: [{ id: "m", contextWindow: 0 }] },
+      repos: [],
     }),
-  );
-  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
-});
-
-test("a model entry with a non-positive contextWindow throws", async () => {
-  const dir = await newDataDir();
-  await writeConfig(
-    dir,
-    JSON.stringify({ models: [{ id: "m", contextWindow: 0 }] }),
   );
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });

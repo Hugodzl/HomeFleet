@@ -170,8 +170,8 @@ export type HfpConfig = z.infer<typeof HfpConfigSchema>;
  * A host field restricted to loopback, validated at PARSE time against the
  * same `LOOPBACK_HOSTS` set the MCP transport enforces at bind time — a
  * non-loopback value fails with a config error immediately instead of a
- * bind-time crash later (same refuse-early posture as the agent
- * contextWindow floor).
+ * bind-time crash later (the same refuse-early posture strict parsing gives
+ * the rest of this file).
  */
 const LoopbackHostSchema = z
   .string()
