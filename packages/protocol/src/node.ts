@@ -40,10 +40,21 @@ export const GpuInfoSchema = z.object({
 });
 export type GpuInfo = z.infer<typeof GpuInfoSchema>;
 
-/** A model reachable via the node's OpenAI-compatible endpoint(s). */
+/** Result of the daemon's startup probe of the model's endpoint. */
+export const ModelStatusSchema = z.enum(["ok", "not_served", "unreachable"]);
+export type ModelStatus = z.infer<typeof ModelStatusSchema>;
+
+/** A model this node offers via its OpenAI-compatible endpoint(s). */
 export const ModelInfoSchema = z.object({
   id: z.string(),
+  /** Optional human-readable label surfaced in list_nodes. */
+  label: z.string().optional(),
   contextWindow: z.int().min(1).optional(),
+  /**
+   * Startup-probe status; optional on the wire (a peer may omit it) but the
+   * daemon always sets it when advertising a catalog-derived model.
+   */
+  status: ModelStatusSchema.optional(),
 });
 export type ModelInfo = z.infer<typeof ModelInfoSchema>;
 

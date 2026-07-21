@@ -16,6 +16,8 @@ export const HfpErrorCodeSchema = z.enum([
   "TIMEOUT",
   "BUDGET_EXCEEDED",
   "COMMAND_NOT_ALLOWED",
+  "MODEL_NOT_OFFERED",
+  "NO_MODEL_SPECIFIED",
   "INTERNAL",
 ]);
 export type HfpErrorCode = z.infer<typeof HfpErrorCodeSchema>;

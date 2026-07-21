@@ -14,7 +14,7 @@ const validAnnouncement: DiscoveryAnnouncement = {
   deviceId: validDeviceId,
   name: "tower",
   port: 47113,
-  protocolVersion: "0.2.0",
+  protocolVersion: "0.3.0",
 };
 
 test("DiscoveryAnnouncementSchema round-trips a valid announcement", () => {

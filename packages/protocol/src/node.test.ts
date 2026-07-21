@@ -4,6 +4,7 @@ import {
   ExecutorKindSchema,
   GpuInfoSchema,
   ModelInfoSchema,
+  ModelStatusSchema,
   NodeInfoSchema,
   NodeRoleSchema,
 } from "./node.js";
@@ -58,6 +59,32 @@ test("ModelInfoSchema rejects a contextWindow below 1", () => {
   expect(ModelInfoSchema.safeParse({ id: "m", contextWindow: 0 }).success).toBe(
     false,
   );
+});
+
+test("ModelStatusSchema accepts the three validation statuses and rejects others", () => {
+  for (const s of ["ok", "not_served", "unreachable"]) {
+    expect(ModelStatusSchema.parse(s)).toBe(s);
+  }
+  expect(ModelStatusSchema.safeParse("degraded").success).toBe(false);
+});
+
+test("ModelInfoSchema accepts an optional label and status", () => {
+  const parsed = ModelInfoSchema.parse({
+    id: "qwen3.5-9b",
+    label: "Qwen 3.5 9B",
+    contextWindow: 32768,
+    status: "ok",
+  });
+  expect(parsed).toEqual({
+    id: "qwen3.5-9b",
+    label: "Qwen 3.5 9B",
+    contextWindow: 32768,
+    status: "ok",
+  });
+});
+
+test("ModelInfoSchema still accepts the bare legacy shape (label/status absent)", () => {
+  expect(ModelInfoSchema.parse({ id: "llama3" })).toEqual({ id: "llama3" });
 });
 
 test("NodeRoleSchema accepts defined roles and rejects others", () => {

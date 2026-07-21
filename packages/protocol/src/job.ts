@@ -89,6 +89,8 @@ export type VerifyCommand = z.infer<typeof VerifyCommandSchema>;
 export const WriteJobParamsSchema = z.object({
   type: z.literal("write"),
   workspace: WorkspaceRefSchema,
+  /** Optional model id to target; worker's default if absent. */
+  model: z.string().optional(),
   instructions: z.string().min(1).max(16384),
   /** Advisory starting points only — never an access restriction. */
   pathHints: z.array(z.string().min(1).max(1024)).max(32).optional(),

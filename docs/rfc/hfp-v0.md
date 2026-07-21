@@ -127,8 +127,13 @@ What a node advertises about itself during `hello` and pairing.
 | `maxConcurrentJobs` | integer ≥ 1                             |                                                |
 | `activeJobs`        | integer ≥ 0                             |                                                |
 
-`ModelInfo` is `{ id: string, contextWindow?: integer ≥ 1 }`; `GpuInfo` is
-`{ name: string, vramBytes?: integer ≥ 0 }`.
+`ModelInfo` is `{ id: string, label?: string, contextWindow?: integer ≥ 1,
+status?: ModelStatus }`, where `ModelStatus` is `"ok" | "not_served" |
+"unreachable"` — the daemon's startup probe result for that model's endpoint.
+`label` is an optional human-readable name surfaced in `list_nodes`. Both
+fields are optional on the wire so a peer that omits them (e.g. an older
+node) still parses; the daemon always sets `status` when advertising a
+catalog-derived model. `GpuInfo` is `{ name: string, vramBytes?: integer ≥ 0 }`.
 
 ```json
 {
@@ -139,7 +144,7 @@ What a node advertises about itself during `hello` and pairing.
   "platform": "win32",
   "roles": ["inference", "execution"],
   "executors": ["command", "agent"],
-  "models": [{ "id": "qwen3.5-9b", "contextWindow": 32768 }],
+  "models": [{ "id": "qwen3.5-9b", "label": "Qwen 3.5 9B", "contextWindow": 32768, "status": "ok" }],
   "hardware": {
     "cpu": "AMD Ryzen 5 5600X",
     "ramBytes": 34359738368,
@@ -265,6 +270,7 @@ shape, the delivery endpoint, and the delegator's obligations.
 | --------------- | ---------------- | ---------------------------------------------- |
 | `type`          | `"write"`        |                                                |
 | `workspace`     | `WorkspaceRef`   |                                                |
+| `model`         | string?          | Model ID on the worker; worker's choice if absent |
 | `instructions`  | string           | The task prompt, 1–16384 chars                 |
 | `pathHints`     | string[]?        | ≤ 32 entries, each 1–1024 chars; advisory starting points only, never an access restriction |
 | `verifyCommand` | `VerifyCommand`? | Post-commit verification run                   |
@@ -291,6 +297,7 @@ read+write pair per file touched (`maxWallMs` default is unchanged at
 {
   "type": "write",
   "workspace": { "repoId": "homefleet", "headCommit": "0123456789abcdef0123456789abcdef01234567" },
+  "model": "qwen3.5-9b",
   "instructions": "Add a unit test for the config loader's default handling.",
   "pathHints": ["packages/daemon/src/config.ts"],
   "verifyCommand": { "name": "pnpm", "args": ["test"] },
@@ -739,7 +746,7 @@ queued ---> running +-----------> failed
 
 ## Versioning
 
-- The protocol version is a semver string (this document: **0.2.0**),
+- The protocol version is a semver string (this document: **0.3.0**),
   exported as `HFP_PROTOCOL_VERSION`; the HTTP path prefix carries the major
   version (`/hfp/v0`, exported as `HFP_PATH_PREFIX` and derived from the
   protocol version so the two cannot drift).
@@ -754,6 +761,8 @@ queued ---> running +-----------> failed
   malformed bodies.
 - Breaking changes bump the major version and therefore the path prefix.
   v0 as a whole is a draft and makes no long-term stability promises.
+- 0.3.0: model-catalog fields on `ModelInfo` (`label`, `status`) and `model`
+  on write params — additive.
 
 ## Security Considerations
 

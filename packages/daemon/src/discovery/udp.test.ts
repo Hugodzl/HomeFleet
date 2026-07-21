@@ -29,7 +29,7 @@ function announcement(
     deviceId,
     name: "tower",
     port: 47113,
-    protocolVersion: "0.2.0",
+    protocolVersion: "0.3.0",
     ...overrides,
   };
 }
@@ -162,7 +162,7 @@ test("replies to an announce with a response, unicast to the sender", async () =
     deviceId: deviceIdA,
     name: "tower",
     port: 47113,
-    protocolVersion: "0.2.0",
+    protocolVersion: "0.3.0",
   });
 });
 

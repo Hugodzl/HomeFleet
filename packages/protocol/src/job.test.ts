@@ -204,6 +204,18 @@ test("write job params parse with defaulted budgets", () => {
   expect(params.verifyCommand).toBeUndefined();
 });
 
+test("WriteJobParamsSchema accepts an optional model and defaults it undefined", () => {
+  const base = {
+    type: "write",
+    workspace: validWorkspace,
+    instructions: "Add a test for the parser.",
+  };
+  expect(WriteJobParamsSchema.parse(base).model).toBeUndefined();
+  expect(
+    WriteJobParamsSchema.parse({ ...base, model: "qwen3.5-9b" }).model,
+  ).toBe("qwen3.5-9b");
+});
+
 test("WriteJobParamsSchema keeps explicit hints, verify command, and budgets", () => {
   const params = {
     type: "write",

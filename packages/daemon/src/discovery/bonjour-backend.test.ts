@@ -6,7 +6,7 @@ test("maps a browsed service with addresses straight through", () => {
     toFoundService("homefleet", {
       name: "tower",
       port: 47113,
-      txt: { id: "aa", pv: "0.2.0" },
+      txt: { id: "aa", pv: "0.3.0" },
       addresses: ["192.168.1.20", "fe80::1"],
       referer: { address: "192.168.1.99" },
     }),
@@ -14,7 +14,7 @@ test("maps a browsed service with addresses straight through", () => {
     type: "homefleet",
     name: "tower",
     port: 47113,
-    txt: { id: "aa", pv: "0.2.0" },
+    txt: { id: "aa", pv: "0.3.0" },
     addresses: ["192.168.1.20", "fe80::1"],
   });
 });

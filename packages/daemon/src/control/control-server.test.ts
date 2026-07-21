@@ -36,7 +36,7 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
     name: "test-node",
     platform: "linux",
     daemonVersion: "0.1.0",
-    protocolVersion: "0.2.0",
+    protocolVersion: "0.3.0",
     hfpPort: 11111,
     mcpPort: 22222,
     controlPort: 33333,

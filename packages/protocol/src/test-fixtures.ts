@@ -22,11 +22,11 @@ export const validNodeInfo: NodeInfo = {
   deviceId: validDeviceId,
   name: "tower",
   daemonVersion: "0.1.0",
-  protocolVersion: "0.2.0",
+  protocolVersion: "0.3.0",
   platform: "win32",
   roles: ["inference", "execution"],
   executors: ["command", "agent"],
-  models: [{ id: "qwen3.5-9b", contextWindow: 32768 }],
+  models: [{ id: "qwen3.5-9b", label: "Qwen 3.5 9B", contextWindow: 32768, status: "ok" }],
   hardware: {
     cpu: "AMD Ryzen 5 5600X",
     ramBytes: 34359738368,
