@@ -31,11 +31,7 @@ import {
 import { z } from "zod";
 import type { ExecutionContext, Executor } from "../executor.js";
 import { type CommandAllowlist, safeSpawn } from "../spawn.js";
-import {
-  type AgentEndpointOptions,
-  capSummary,
-  MIN_AGENT_CONTEXT_WINDOW,
-} from "./agent-executor.js";
+import { capSummary } from "./agent-executor.js";
 import { runToolLoop, type ToolLoopStats } from "./loop.js";
 import { OpenAiClient } from "./openai-client.js";
 import type { AgentTool } from "./tools.js";
@@ -227,7 +223,6 @@ export type FinalizeWriteFn = (input: {
 }) => Promise<WriteArtifact | null>;
 
 export interface WriteExecutorOptions {
-  endpoint: AgentEndpointOptions;
   /**
    * Allowlist for the run_command tool AND the gate `verifyCommand.name`
    * must pass; absent or empty disables both.
@@ -238,21 +233,12 @@ export interface WriteExecutorOptions {
 
 export class WriteExecutor implements Executor<"write"> {
   readonly type = "write" as const;
-  private readonly endpoint: AgentEndpointOptions;
   private readonly commandAllowlist: CommandAllowlist;
   private readonly finalize: FinalizeWriteFn;
-  private readonly client: OpenAiClient;
 
   constructor(options: WriteExecutorOptions) {
-    this.endpoint = options.endpoint;
     this.commandAllowlist = options.commandAllowlist ?? {};
     this.finalize = options.finalize;
-    this.client = new OpenAiClient({
-      baseUrl: options.endpoint.baseUrl,
-      ...(options.endpoint.apiKey !== undefined
-        ? { apiKey: options.endpoint.apiKey }
-        : {}),
-    });
   }
 
   async execute(
@@ -312,18 +298,17 @@ export class WriteExecutor implements Executor<"write"> {
       );
     }
 
-    // Same floor as recon (see MIN_AGENT_CONTEXT_WINDOW's rationale); the
-    // same non-guarantee too — it does not bound message-history growth.
-    if (this.endpoint.contextWindow < MIN_AGENT_CONTEXT_WINDOW) {
-      return failed(
-        "INVALID_REQUEST",
-        `endpoint contextWindow ${this.endpoint.contextWindow} is below the ` +
-          `required minimum of ${MIN_AGENT_CONTEXT_WINDOW}: model servers ` +
-          "commonly default to 4k contexts, which silently break agentic " +
-          "tool use; raise the served context window instead.",
-        { toolCalls: 0, wallMs: Date.now() - startedAt },
-      );
+    const endpoint = context.endpoint;
+    if (endpoint === undefined) {
+      return failed("INTERNAL", "no model endpoint was resolved for this job", {
+        toolCalls: 0,
+        wallMs: Date.now() - startedAt,
+      });
     }
+    const client = new OpenAiClient({
+      baseUrl: endpoint.baseUrl,
+      ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
+    });
 
     const toolset = [
       ...buildToolset(this.commandAllowlist, { includeWriteTools: true }),
@@ -331,8 +316,8 @@ export class WriteExecutor implements Executor<"write"> {
     ];
 
     const outcome = await runToolLoop({
-      client: this.client,
-      model: this.endpoint.model,
+      client,
+      model: endpoint.model,
       systemPrompt: writeSystemPrompt(
         context.workspaceDir,
         toolset,

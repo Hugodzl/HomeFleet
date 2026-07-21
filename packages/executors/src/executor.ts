@@ -34,6 +34,18 @@ export type ExecutorEventPayload =
   | ToolCallEventPayload
   | ToolResultEventPayload;
 
+/** The resolved model endpoint an agent/write execution talks to, per job. */
+export interface AgentEndpointOptions {
+  /** OpenAI-compatible base URL; `/chat/completions` is appended. */
+  baseUrl: string;
+  /** Sent as a Bearer token when present. */
+  apiKey?: string;
+  /** Model ID to request. */
+  model: string;
+  /** Context window served by the endpoint, in tokens. */
+  contextWindow: number;
+}
+
 /** Everything an executor needs from the job manager to run one job. */
 export interface ExecutionContext {
   jobId: JobId;
@@ -50,6 +62,11 @@ export interface ExecutionContext {
   emit: (event: ExecutorEventPayload) => void;
   /** Cancellation. Aborting yields a `canceled` result, not a rejection. */
   signal: AbortSignal;
+  /**
+   * Resolved model endpoint for this job (agent/write jobs only; the daemon's
+   * catalog resolver sets it at submit time). Absent for command jobs.
+   */
+  endpoint?: AgentEndpointOptions;
 }
 
 /**

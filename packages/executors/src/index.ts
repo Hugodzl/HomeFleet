@@ -7,7 +7,6 @@
  */
 
 export {
-  type AgentEndpointOptions,
   AgentExecutor,
   type AgentExecutorOptions,
   EVENT_SUMMARY_MAX_CHARS,
@@ -64,6 +63,7 @@ export {
   type CommandExecutorOptions,
 } from "./command/command-executor.js";
 export type {
+  AgentEndpointOptions,
   ExecutionContext,
   Executor,
   ExecutorEventPayload,

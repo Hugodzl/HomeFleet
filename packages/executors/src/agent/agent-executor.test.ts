@@ -19,7 +19,6 @@ import {
   AgentExecutor,
   EVENT_SUMMARY_MAX_CHARS,
   MAX_SUMMARY_BYTES,
-  MIN_AGENT_CONTEXT_WINDOW,
   SUMMARY_TRUNCATION_MARKER,
 } from "./agent-executor.js";
 
@@ -67,22 +66,13 @@ async function startEndpoint(
 }
 
 function makeExecutor(
-  endpoint: MockOpenAiEndpoint,
-  overrides: {
-    contextWindow?: number;
-    commandAllowlist?: CommandAllowlist;
-  } = {},
+  overrides: { commandAllowlist?: CommandAllowlist } = {},
 ): AgentExecutor {
-  return new AgentExecutor({
-    endpoint: {
-      baseUrl: endpoint.baseUrl,
-      model: "default-model",
-      contextWindow: overrides.contextWindow ?? 32_768,
-    },
-    ...(overrides.commandAllowlist !== undefined
+  return new AgentExecutor(
+    overrides.commandAllowlist !== undefined
       ? { commandAllowlist: overrides.commandAllowlist }
-      : {}),
-  });
+      : {},
+  );
 }
 
 /** Parses through the schema so budget defaults apply. */
@@ -112,6 +102,11 @@ function harness(
       workspaceDir,
       emit: (event) => events.push(event),
       signal: new AbortController().signal,
+      endpoint: {
+        baseUrl: "http://unused/v1",
+        model: "default-model",
+        contextWindow: 32768,
+      },
       ...overrides,
     },
   };
@@ -155,8 +150,14 @@ test("happy path: two tool calls, then the content becomes the summary", async (
       usage: { promptTokens: 30, completionTokens: 5 },
     },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -249,8 +250,14 @@ test("every tool is drivable through the loop", async () => {
     },
     { kind: "content", content: "done" },
   ]);
-  const executor = makeExecutor(endpoint, { commandAllowlist: nodeAllowlist });
-  const { context, events } = harness(ws);
+  const executor = makeExecutor({ commandAllowlist: nodeAllowlist });
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -290,8 +297,14 @@ test("sandbox escapes come back as error tool-results and the loop continues", a
     },
     { kind: "content", content: "recovered" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -333,8 +346,14 @@ test("a symlink pointing outside the workspace is refused through the loop", asy
     },
     { kind: "content", content: "done" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -354,8 +373,14 @@ test("an unknown tool name is an error tool-result, not a crash", async () => {
     },
     { kind: "content", content: "sorry, wrong tool" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -380,8 +405,14 @@ test("non-JSON tool arguments are an error tool-result, not a crash", async () =
     },
     { kind: "content", content: "retrying differently" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -401,8 +432,14 @@ test("an oversized model summary is capped so the result can always ship", async
   const endpoint = await startEndpoint([
     { kind: "content", content: "€".repeat(euros) },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -424,8 +461,14 @@ test("a summary at or below the cap is passed through unchanged", async () => {
   const endpoint = await startEndpoint([
     { kind: "content", content: "concise" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -435,8 +478,14 @@ test("a summary at or below the cap is passed through unchanged", async () => {
 test("a malformed endpoint response fails the job with INTERNAL", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "malformed" }]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -449,8 +498,14 @@ test("a malformed endpoint response fails the job with INTERNAL", async () => {
 test("a response with neither content nor tool calls fails with INTERNAL", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "tool_calls", toolCalls: [] }]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -464,8 +519,14 @@ test("an unreachable endpoint fails the job with INTERNAL", async () => {
   // Start and immediately close: the port is real but nothing listens.
   const endpoint = await MockOpenAiEndpoint.start([]);
   await endpoint.close();
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -485,8 +546,14 @@ test("exceeding maxToolCalls fails with BUDGET_EXCEEDED and accurate stats", asy
       ],
     },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(
     params({ budgets: { maxToolCalls: 1 } }),
@@ -509,8 +576,14 @@ test("exceeding maxWallMs during a slow model call fails with BUDGET_EXCEEDED", 
   const endpoint = await startEndpoint([
     { kind: "content", content: "too late", delayMs: 30_000 },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(
     params({ budgets: { maxWallMs: 1000 } }),
@@ -533,7 +606,7 @@ test("cancellation mid-loop yields a canceled result with partial stats", async 
     },
     { kind: "content", content: "never reached" },
   ]);
-  const executor = makeExecutor(endpoint);
+  const executor = makeExecutor();
   const controller = new AbortController();
   const events: ExecutorEventPayload[] = [];
   const context: ExecutionContext = {
@@ -548,6 +621,11 @@ test("cancellation mid-loop yields a canceled result with partial stats", async 
       }
     },
     signal: controller.signal,
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
   };
 
   const result = await executor.execute(params(), context);
@@ -565,9 +643,16 @@ test("cancellation during a pending model call yields canceled", async () => {
   const endpoint = await startEndpoint([
     { kind: "content", content: "too late", delayMs: 30_000 },
   ]);
-  const executor = makeExecutor(endpoint);
+  const executor = makeExecutor();
   const controller = new AbortController();
-  const { context } = harness(ws, { signal: controller.signal });
+  const { context } = harness(ws, {
+    signal: controller.signal,
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
   setTimeout(() => controller.abort(), 100);
 
   const result = await executor.execute(params(), context);
@@ -580,8 +665,14 @@ test("cancellation during a pending model call yields canceled", async () => {
 test("token stats are omitted when the endpoint never reports usage", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "content", content: "done" }]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -591,36 +682,36 @@ test("token stats are omitted when the endpoint never reports usage", async () =
   expect(result.stats.completionTokens).toBeUndefined();
 });
 
-test("contextWindow below the floor is refused with INVALID_REQUEST", async () => {
-  const ws = await makeWorkspace();
-  const endpoint = await startEndpoint([{ kind: "content", content: "x" }]);
-  const executor = makeExecutor(endpoint, {
-    contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
-  });
-  const { context } = harness(ws);
-
-  const result = await executor.execute(params(), context);
-
-  assertValid(result);
-  expect(result.status).toBe("failed");
-  expect(result.error?.code).toBe("INVALID_REQUEST");
-  expect(result.error?.message).toContain(String(MIN_AGENT_CONTEXT_WINDOW));
-  // Refused before any model traffic.
-  expect(endpoint.requests).toHaveLength(0);
-});
-
 test("run_command is advertised only when the allowlist has entries", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([
     { kind: "content", content: "a" },
     { kind: "content", content: "b" },
   ]);
-  const withCommands = makeExecutor(endpoint, {
+  const withCommands = makeExecutor({
     commandAllowlist: nodeAllowlist,
   });
-  await withCommands.execute(params(), harness(ws).context);
-  const disabled = makeExecutor(endpoint, { commandAllowlist: {} });
-  await disabled.execute(params(), harness(ws).context);
+  await withCommands.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
+  const disabled = makeExecutor({ commandAllowlist: {} });
+  await disabled.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   const names = (index: number): string[] =>
     (body(endpoint, index).tools ?? []).map((tool) => tool.function.name);
@@ -634,13 +725,19 @@ test("run_command is advertised only when the allowlist has entries", async () =
   expect(names(1)).toEqual(["read_file", "list_dir", "grep", "glob"]);
 });
 
-test("params.model overrides the endpoint's default model", async () => {
+test("uses the model + baseUrl from context.endpoint", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "content", content: "ok" }]);
-  const executor = makeExecutor(endpoint);
-  const { context } = harness(ws);
+  const executor = makeExecutor();
+  const { context } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "qwen3.5-9b",
+      contextWindow: 32768,
+    },
+  });
 
-  await executor.execute(params({ model: "qwen3.5-9b" }), context);
+  await executor.execute(params(), context);
 
   expect(body(endpoint, 0).model).toBe("qwen3.5-9b");
 });
@@ -659,8 +756,14 @@ test("event summaries are truncated to the summary cap", async () => {
     },
     { kind: "content", content: "done" },
   ]);
-  const executor = makeExecutor(endpoint);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor();
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   await executor.execute(params(), context);
 

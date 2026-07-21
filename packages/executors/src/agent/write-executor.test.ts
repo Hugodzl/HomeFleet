@@ -28,7 +28,6 @@ import {
 } from "../test-fixtures.js";
 import {
   MAX_SUMMARY_BYTES,
-  MIN_AGENT_CONTEXT_WINDOW,
   SUMMARY_TRUNCATION_MARKER,
 } from "./agent-executor.js";
 import {
@@ -105,19 +104,10 @@ function fakeFinalize(
 }
 
 function makeExecutor(
-  endpoint: MockOpenAiEndpoint,
   finalize: FinalizeWriteFn,
-  overrides: {
-    contextWindow?: number;
-    commandAllowlist?: CommandAllowlist;
-  } = {},
+  overrides: { commandAllowlist?: CommandAllowlist } = {},
 ): WriteExecutor {
   return new WriteExecutor({
-    endpoint: {
-      baseUrl: endpoint.baseUrl,
-      model: "default-model",
-      contextWindow: overrides.contextWindow ?? 32_768,
-    },
     ...(overrides.commandAllowlist !== undefined
       ? { commandAllowlist: overrides.commandAllowlist }
       : {}),
@@ -152,6 +142,11 @@ function harness(
       workspaceDir,
       emit: (event) => events.push(event),
       signal: new AbortController().signal,
+      endpoint: {
+        baseUrl: "http://unused/v1",
+        model: "default-model",
+        contextWindow: 32768,
+      },
       ...overrides,
     },
   };
@@ -184,13 +179,19 @@ test("an unknown verifyCommand name fails with COMMAND_NOT_ALLOWED before any mo
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "content", content: "never" }]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
 
   const result = await executor.execute(
     params({ verifyCommand: { name: "pnpm", args: ["test"] } }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -212,12 +213,30 @@ test("the model is offered the write toolset plus finish_task", async () => {
     { kind: "content", content: "a" },
     { kind: "content", content: "b" },
   ]);
-  const withoutCommands = makeExecutor(endpoint, fakeFinalize().fn);
-  await withoutCommands.execute(params(), harness(ws).context);
-  const withCommands = makeExecutor(endpoint, fakeFinalize().fn, {
+  const withoutCommands = makeExecutor(fakeFinalize().fn);
+  await withoutCommands.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
+  const withCommands = makeExecutor(fakeFinalize().fn, {
     commandAllowlist: nodeAllowlist,
   });
-  await withCommands.execute(params(), harness(ws).context);
+  await withCommands.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   const names = (index: number): string[] =>
     (body(endpoint, index).tools ?? []).map((tool) => tool.function.name);
@@ -271,8 +290,14 @@ test("happy path: a real write_file edit, then finish_task drives finalize", asy
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor(finalize.fn);
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -323,8 +348,14 @@ test("a finish_task call with unparseable JSON args falls through as an error to
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor(finalize.fn);
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 
@@ -367,9 +398,18 @@ test("finish_task without a usable summary fails the job with INTERNAL", async (
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("failed");
@@ -395,9 +435,18 @@ test("a junk commitMessage beside a valid summary falls back instead of failing 
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -417,9 +466,18 @@ test("finish_task without a commitMessage falls back to the instructions' first 
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -442,9 +500,18 @@ test("a whitespace-only commitMessage falls back to the instructions' first line
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -462,11 +529,17 @@ test("the system prompt is write-specific and states the finish_task protocol", 
   const endpoint = await startEndpoint([
     { kind: "content", content: "nothing to do" },
   ]);
-  const executor = makeExecutor(endpoint, fakeFinalize().fn);
+  const executor = makeExecutor(fakeFinalize().fn);
 
   await executor.execute(
     params({ instructions: "Rename the greeting function." }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   const first = body(endpoint, 0);
@@ -490,11 +563,17 @@ test("the system prompt is write-specific and states the finish_task protocol", 
 test("pathHints are woven into the system prompt", async () => {
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "content", content: "ok" }]);
-  const executor = makeExecutor(endpoint, fakeFinalize().fn);
+  const executor = makeExecutor(fakeFinalize().fn);
 
   await executor.execute(
     params({ pathHints: ["src/index.ts", "README.md"] }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   const system = String(body(endpoint, 0).messages[0]?.content);
@@ -513,13 +592,19 @@ test("bare content completes the job: content is the summary, commit message fal
     { kind: "content", content: "Refactored as requested." },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
   const result = await executor.execute(
     params({
       instructions: "Refactor the greeting module.\nKeep the API stable.",
     }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -536,14 +621,20 @@ test("a fallback commit message over the artifact cap reaches finalize truncated
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "content", content: "done" }]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
   // First line of the instructions is longer than the schema allows; an
   // untruncated pass-through would fail result validation AFTER the work
   // was committed (the fake echoes it into the artifact).
   const result = await executor.execute(
     params({ instructions: "a".repeat(MAX_COMMIT_MESSAGE_CHARS + 1000) }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -570,9 +661,18 @@ test("a model-supplied commit message over the artifact cap is truncated too", a
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -593,7 +693,7 @@ test("budget exhaustion fails with BUDGET_EXCEEDED and never reaches finalize or
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
 
@@ -602,7 +702,13 @@ test("budget exhaustion fails with BUDGET_EXCEEDED and never reaches finalize or
       budgets: { maxToolCalls: 1 },
       verifyCommand: { name: "node", args: ["-e", ""] },
     }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -620,9 +726,16 @@ test("cancellation yields canceled and never reaches finalize", async () => {
     { kind: "content", content: "too late", delayMs: 30_000 },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
   const controller = new AbortController();
-  const { context } = harness(ws, { signal: controller.signal });
+  const { context } = harness(ws, {
+    signal: controller.signal,
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
   setTimeout(() => controller.abort(), 100);
 
   const result = await executor.execute(params(), context);
@@ -637,9 +750,18 @@ test("a malformed endpoint response fails with INTERNAL and never reaches finali
   const ws = await makeWorkspace();
   const endpoint = await startEndpoint([{ kind: "malformed" }]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("failed");
@@ -653,14 +775,20 @@ test("a throwing finalize fails the job with INTERNAL naming finalize, and verif
   const finalize = fakeFinalize(async () => {
     throw new Error("bundle-out exploded");
   });
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
 
   // The Executor contract: execute RESOLVES in every outcome.
   const result = await executor.execute(
     params({ verifyCommand: { name: "node", args: ["-e", ""] } }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -687,10 +815,17 @@ test("a finalize rejection under an aborted job signal maps to canceled, not INT
     error.name = "AbortError";
     throw error;
   });
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
-  const { context } = harness(ws, { signal: controller.signal });
+  const { context } = harness(ws, {
+    signal: controller.signal,
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(
     params({ verifyCommand: { name: "node", args: ["-e", ""] } }),
@@ -725,7 +860,7 @@ test("a failing verify command is reported without failing the job", async () =>
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
   const verifyArgs = [
@@ -735,7 +870,13 @@ test("a failing verify command is reported without failing the job", async () =>
 
   const result = await executor.execute(
     params({ verifyCommand: { name: "node", args: verifyArgs } }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -763,7 +904,7 @@ test("verify runs AFTER finalize, in the workspace directory", async () => {
     );
     return makeArtifact(input.commitMessage);
   });
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
 
@@ -777,7 +918,13 @@ test("verify runs AFTER finalize, in the workspace directory", async () => {
         ],
       },
     }),
-    harness(ws).context,
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
   );
 
   assertValid(result);
@@ -796,10 +943,17 @@ test("an abort during the verify spawn does not destroy the committed work", asy
     setTimeout(() => controller.abort(), 100);
     return makeArtifact(input.commitMessage);
   });
-  const executor = makeExecutor(endpoint, finalize.fn, {
+  const executor = makeExecutor(finalize.fn, {
     commandAllowlist: nodeAllowlist,
   });
-  const { context } = harness(ws, { signal: controller.signal });
+  const { context } = harness(ws, {
+    signal: controller.signal,
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(
     params({
@@ -822,28 +976,6 @@ test("an abort during the verify spawn does not destroy the committed work", asy
 }, 15_000);
 
 // ---------------------------------------------------------------------------
-// 6. context-window floor
-// ---------------------------------------------------------------------------
-
-test("contextWindow below the floor is refused with INVALID_REQUEST before any model call", async () => {
-  const ws = await makeWorkspace();
-  const endpoint = await startEndpoint([{ kind: "content", content: "x" }]);
-  const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn, {
-    contextWindow: MIN_AGENT_CONTEXT_WINDOW - 1,
-  });
-
-  const result = await executor.execute(params(), harness(ws).context);
-
-  assertValid(result);
-  expect(result.status).toBe("failed");
-  expect(result.error?.code).toBe("INVALID_REQUEST");
-  expect(result.error?.message).toContain(String(MIN_AGENT_CONTEXT_WINDOW));
-  expect(endpoint.requests).toHaveLength(0);
-  expect(finalize.calls).toHaveLength(0);
-});
-
-// ---------------------------------------------------------------------------
 // 7. summary capping
 // ---------------------------------------------------------------------------
 
@@ -863,9 +995,18 @@ test("an oversized finish_task summary is capped so the result can always ship",
       ],
     },
   ]);
-  const executor = makeExecutor(endpoint, fakeFinalize().fn);
+  const executor = makeExecutor(fakeFinalize().fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -889,9 +1030,18 @@ test("finalize returning null (clean tree) yields succeeded with an explicit nul
     { kind: "content", content: "nothing needed changing" },
   ]);
   const finalize = fakeFinalize(async () => null);
-  const executor = makeExecutor(endpoint, finalize.fn);
+  const executor = makeExecutor(finalize.fn);
 
-  const result = await executor.execute(params(), harness(ws).context);
+  const result = await executor.execute(
+    params(),
+    harness(ws, {
+      endpoint: {
+        baseUrl: endpoint.baseUrl,
+        model: "default-model",
+        contextWindow: 32768,
+      },
+    }).context,
+  );
 
   assertValid(result);
   expect(result.status).toBe("succeeded");
@@ -928,8 +1078,14 @@ test("a write into the git admin area is an error tool-result and the loop conti
     },
   ]);
   const finalize = fakeFinalize();
-  const executor = makeExecutor(endpoint, finalize.fn);
-  const { context, events } = harness(ws);
+  const executor = makeExecutor(finalize.fn);
+  const { context, events } = harness(ws, {
+    endpoint: {
+      baseUrl: endpoint.baseUrl,
+      model: "default-model",
+      contextWindow: 32768,
+    },
+  });
 
   const result = await executor.execute(params(), context);
 

@@ -72,19 +72,7 @@ export function capSummary(content: string): string {
   return truncated ? text + SUMMARY_TRUNCATION_MARKER : text;
 }
 
-export interface AgentEndpointOptions {
-  /** OpenAI-compatible base URL; `/chat/completions` is appended. */
-  baseUrl: string;
-  /** Sent as a Bearer token when present. */
-  apiKey?: string;
-  /** Default model ID; a job's `params.model` overrides it (same endpoint). */
-  model: string;
-  /** Context window served by the endpoint, in tokens. */
-  contextWindow: number;
-}
-
 export interface AgentExecutorOptions {
-  endpoint: AgentEndpointOptions;
   /**
    * Allowlist for the run_command tool; absent or empty disables the tool
    * AND omits it from the definitions advertised to the model.
@@ -106,19 +94,10 @@ function systemPrompt(workspaceDir: string, toolset: AgentTool[]): string {
 
 export class AgentExecutor implements Executor<"recon"> {
   readonly type = "recon" as const;
-  private readonly endpoint: AgentEndpointOptions;
   private readonly commandAllowlist: CommandAllowlist;
-  private readonly client: OpenAiClient;
 
-  constructor(options: AgentExecutorOptions) {
-    this.endpoint = options.endpoint;
+  constructor(options: AgentExecutorOptions = {}) {
     this.commandAllowlist = options.commandAllowlist ?? {};
-    this.client = new OpenAiClient({
-      baseUrl: options.endpoint.baseUrl,
-      ...(options.endpoint.apiKey !== undefined
-        ? { apiKey: options.endpoint.apiKey }
-        : {}),
-    });
   }
 
   async execute(
@@ -157,29 +136,23 @@ export class AgentExecutor implements Executor<"recon"> {
       error: { code, message },
     });
 
-    // NOTE: contextWindow is validated-at-floor here (>= MIN_AGENT_CONTEXT_
-    // WINDOW) ONLY. It is NOT yet used to bound message-history growth: the
-    // loop appends every assistant turn and tool result without trimming, so
-    // this value must not be mistaken for "context remaining". Budgets
-    // (maxToolCalls / maxWallMs) are what bound a run today; ADR-0003's
-    // minimal loop is the deliberate v0 decision and history-trimming is
-    // future work, not built here.
-    if (this.endpoint.contextWindow < MIN_AGENT_CONTEXT_WINDOW) {
-      return failed(
-        "INVALID_REQUEST",
-        `endpoint contextWindow ${this.endpoint.contextWindow} is below the ` +
-          `required minimum of ${MIN_AGENT_CONTEXT_WINDOW}: model servers ` +
-          "commonly default to 4k contexts, which silently break agentic " +
-          "tool use; raise the served context window instead.",
-        { toolCalls: 0, wallMs: Date.now() - startedAt },
-      );
+    const endpoint = context.endpoint;
+    if (endpoint === undefined) {
+      return failed("INTERNAL", "no model endpoint was resolved for this job", {
+        toolCalls: 0,
+        wallMs: Date.now() - startedAt,
+      });
     }
+    const client = new OpenAiClient({
+      baseUrl: endpoint.baseUrl,
+      ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
+    });
 
     const toolset = buildToolset(this.commandAllowlist);
 
     const outcome = await runToolLoop({
-      client: this.client,
-      model: params.model ?? this.endpoint.model,
+      client,
+      model: endpoint.model,
       systemPrompt: systemPrompt(context.workspaceDir, toolset),
       userPrompt: params.prompt,
       tools: toolset,
