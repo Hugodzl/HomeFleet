@@ -167,6 +167,9 @@ export async function validateCatalog(
     }
     const g = byBase.get(e.baseUrl);
     if (g === undefined) {
+      // Entries sharing a baseUrl are probed once using the FIRST grouped
+      // entry's apiKey. Fine because status is advisory; each entry still
+      // carries its own apiKey at dispatch (see makeModelResolver).
       byBase.set(e.baseUrl, {
         ids: [e.id],
         ...(e.apiKey !== undefined ? { apiKey: e.apiKey } : {}),

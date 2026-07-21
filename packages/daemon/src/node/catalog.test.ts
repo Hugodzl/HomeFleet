@@ -249,3 +249,30 @@ test("validateCatalog treats a timeout/abort as unreachable", async () => {
   const status = await validateCatalog(cat, { timeoutMs: 5, fetchImpl: impl });
   expect(status.get("a")).toBe("unreachable");
 });
+
+test("validateCatalog marks a reachable-but-erroring endpoint unreachable", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://err/v1" },
+  ]);
+  const status = await validateCatalog(cat, {
+    timeoutMs: 1000,
+    fetchImpl: fakeFetch({}),
+  });
+  expect(status.get("a")).toBe("unreachable"); // !res.ok -> null
+});
+
+test("validateCatalog marks an endpoint with a non-array body unreachable", async () => {
+  const cat = runtime([
+    { id: "a", contextWindow: 32768, baseUrl: "http://weird/v1" },
+  ]);
+  const impl = (async () =>
+    ({
+      ok: true,
+      json: async () => ({ object: "list" }),
+    }) as Response) as unknown as typeof fetch;
+  const status = await validateCatalog(cat, {
+    timeoutMs: 1000,
+    fetchImpl: impl,
+  });
+  expect(status.get("a")).toBe("unreachable"); // non-array data -> null
+});
