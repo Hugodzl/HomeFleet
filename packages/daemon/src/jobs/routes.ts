@@ -328,6 +328,8 @@ export function statusForCode(code: HfpErrorCode): number {
     case "BUSY":
       return 503;
     case "UNSUPPORTED_JOB_TYPE":
+    case "MODEL_NOT_OFFERED":
+    case "NO_MODEL_SPECIFIED":
       return 400;
     default:
       return 400;

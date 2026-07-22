@@ -23,6 +23,7 @@ import {
   createDaemonHarness,
   delegatorOverrides,
   HOST,
+  writeCatalogConfig,
   writeExecutorConfig,
 } from "./test-fixtures.js";
 import { ok, runGit } from "./workspace/git.js";
@@ -176,6 +177,7 @@ test("write delegation end to end: delegate through MCP, lazy apply on job_resul
 
   const { daemon: worker } = await h.startDaemon("worker", {
     executors: { write: writeExecutorConfig(mock) },
+    catalog: writeCatalogConfig(mock),
     workspace: { allowedRepoIds: ["repo-x"] },
   });
   const { daemon: delegator } = await h.startDaemon(

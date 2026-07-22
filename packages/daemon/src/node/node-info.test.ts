@@ -193,6 +193,7 @@ test("a real JobManager satisfies the jobs source shape", () => {
   const manager: JobLoadSource = new JobManager({
     executors: [],
     resolveWorkspace: async () => ({ dir: ".", release: async () => {} }),
+    resolveModel: () => ({ ok: true }),
     maxConcurrentJobs: 3,
   });
   const info = makeProvider({ jobs: manager })();

@@ -25,6 +25,7 @@ import {
 import { afterEach, expect, test } from "vitest";
 import { resolveDataDir } from "../config/paths.js";
 import { type Identity, loadOrCreateIdentity } from "../identity/identity.js";
+import type { ModelResolver } from "../node/catalog.js";
 import { PairingManager } from "../pairing/pairing.js";
 import {
   makeNodeInfo,
@@ -66,6 +67,8 @@ interface Daemon {
 interface DaemonOptions {
   executors?: Executor[];
   resolveWorkspace?: WorkspaceResolver;
+  /** Defaults to a permissive resolver (`{ ok: true }`, no endpoint). */
+  resolveModel?: ModelResolver;
   maxConcurrentJobs?: number;
   maxQueuedJobs?: number;
   maxRetainedJobs?: number;
@@ -106,6 +109,7 @@ async function createDaemon(
   const jobManager = new JobManager({
     executors: options.executors ?? [],
     resolveWorkspace,
+    resolveModel: options.resolveModel ?? (() => ({ ok: true })),
     ...(options.maxConcurrentJobs !== undefined
       ? { maxConcurrentJobs: options.maxConcurrentJobs }
       : {}),
@@ -303,15 +307,15 @@ test("agent recon job end-to-end: tool_call/tool_result/result events in order",
 
   const a = await createDaemon("alpha");
   const b = await createDaemon("bravo", {
-    executors: [
-      new AgentExecutor({
-        endpoint: {
-          baseUrl: mock.baseUrl,
-          model: "test-model",
-          contextWindow: 32_768,
-        },
-      }),
-    ],
+    executors: [new AgentExecutor({})],
+    resolveModel: () => ({
+      ok: true,
+      endpoint: {
+        baseUrl: mock.baseUrl,
+        model: "test-model",
+        contextWindow: 32_768,
+      },
+    }),
   });
   await writeFile(path.join(b.workspaceDir, "README.md"), "# hello\n");
   await pairAToB(a, b);

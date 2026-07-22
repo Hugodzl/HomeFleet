@@ -34,6 +34,7 @@ import { resolveDataDir } from "../config/paths.js";
 import { type Identity, loadOrCreateIdentity } from "../identity/identity.js";
 import { JobManager, type WorkspaceResolver } from "../jobs/job-manager.js";
 import { registerJobRoutes } from "../jobs/routes.js";
+import type { ModelResolver } from "../node/catalog.js";
 import { PairingManager } from "../pairing/pairing.js";
 import {
   makeNodeInfo,
@@ -112,6 +113,8 @@ afterEach(async () => {
 interface DaemonOptions {
   executors?: Executor[];
   resolveWorkspace?: WorkspaceResolver;
+  /** Defaults to a permissive resolver (`{ ok: true }`, no endpoint). */
+  resolveModel?: ModelResolver;
   maxConcurrentJobs?: number;
   maxQueuedJobs?: number;
 }
@@ -138,6 +141,7 @@ async function createDaemon(
   const jobManager = new JobManager({
     executors: options.executors ?? [],
     resolveWorkspace,
+    resolveModel: options.resolveModel ?? (() => ({ ok: true })),
     ...(options.maxConcurrentJobs !== undefined
       ? { maxConcurrentJobs: options.maxConcurrentJobs }
       : {}),
@@ -404,15 +408,15 @@ test("delegate_task (recon) end-to-end via the mock model endpoint", async () =>
 
   const agent = await createDaemon("agent");
   const worker = await createDaemon("worker", {
-    executors: [
-      new AgentExecutor({
-        endpoint: {
-          baseUrl: mock.baseUrl,
-          model: "test-model",
-          contextWindow: 32_768,
-        },
-      }),
-    ],
+    executors: [new AgentExecutor({})],
+    resolveModel: () => ({
+      ok: true,
+      endpoint: {
+        baseUrl: mock.baseUrl,
+        model: "test-model",
+        contextWindow: 32_768,
+      },
+    }),
   });
   await writeFile(path.join(worker.workspaceDir, "README.md"), "# hello\n");
   await pairAToB(agent, worker);
@@ -850,16 +854,15 @@ async function createWriteWorker(
   );
   cleanups.push(() => mock.close());
   return createDaemon("write-worker", {
-    executors: [
-      new WriteExecutor({
-        endpoint: {
-          baseUrl: mock.baseUrl,
-          model: "test-model",
-          contextWindow: 32_768,
-        },
-        finalize,
-      }),
-    ],
+    executors: [new WriteExecutor({ finalize })],
+    resolveModel: () => ({
+      ok: true,
+      endpoint: {
+        baseUrl: mock.baseUrl,
+        model: "test-model",
+        contextWindow: 32_768,
+      },
+    }),
   });
 }
 

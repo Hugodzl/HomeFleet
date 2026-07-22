@@ -204,25 +204,27 @@ test("job eviction reaps the job's artifact (onJobEvicted → ArtifactStore.remo
 
 test("executors.write config assembles a WriteExecutor whose finalize closure hits the REAL workspace store", async () => {
   await startTestDaemon({
-    executors: {
-      write: {
-        endpoint: {
-          baseUrl: "http://127.0.0.1:9/v1",
-          model: "test-model",
+    catalog: {
+      models: [
+        {
+          id: "test-model",
           contextWindow: 32_768,
+          endpoint: { baseUrl: "http://127.0.0.1:9/v1" },
         },
-      },
+      ],
+    },
+    executors: {
+      write: { defaultModel: "test-model" },
     },
   });
 
   expect(captured.writeExecutorOptions).toHaveLength(1);
   const options = captured
     .writeExecutorOptions[0] as ExecutorsWriteExecutorOptions;
-  expect(options.endpoint).toMatchObject({
-    baseUrl: "http://127.0.0.1:9/v1",
-    model: "test-model",
-    contextWindow: 32_768,
-  });
+  // The construction options carry NO endpoint (Task 7/8): the model
+  // endpoint is resolved per-job from the catalog and threaded through
+  // ExecutionContext, not baked into the executor at assembly time.
+  expect(options).not.toHaveProperty("endpoint");
 
   // The finalize closure is wired to the daemon's real WorkspaceStore: a
   // jobId with no live write worktree surfaces the store's typed

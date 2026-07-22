@@ -388,18 +388,48 @@ export function createDaemonHarness(
   };
 }
 
-/** The worker-side write-executor config against a scripted mock endpoint. */
-export function writeExecutorConfig(mock: MockOpenAiEndpoint): {
-  endpoint: { baseUrl: string; model: string; contextWindow: number };
+/** Catalog model id the shared write-executor test fixtures target. */
+export const WRITE_TEST_MODEL_ID = "test-model";
+
+/**
+ * The worker-side write-executor config against a scripted mock endpoint
+ * (A2: the executor itself takes no endpoint — `defaultModel` names a
+ * catalog entry; pair this with {@link writeCatalogConfig} for the same
+ * `mock`, spread alongside `executors` in the daemon config overrides).
+ */
+export function writeExecutorConfig(_mock: MockOpenAiEndpoint): {
+  defaultModel: string;
   commandAllowlist: { node: { executable: string } };
 } {
   return {
-    endpoint: {
-      baseUrl: mock.baseUrl,
-      model: "test-model",
-      contextWindow: 32_768,
-    },
+    defaultModel: WRITE_TEST_MODEL_ID,
     commandAllowlist: { node: { executable: process.execPath } },
+  };
+}
+
+/**
+ * The node-level catalog entry backing {@link writeExecutorConfig}'s
+ * `defaultModel`: a single model pointed at the scripted mock endpoint.
+ * `executors.write` is rejected at config load unless its `defaultModel`
+ * names a `catalog.models` id, so every test that configures the write
+ * executor against `mock` must also spread this into its overrides' top-level
+ * `catalog` key.
+ */
+export function writeCatalogConfig(mock: MockOpenAiEndpoint): {
+  models: Array<{
+    id: string;
+    contextWindow: number;
+    endpoint: { baseUrl: string };
+  }>;
+} {
+  return {
+    models: [
+      {
+        id: WRITE_TEST_MODEL_ID,
+        contextWindow: 32_768,
+        endpoint: { baseUrl: mock.baseUrl },
+      },
+    ],
   };
 }
 

@@ -6,6 +6,7 @@
  * These are the manager's private data shapes; the wire contract lives in
  * `@homefleet/protocol` (JobParams / JobResult / JobEvent / JobSnapshot).
  */
+import type { AgentEndpointOptions } from "@homefleet/executors";
 import type {
   HfpError,
   HfpErrorCode,
@@ -39,6 +40,13 @@ export interface JobRecord {
   owner: string;
   params: JobParams;
   status: JobStatus;
+  /**
+   * The resolved model endpoint for this job (agent/write jobs only),
+   * computed once at submit time by the injected {@link ModelResolver} and
+   * threaded into the {@link ExecutionContext} unchanged — the resolver's
+   * output is the ONLY source of `context.endpoint`.
+   */
+  endpoint?: AgentEndpointOptions;
   /** Present iff `status` is terminal. */
   result?: JobResult;
   /** Ordered event buffer; `events[i].seq === i`. */

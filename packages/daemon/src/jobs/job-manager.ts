@@ -35,6 +35,7 @@ import type {
 } from "@homefleet/executors";
 import type {
   CancelResponse,
+  HfpError,
   JobEvent,
   JobId,
   JobParams,
@@ -49,6 +50,7 @@ import {
   JobEventSchema,
   JobSnapshotSchema,
 } from "@homefleet/protocol";
+import type { ModelResolver } from "../node/catalog.js";
 import { JobDispatchError, type JobRecord, type JobSubscriber } from "./job.js";
 
 /** Default number of jobs that may run concurrently. */
@@ -111,6 +113,12 @@ export interface JobManagerOptions {
   /** One executor per supported job type; a duplicate type is a config error. */
   executors: Executor[];
   resolveWorkspace: WorkspaceResolver;
+  /**
+   * Resolves the model an agent/write job should target against the node's
+   * catalog, enforced at {@link JobManager.submit}. A command job is never
+   * consulted (see the {@link ModelResolver} contract).
+   */
+  resolveModel: ModelResolver;
   /** Defaults to {@link DEFAULT_MAX_CONCURRENT_JOBS}. */
   maxConcurrentJobs?: number;
   /** Defaults to {@link DEFAULT_MAX_QUEUED_JOBS}. */
@@ -155,6 +163,7 @@ export interface JobSubscription {
 export class JobManager {
   private readonly executors: Map<JobType, Executor>;
   private readonly resolveWorkspace: WorkspaceResolver;
+  private readonly resolveModel: ModelResolver;
   private readonly maxConcurrentJobs: number;
   private readonly maxQueuedJobs: number;
   private readonly maxRetainedJobs: number;
@@ -183,6 +192,7 @@ export class JobManager {
       this.executors.set(executor.type, executor);
     }
     this.resolveWorkspace = options.resolveWorkspace;
+    this.resolveModel = options.resolveModel;
     this.maxConcurrentJobs =
       options.maxConcurrentJobs ?? DEFAULT_MAX_CONCURRENT_JOBS;
     this.maxQueuedJobs = options.maxQueuedJobs ?? DEFAULT_MAX_QUEUED_JOBS;
@@ -232,6 +242,26 @@ export class JobManager {
         { type: params.type },
       );
     }
+    // Resolve the model BEFORE the BUSY check: a request naming an unoffered
+    // or unspecified model is a client error (MODEL_NOT_OFFERED /
+    // NO_MODEL_SPECIFIED / INVALID_REQUEST), not a capacity problem, so it
+    // must reject the same way regardless of how busy this worker is.
+    const requestedModel =
+      params.type === "recon" || params.type === "write"
+        ? params.model
+        : undefined;
+    const resolution = this.resolveModel(params.type, requestedModel);
+    if (!resolution.ok) {
+      // ModelResolution.details is typed as the looser Record<string,
+      // unknown> (catalog.ts has no wire-schema dependency); every value the
+      // resolver actually constructs is a plain JSON-safe literal, so this
+      // narrows to the wire-safe HfpError shape rather than widening it.
+      throw new JobDispatchError(
+        resolution.code,
+        resolution.message,
+        resolution.details as unknown as HfpError["details"],
+      );
+    }
     // Bound the queue: accept only if a slot is free (starts immediately) or
     // the queue has room. Never let peer submissions grow state without bound.
     if (
@@ -255,6 +285,9 @@ export class JobManager {
       subscribers: new Set(),
       abort: new AbortController(),
       createdAt: Date.now(),
+      ...(resolution.endpoint !== undefined
+        ? { endpoint: resolution.endpoint }
+        : {}),
     };
     this.records.set(jobId, record);
     this.queue.push(jobId);
@@ -580,6 +613,7 @@ export class JobManager {
         workspaceDir: handle.dir,
         emit: (payload) => this.emitExecutorEvent(record, payload),
         signal: record.abort.signal,
+        ...(record.endpoint !== undefined ? { endpoint: record.endpoint } : {}),
       };
 
       let result: JobResult;

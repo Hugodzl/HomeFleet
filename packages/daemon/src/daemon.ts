@@ -40,6 +40,7 @@ import {
   advertisedModels,
   buildCatalog,
   DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
+  makeModelResolver,
   validateCatalog,
 } from "./node/catalog.js";
 import { createNodeInfoProvider } from "./node/node-info.js";
@@ -245,18 +246,16 @@ function buildExecutors(
   }
   if (agent !== undefined) {
     executors.push(
-      new AgentExecutor({
-        endpoint: agent.endpoint,
-        ...(agent.commandAllowlist !== undefined
+      new AgentExecutor(
+        agent.commandAllowlist !== undefined
           ? { commandAllowlist: agent.commandAllowlist }
-          : {}),
-      }),
+          : {},
+      ),
     );
   }
   if (write !== undefined) {
     executors.push(
       new WriteExecutor({
-        endpoint: write.endpoint,
         ...(write.commandAllowlist !== undefined
           ? { commandAllowlist: write.commandAllowlist }
           : {}),
@@ -400,6 +399,7 @@ export class Daemon {
     const jobManager = new JobManager({
       executors: buildExecutors(config, finalizeWrite),
       resolveWorkspace: workspaceStore.createResolver(),
+      resolveModel: makeModelResolver(catalog),
       // Evicted job records take their artifact bundle with them. Kept SYNC
       // by ratified design: remove() deletes its map entry before its only
       // await and never rejects, so nothing here can dangle or throw.

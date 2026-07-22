@@ -15,7 +15,7 @@ import type {
   ReconJobParams,
   WriteJobParams,
 } from "@homefleet/protocol";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { JobDispatchError } from "./job.js";
 import {
   DEFAULT_MAX_CONCURRENT_JOBS,
@@ -108,6 +108,10 @@ function makeManager(options: Partial<JobManagerOptions> = {}): JobManager {
     resolveWorkspace:
       options.resolveWorkspace ??
       (async () => ({ dir: "/unit-ws", release: async () => {} })),
+    // Permissive by default (no endpoint): none of this file's fake
+    // executors read context.endpoint, so only tests exercising submit-time
+    // model enforcement need to override this.
+    resolveModel: options.resolveModel ?? (() => ({ ok: true })),
     ...options,
   });
   managers.push(manager);
@@ -466,6 +470,45 @@ test("a write job with no write executor registered is rejected UNSUPPORTED_JOB_
   expect((thrown as JobDispatchError).code).toBe("UNSUPPORTED_JOB_TYPE");
 });
 
+test("submit rejects an un-offered model with MODEL_NOT_OFFERED", () => {
+  // A recon-capable executor must be registered so the request clears the
+  // UNSUPPORTED_JOB_TYPE gate and actually reaches model resolution.
+  const manager = makeManager({
+    executors: [new SucceedingExecutor2()],
+    resolveModel: () => ({
+      ok: false,
+      code: "MODEL_NOT_OFFERED",
+      message: "not offered",
+      details: { model: "ghost" },
+    }),
+  });
+  try {
+    manager.submit(reconParams({ model: "ghost" }), OWNER);
+    expect.unreachable("submit should have thrown");
+  } catch (e) {
+    expect(e).toBeInstanceOf(JobDispatchError);
+    expect((e as JobDispatchError).code).toBe("MODEL_NOT_OFFERED");
+  }
+});
+
+test("submit rejects when no model resolves (NO_MODEL_SPECIFIED)", () => {
+  const manager = makeManager({
+    executors: [new SucceedingExecutor2()],
+    resolveModel: () => ({
+      ok: false,
+      code: "NO_MODEL_SPECIFIED",
+      message: "no default",
+    }),
+  });
+  expect(() => manager.submit(reconParams(), OWNER)).toThrow(JobDispatchError);
+});
+
+test("submit accepts a command job without consulting a model", () => {
+  const resolveModel = vi.fn(() => ({ ok: true as const }));
+  const manager = makeManager({ resolveModel });
+  expect(() => manager.submit(commandParams(), OWNER)).not.toThrow();
+});
+
 test("onJobEvicted fires with the evicted jobId on retention overflow", async () => {
   const evicted: JobId[] = [];
   const manager = makeManager({
@@ -542,12 +585,13 @@ class SucceedingExecutor2 implements Executor<"recon"> {
   }
 }
 
-function reconParams(): JobParams {
+function reconParams(overrides: Partial<ReconJobParams> = {}): JobParams {
   return {
     type: "recon",
     workspace: { repoId: "r", headCommit: "a".repeat(40) },
     prompt: "hi",
     budgets: { maxToolCalls: 5, maxWallMs: 30_000 },
+    ...overrides,
   };
 }
 

@@ -96,6 +96,7 @@ async function createDaemon(
       }),
     ],
     resolveWorkspace: store.createResolver(),
+    resolveModel: () => ({ ok: true }),
   });
 
   const server = new NodeServer({

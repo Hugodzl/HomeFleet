@@ -30,6 +30,7 @@ import {
   delegatorOverrides,
   HOST,
   REPO_ID,
+  writeCatalogConfig,
   writeExecutorConfig,
 } from "../test-fixtures.js";
 import { HfpRequestError } from "../transport/client.js";
@@ -159,6 +160,7 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
 
   const { daemon: worker } = await h.startDaemon("worker", {
     executors: { write: writeExecutorConfig(mock) },
+    catalog: writeCatalogConfig(mock),
     workspace: { allowedRepoIds: [REPO_ID] },
   });
   const { daemon: delegator } = await h.startDaemon(
@@ -287,6 +289,7 @@ test("cancel mid-write: canceled result with no artifact, and the worker's jobs 
     "worker",
     {
       executors: { write: writeExecutorConfig(mock) },
+      catalog: writeCatalogConfig(mock),
       workspace: { allowedRepoIds: [REPO_ID] },
     },
   );
@@ -365,6 +368,7 @@ test("record eviction (maxRetainedJobs: 1): a second job reaps the first's artif
         write: writeExecutorConfig(mock),
         command: { allowlist: { node: { executable: process.execPath } } },
       },
+      catalog: writeCatalogConfig(mock),
       workspace: { allowedRepoIds: [REPO_ID] },
       jobs: { maxRetainedJobs: 1 },
     },
@@ -483,6 +487,7 @@ test("a scripted .git write attempt is refused as a tool error: the job still co
 
   const { daemon: worker } = await h.startDaemon("worker", {
     executors: { write: writeExecutorConfig(mock) },
+    catalog: writeCatalogConfig(mock),
     workspace: { allowedRepoIds: [REPO_ID] },
   });
   const { daemon: delegator } = await h.startDaemon(
@@ -545,6 +550,7 @@ test("restart after a mid-write shutdown: the assembled daemon's init purges the
 
   const workerOverrides = {
     executors: { write: writeExecutorConfig(mock) },
+    catalog: writeCatalogConfig(mock),
     workspace: { allowedRepoIds: [REPO_ID] },
   };
   const { daemon: worker, dataDir: workerDataDir } = await h.startDaemon(
