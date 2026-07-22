@@ -201,24 +201,20 @@ const CommandTaskInputSchema = z.object({
 });
 
 /**
- * Code-writing delegation (v0.2). `pathHints` and `verifyCommand` pass
- * through to the protocol fields UNTOUCHED — the worker's write executor is
- * what incorporates pathHints into the model prompt; this layer never
- * rewrites task content. Deliberately NO `model?` in this milestone (unlike
- * recon): the write executor always uses its endpoint's default model.
- * Adding `model?` later is a wire-compatible minor addition.
+ * Code-writing delegation. `pathHints` and `verifyCommand` pass through to the
+ * protocol fields UNTOUCHED — the worker's write executor incorporates
+ * pathHints into the model prompt; this layer never rewrites task content.
  */
 const WriteTaskInputSchema = z.object({
   type: z.literal("write"),
   workspace: TaskWorkspaceInputSchema,
+  /** Optional catalog model id to target on the worker; its default if absent. */
+  model: z.string().optional(),
   instructions: z.string().min(1).max(16384),
-  /** Advisory starting points only — never an access restriction. */
   pathHints: z.array(z.string().min(1).max(1024)).max(32).optional(),
-  /** Post-commit verify run (report-only); must be on the worker's allowlist. */
   verifyCommand: z
     .object({ name: z.string().min(1), args: z.array(z.string()).optional() })
     .optional(),
-  /** Flattened budgets (defaults applied by the protocol schema when omitted). */
   maxToolCalls: z.int().min(1).max(200).optional(),
   maxWallMs: z.int().min(1000).max(3_600_000).optional(),
 });
@@ -281,6 +277,7 @@ function toJobParams(task: TaskInput, headCommit: string): JobParams {
     return JobParamsSchema.parse({
       type: "write",
       workspace,
+      ...(task.model !== undefined ? { model: task.model } : {}),
       instructions: task.instructions,
       // Pass-through, untouched: this layer never rewrites task content.
       ...(task.pathHints !== undefined ? { pathHints: task.pathHints } : {}),
@@ -424,7 +421,12 @@ function toNodeSummary(entry: {
   nodeInfo?: {
     roles: readonly string[];
     executors: readonly string[];
-    models: readonly { id: string; contextWindow?: number }[];
+    models: readonly {
+      id: string;
+      label?: string;
+      contextWindow?: number;
+      status?: "ok" | "not_served" | "unreachable";
+    }[];
     activeJobs: number;
     maxConcurrentJobs: number;
   };
@@ -559,7 +561,9 @@ export function registerHomeFleetTools(
       description:
         "List paired HomeFleet worker nodes. For nodes that are currently " +
         "reachable, includes live capabilities (roles, executors, models, load). " +
-        "Unreachable paired nodes are still listed with reachable: false.",
+        "Unreachable paired nodes are still listed with reachable: false. " +
+        "Each model carries a startup-probe status (ok | not_served | unreachable); " +
+        "prefer models reported ok.",
       inputSchema: ListNodesInputShape,
       outputSchema: ListNodesOutputSchema.shape,
     },
@@ -595,7 +599,10 @@ export function registerHomeFleetTools(
         "execution, or a code-'write' task that produces a reviewable " +
         "branch. The named repo (workspace.repoId) is synced from this " +
         "daemon's local mapping to the worker before the job is delegated. " +
-        "Returns a jobId; poll it with job_status / job_result.",
+        "Returns a jobId; poll it with job_status / job_result. For recon " +
+        "and write tasks you may set task.model to a specific model id from " +
+        "the target's catalog; omit it to use the node's default. An " +
+        "un-offered model is rejected.",
       inputSchema: DelegateTaskInputShape,
       outputSchema: DelegateTaskOutputSchema.shape,
     },
