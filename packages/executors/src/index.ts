@@ -85,6 +85,7 @@ export {
 } from "./spawn.js";
 export {
   MockOpenAiEndpoint,
+  type MockOpenAiEndpointOptions,
   type MockScriptEntry,
   type MockToolCall,
   type MockUsage,

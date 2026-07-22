@@ -74,6 +74,16 @@ export interface RecordedRequest {
   headers: IncomingHttpHeaders;
 }
 
+/** Optional fixture behavior for {@link MockOpenAiEndpoint.start}. */
+export interface MockOpenAiEndpointOptions {
+  /**
+   * Model ids the endpoint claims to serve on `GET /models` (A2 startup
+   * validation probes this route). Defaults to none (an empty list, i.e. the
+   * daemon's `not_served` status for every catalog entry pointed here).
+   */
+  models?: string[];
+}
+
 /**
  * Deterministic scripted OpenAI-compatible endpoint on 127.0.0.1 (ephemeral
  * port). Serves the script entries in order — one per request — and records
@@ -85,18 +95,28 @@ export class MockOpenAiEndpoint {
   readonly requests: RecordedRequest[] = [];
   readonly baseUrl: string;
   private readonly script: MockScriptEntry[];
+  private readonly models: string[];
   private nextEntry = 0;
   private toolCallCounter = 0;
   private readonly server: Server;
   private readonly pendingTimers = new Set<NodeJS.Timeout>();
 
-  private constructor(server: Server, script: MockScriptEntry[], port: number) {
+  private constructor(
+    server: Server,
+    script: MockScriptEntry[],
+    port: number,
+    models: string[],
+  ) {
     this.server = server;
     this.script = script;
     this.baseUrl = `http://127.0.0.1:${port}/v1`;
+    this.models = models;
   }
 
-  static async start(script: MockScriptEntry[]): Promise<MockOpenAiEndpoint> {
+  static async start(
+    script: MockScriptEntry[],
+    options: MockOpenAiEndpointOptions = {},
+  ): Promise<MockOpenAiEndpoint> {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -109,7 +129,12 @@ export class MockOpenAiEndpoint {
     if (address === null || typeof address === "string") {
       throw new Error("MockOpenAiEndpoint bound to a non-TCP address");
     }
-    const endpoint = new MockOpenAiEndpoint(server, script, address.port);
+    const endpoint = new MockOpenAiEndpoint(
+      server,
+      script,
+      address.port,
+      options.models ?? [],
+    );
     server.on("request", (req, res) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -149,6 +174,16 @@ export class MockOpenAiEndpoint {
     bodyText: string,
     respond: (status: number, body: unknown) => void,
   ): void {
+    // The catalog's startup `/models` probe (node/catalog.ts's
+    // `probeServed`): answered from the configured list, never scripted or
+    // recorded — it is not part of the chat-completion script.
+    if (method === "GET" && url.endsWith("/models")) {
+      respond(200, {
+        object: "list",
+        data: this.models.map((id) => ({ id, object: "model" })),
+      });
+      return;
+    }
     if (method !== "POST" || url !== "/v1/chat/completions") {
       respond(404, { error: `no route for ${method} ${url}` });
       return;
