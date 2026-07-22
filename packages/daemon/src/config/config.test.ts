@@ -534,6 +534,70 @@ test("a malformed legacy endpoint (no model) is a clean rejection, not a crash",
   await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
+test("legacy agent+write endpoints sharing a model id but pointing at DIFFERENT endpoints are rejected (not silently collapsed)", async () => {
+  const dir = await newDataDir();
+  // Two legacy executor endpoints claiming the SAME model id but serving
+  // from DIFFERENT baseUrls is ambiguous: silently collapsing them into one
+  // catalog entry (whichever normalizes last wins) would make recon
+  // silently run against the write endpoint's server instead. This must be
+  // a loud rejection, not a silent merge.
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://agent/v1",
+            model: "qwen",
+            contextWindow: 32768,
+          },
+        },
+        write: {
+          endpoint: {
+            baseUrl: "http://write/v1",
+            model: "qwen",
+            contextWindow: 32768,
+          },
+        },
+      },
+      repos: [],
+    }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
+});
+
+test("legacy agent+write endpoints sharing a model id and an IDENTICAL endpoint still collapse to one catalog entry", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://h/v1",
+            model: "qwen",
+            contextWindow: 32768,
+          },
+        },
+        write: {
+          endpoint: {
+            baseUrl: "http://h/v1",
+            model: "qwen",
+            contextWindow: 32768,
+          },
+        },
+      },
+      repos: [],
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.catalog.models).toEqual([
+    { id: "qwen", endpoint: { baseUrl: "http://h/v1" }, contextWindow: 32768 },
+  ]);
+  expect(config.executors.agent?.defaultModel).toBe("qwen");
+  expect(config.executors.write?.defaultModel).toBe("qwen");
+});
+
 test("a non-ENOENT read failure throws instead of yielding defaults", async () => {
   const dir = await newDataDir();
   // A directory where the file should be makes readFile fail with a

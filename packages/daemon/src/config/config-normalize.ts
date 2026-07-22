@@ -7,6 +7,19 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * True when two legacy endpoints resolved onto the same catalog id are
+ * equivalent (same server, same key) — used below to tell a benign
+ * re-declaration (agent and write both point at one shared server) apart
+ * from a genuine conflict.
+ */
+function sameEndpoint(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): boolean {
+  return a.baseUrl === b.baseUrl && a.apiKey === b.apiKey;
+}
+
 export function normalizeLegacyConfig(raw: unknown): unknown {
   if (!isRecord(raw) || "catalog" in raw) return raw;
   const clone: Record<string, unknown> = structuredClone(raw);
@@ -19,9 +32,32 @@ export function normalizeLegacyConfig(raw: unknown): unknown {
     if (existing === undefined) {
       byId.set(id, entry);
       models.push(entry);
-    } else {
-      Object.assign(existing, entry); // executor endpoint wins over advisory-only
+      return;
     }
+    // Both `executors.agent.endpoint` and `executors.write.endpoint` can
+    // normalize onto the same model id. If `existing` already carries an
+    // endpoint (i.e. it is itself an executor-derived entry, not a purely
+    // advisory `models[]` entry) AND the incoming `entry` also carries one
+    // that actually DIFFERS — different server, key, or contextWindow — the
+    // two legacy executors are claiming one model id ambiguously: there is
+    // no principled way to pick a winner, and merging here (as a plain
+    // Object.assign would) would silently make one executor start hitting
+    // the other's server. Push `entry` as a SEPARATE array element under the
+    // same id instead of merging: the config schema's duplicate-id
+    // `superRefine` rule then rejects the whole config loudly at load time,
+    // rather than the normalizer silently guessing a winner.
+    const existingEndpoint = existing.endpoint;
+    const entryEndpoint = entry.endpoint;
+    const conflictingEndpoints =
+      isRecord(existingEndpoint) &&
+      isRecord(entryEndpoint) &&
+      (!sameEndpoint(existingEndpoint, entryEndpoint) ||
+        existing.contextWindow !== entry.contextWindow);
+    if (conflictingEndpoints) {
+      models.push(entry);
+      return;
+    }
+    Object.assign(existing, entry); // executor endpoint wins over advisory-only
   };
 
   if (Array.isArray(clone.models)) {

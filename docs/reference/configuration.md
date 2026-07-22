@@ -342,15 +342,22 @@ queued — the same posture as the existing `UNSUPPORTED_JOB_TYPE` gate.
 
 **Startup validation.** At boot, the daemon best-effort probes `GET
 {baseUrl}/models` once per *distinct* endpoint in the catalog and stamps
-each model id with a status shown in `list_nodes`/`homefleet nodes`: `ok`
-(that endpoint's `/models` response lists the id), `not_served` (the
-endpoint answered but did not list it), or `unreachable` (no endpoint is
-configured for the entry, or the probe failed or timed out). This status is
-a **boot-time snapshot** only, informational for choosing a model —
-dispatch-time enforcement is on catalog *membership* (`MODEL_NOT_OFFERED`),
-never on this status, so a model that goes down mid-run is still accepted at
-submit time and simply fails (or times out) inside the job rather than
-being pre-emptively refused. Prefer models `list_nodes` reports `ok`.
+each model id with a status surfaced via the `list_nodes` MCP tool (and
+`NodeInfo` generally): `ok` (that endpoint's `/models` response lists the
+id), `not_served` (the endpoint answered but did not list it), or
+`unreachable` (no endpoint is configured for the entry, or the probe failed
+or timed out). The `homefleet nodes` CLI's MODELS column prints only each
+model's `id` and does not surface this status. It is a **boot-time
+snapshot** only, informational for choosing a model — dispatch-time
+enforcement is on catalog *membership* (`MODEL_NOT_OFFERED`), never on this
+status, so a model that goes down mid-run is still accepted at submit time
+and simply fails (or times out) inside the job rather than being
+pre-emptively refused. Prefer models `list_nodes` reports `ok`.
+
+> **Operator note — Ollama.** Ollama's OpenAI-compatible surface lives under
+> `/v1` (it serves `/v1/models`, not `/models` at its root), so point
+> `baseUrl` at `http://<host>:11434/v1` rather than the bare Ollama root. No
+> separate `/api/tags`-style fallback is implemented or needed.
 
 **Back-compatibility.** Pre-catalog configs — `executors.agent.endpoint` /
 `executors.write.endpoint`, and/or a top-level advisory `models[]` — are

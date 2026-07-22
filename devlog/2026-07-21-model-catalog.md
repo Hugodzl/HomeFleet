@@ -143,9 +143,11 @@ unaffected (same canned `NodeInfo`, same permissive `resolveModel` fake).
   code + tests + docs only, no access to the reference rig. `pnpm build &&
   pnpm typecheck && pnpm test && pnpm lint` are all green (831 passed, 2
   skipped — the pre-existing `write-tools.test.ts` symlink tests — 62 files;
-  lint reports 4 pre-existing `noExplicitAny` warnings in
-  `config-normalize.test.ts` from Task 3, not new, and warnings don't fail
-  the command).
+  lint reports 4 `noExplicitAny` warnings in `config-normalize.test.ts`, the
+  `as any` casts Task 3 added on the normalizer's `unknown` return — new on
+  this branch, not pre-existing, and warnings don't fail the command).
+  *(Corrected post-review: those casts were later replaced with precise
+  types, so `pnpm lint` now reports 0 warnings.)*
 - **The E2E recon test's catalog has one model.** It proves a *requested*
   model id reaches the wire end-to-end through a real worker, but with only
   one catalog entry it can't by itself distinguish "used the request" from

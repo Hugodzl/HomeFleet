@@ -389,8 +389,8 @@ export class Daemon {
     };
 
     // The model catalog (config.catalog flattened, endpoints resolved). Built
-    // before the JobManager so a later resolveModel wiring (Task 8) and the
-    // NodeInfo provider below share the same runtime instance.
+    // before the JobManager so its resolveModel wiring and the NodeInfo
+    // provider below share the same runtime instance.
     const catalog = buildCatalog(config);
 
     // JobManager: config overrides are spread only when present so the
