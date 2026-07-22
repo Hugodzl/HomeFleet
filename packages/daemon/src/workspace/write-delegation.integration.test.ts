@@ -30,6 +30,7 @@ import {
   delegatorOverrides,
   HOST,
   REPO_ID,
+  WRITE_TEST_MODEL_ID,
   writeCatalogConfig,
   writeExecutorConfig,
 } from "../test-fixtures.js";
@@ -187,6 +188,14 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
   expect(jobResult.status).toBe("succeeded");
   expect(jobResult.verify).toMatchObject({ name: "node", exitCode: 3 });
   expect(jobResult.verify?.outputTail).toContain("verify-failed-marker");
+
+  // The write executor resolved the worker's catalog default model (this
+  // task named none) and carried it through to the wire, end to end via a
+  // real assembled Daemon: submit() -> resolver -> context.endpoint -> the
+  // OpenAiClient's request body.
+  expect((mock.requests[0]?.body as { model: string }).model).toBe(
+    WRITE_TEST_MODEL_ID,
+  );
 
   const artifact = jobResult.artifact;
   if (artifact === null || artifact === undefined) {

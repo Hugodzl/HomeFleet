@@ -998,6 +998,7 @@ test("delegate_task (write) passes pathHints and verifyCommand through UNTOUCHED
     task: {
       type: "write",
       workspace: WORKSPACE,
+      model: "qwen3.5-9b",
       instructions: "Rename the config key.",
       pathHints: ["src/config.ts", "docs/reference/configuration.md"],
       verifyCommand: { name: "pnpm", args: ["test", "--filter", "config"] },
@@ -1013,6 +1014,9 @@ test("delegate_task (write) passes pathHints and verifyCommand through UNTOUCHED
     throw new Error("expected write JobParams");
   }
   expect(params.instructions).toBe("Rename the config key.");
+  // A write task can target a catalog model by id, the same as recon; the
+  // MCP layer threads it into JobParams verbatim (toJobParams's write branch).
+  expect(params.model).toBe("qwen3.5-9b");
   // Pure pass-through: the MCP layer never rewrites task content (the write
   // executor incorporates pathHints into the model prompt worker-side).
   expect(params.pathHints).toEqual([

@@ -86,7 +86,7 @@ entry, a small command allowlist, and accepts one repo.
 ```
 
 (The pre-catalog shape — `executors.agent.endpoint` / `executors.write.endpoint`
-+ a top-level advisory `models[]` — still loads unchanged; see
+plus a top-level advisory `models[]` — still loads unchanged; see
 [Back-compatibility](#catalog) below.)
 
 A realistic **delegator** config: maps a local repoId to its checkout path so
