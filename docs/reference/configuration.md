@@ -47,19 +47,21 @@ same machine (each instance needs its own data directory).
 ## Full example
 
 A realistic **worker** config: offers agent (recon), command, and write
-executors against a local OpenAI-compatible server, a small command
-allowlist, and accepts one repo.
+executors against a local OpenAI-compatible server through a shared catalog
+entry, a small command allowlist, and accepts one repo.
 
 ```json
 {
   "node": { "name": "tower" },
+  "catalog": {
+    "defaultEndpoint": { "baseUrl": "http://127.0.0.1:8080/v1" },
+    "models": [
+      { "id": "qwen3.5-9b", "label": "Qwen 3.5 9B", "contextWindow": 32768 }
+    ]
+  },
   "executors": {
     "agent": {
-      "endpoint": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
-        "model": "qwen3.5-9b",
-        "contextWindow": 32768
-      },
+      "defaultModel": "qwen3.5-9b",
       "commandAllowlist": {
         "pnpm": {}
       }
@@ -71,22 +73,21 @@ allowlist, and accepts one repo.
       }
     },
     "write": {
-      "endpoint": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
-        "model": "qwen3.5-9b",
-        "contextWindow": 32768
-      },
+      "defaultModel": "qwen3.5-9b",
       "commandAllowlist": {
         "pnpm": {}
       }
     }
   },
-  "models": [{ "id": "qwen3.5-9b", "contextWindow": 32768 }],
   "workspace": {
     "allowedRepoIds": ["homefleet"]
   }
 }
 ```
+
+(The pre-catalog shape — `executors.agent.endpoint` / `executors.write.endpoint`
++ a top-level advisory `models[]` — still loads unchanged; see
+[Back-compatibility](#catalog) below.)
 
 A realistic **delegator** config: maps a local repoId to its checkout path so
 `delegate_task` can sync it to a worker.
@@ -223,29 +224,29 @@ Example: `{ "allowlist": { "pnpm": {}, "pytest": { "executable": "python -m pyte
 
 ### `executors.agent`
 
-| Key                          | Type                        | Default    | Meaning |
-| ---------------------------- | ---------------------------- | ---------- | ------- |
-| `endpoint.baseUrl`           | URL string                   | *(required)* | OpenAI-compatible base URL; `/chat/completions` is appended by the executor. |
-| `endpoint.apiKey`            | string, optional              | *(none)*   | Sent as a Bearer token when present. |
-| `endpoint.model`             | string                        | *(required)* | Default model ID; a job's own `model` param overrides it (same endpoint). |
-| `endpoint.contextWindow`     | integer ≥ 16384               | *(required)* | Context window served by the endpoint, in tokens. The 16384 floor is enforced at config-parse time: smaller windows silently break agentic tool use (truncated histories, dropped tool schemas), so the daemon refuses to start rather than fail confusingly mid-job. |
-| `commandAllowlist`           | same shape as `executors.command.allowlist`, optional | *(absent, tool disabled)* | Allowlist for the agent's own `run_command` tool. Absent disables that tool entirely (the agent can still `read_file`/`grep`/`glob`/`list_dir`). |
+| Key               | Type                        | Default    | Meaning |
+| ----------------- | ---------------------------- | ---------- | ------- |
+| `defaultModel`     | string, optional              | *(none)*   | The `catalog.models[].id` a recon task uses when it names no `model` of its own. Must reference an existing catalog id — checked at config-load, alongside every other cross-field catalog rule (see [`catalog`](#catalog)). Optional: with exactly one catalog entry, that entry is the implicit default. |
+| `commandAllowlist` | same shape as `executors.command.allowlist`, optional | *(absent, tool disabled)* | Allowlist for the agent's own `run_command` tool. Absent disables that tool entirely (the agent can still `read_file`/`grep`/`glob`/`list_dir`). |
+
+Configuring `executors.agent` while `catalog.models` is empty is rejected at
+load — an agent executor with nothing to serve is a misconfiguration, not a
+silent no-op. See [`catalog`](#catalog) for how `defaultModel` resolves to an
+endpoint (including its per-model `contextWindow ≥ 16384` floor, enforced
+when a job actually dispatches, not at load).
 
 ### `executors.write`
 
 Code-writing delegation (v0.2). The shape is the same as `executors.agent`
-today — an OpenAI-compatible endpoint plus an optional command allowlist —
-but it is a **separate section on purpose** (the two may diverge), and the
-default is the same fail-closed absence: a node without `executors.write`
-rejects write jobs outright.
+today — a catalog `defaultModel` plus an optional command allowlist — but it
+is a **separate section on purpose** (the two may diverge), and the default
+is the same fail-closed absence: a node without `executors.write` rejects
+write jobs outright.
 
-| Key                          | Type                        | Default    | Meaning |
-| ---------------------------- | ---------------------------- | ---------- | ------- |
-| `endpoint.baseUrl`           | URL string                   | *(required)* | OpenAI-compatible base URL; `/chat/completions` is appended by the executor. |
-| `endpoint.apiKey`            | string, optional              | *(none)*   | Sent as a Bearer token when present. |
-| `endpoint.model`             | string                        | *(required)* | The model write jobs run on. Unlike recon, a write task carries no per-job `model` override in this milestone — the endpoint default is always used. |
-| `endpoint.contextWindow`     | integer ≥ 16384               | *(required)* | Same floor and rationale as `executors.agent.endpoint.contextWindow`. |
-| `commandAllowlist`           | same shape as `executors.command.allowlist`, optional | *(absent, disabled)* | Gates **two** things: the write agent's own `run_command` tool, and the task's optional `verifyCommand` (a job naming a verify command not on this list fails with `COMMAND_NOT_ALLOWED` before any model traffic). Absent disables both. |
+| Key               | Type                        | Default    | Meaning |
+| ----------------- | ---------------------------- | ---------- | ------- |
+| `defaultModel`     | string, optional              | *(none)*   | The `catalog.models[].id` a write task uses when it names no `model` of its own — a write task can target a specific catalog model, the same as recon (see [`catalog`](#catalog)). Must reference an existing catalog id. |
+| `commandAllowlist` | same shape as `executors.command.allowlist`, optional | *(absent, disabled)* | Gates **two** things: the write agent's own `run_command` tool, and the task's optional `verifyCommand` (a job naming a verify command not on this list fails with `COMMAND_NOT_ALLOWED` before any model traffic). Absent disables both. |
 
 The write agent works in a dedicated, throwaway worktree of the synced repo
 (never a shared checkout), its `write_file`/`edit_file` tools are contained
@@ -305,11 +306,60 @@ What happens to a write job's output, on both sides:
   and tells you to inspect or delete that branch; HomeFleet never
   auto-deletes refs in your repo, even on its own error paths.
 
-## `models`
+## `catalog`
 
-| Key      | Type                            | Default | Meaning |
-| -------- | -------------------------------- | ------- | ------- |
-| *(array)* | `{ id: string, contextWindow?: integer ≥ 1 }[]` | `[]` | Models this node advertises in its `NodeInfo` (shown by `list_nodes` and `homefleet nodes`). Purely advertisory — it does not configure the agent executor's endpoint; set that in `executors.agent.endpoint`. |
+The node's model catalog — the single source of truth for which models this
+node offers and where they are served from. `executors.agent.defaultModel` /
+`executors.write.defaultModel` (above) target a catalog entry by `id`; a
+delegated recon or write task may also name a catalog `id` directly
+(`delegate_task`'s `task.model`), overriding the executor's default for that
+one job.
+
+| Key                       | Type                              | Default | Meaning |
+| -------------------------- | ---------------------------------- | ------- | ------- |
+| `defaultEndpoint.baseUrl` | URL string, optional                 | *(none)* | OpenAI-compatible base URL shared by every catalog entry that does not set its own `endpoint`. |
+| `defaultEndpoint.apiKey`  | string, optional                     | *(none)* | Bearer token sent to `defaultEndpoint`. |
+| `models`                  | array, see below                     | `[]`    | The offered models. |
+
+Each `catalog.models[]` entry:
+
+| Key             | Type                              | Default                    | Meaning |
+| ---------------- | ---------------------------------- | --------------------------- | ------- |
+| `id`             | string, non-empty                    | *(required)*                 | The model id — sent as `model` on chat-completion requests, and shown in `list_nodes`/`homefleet nodes`. **Must be unique across `catalog.models`**; a duplicate id fails config validation. |
+| `label`          | string, optional                     | *(none)*                     | Human-readable name shown alongside `id` in `list_nodes`. |
+| `contextWindow`  | integer ≥ 1, optional                | *(none)*                     | Context window served, in tokens. Optional at config-parse time — a purely advisory entry with no known window still loads — but agent/write **dispatch** enforces a **≥ 16384 floor** (see below), so a model needs a qualifying `contextWindow` to ever actually run a recon/write job. |
+| `endpoint`       | `{ baseUrl, apiKey? }`, optional      | `catalog.defaultEndpoint`    | Per-entry override of the shared default — e.g. a model served from a different local process or port. An entry with neither its own `endpoint` nor a usable `defaultEndpoint` is advertised but never dispatchable. |
+
+**Model resolution, per job:** the task's own `model` (if it named one) →
+the executor's `defaultModel` → the catalog's sole entry, if there is
+exactly one. A `command` job never consults the catalog at all. If none of
+the above apply (multiple models configured, no default, and none
+requested), the job is rejected `NO_MODEL_SPECIFIED`; naming an id absent
+from `catalog.models` is rejected `MODEL_NOT_OFFERED`; naming one with no
+resolvable endpoint or a below-the-floor `contextWindow` is rejected
+`INVALID_REQUEST`. All three are **submit-time** errors — the job is never
+queued — the same posture as the existing `UNSUPPORTED_JOB_TYPE` gate.
+
+**Startup validation.** At boot, the daemon best-effort probes `GET
+{baseUrl}/models` once per *distinct* endpoint in the catalog and stamps
+each model id with a status shown in `list_nodes`/`homefleet nodes`: `ok`
+(that endpoint's `/models` response lists the id), `not_served` (the
+endpoint answered but did not list it), or `unreachable` (no endpoint is
+configured for the entry, or the probe failed or timed out). This status is
+a **boot-time snapshot** only, informational for choosing a model —
+dispatch-time enforcement is on catalog *membership* (`MODEL_NOT_OFFERED`),
+never on this status, so a model that goes down mid-run is still accepted at
+submit time and simply fails (or times out) inside the job rather than
+being pre-emptively refused. Prefer models `list_nodes` reports `ok`.
+
+**Back-compatibility.** Pre-catalog configs — `executors.agent.endpoint` /
+`executors.write.endpoint`, and/or a top-level advisory `models[]` — are
+auto-upgraded into the equivalent `catalog` + `defaultModel` shape when
+`config.json` is loaded (see
+[`packages/daemon/src/config/config-normalize.ts`](../../packages/daemon/src/config/config-normalize.ts)):
+an old config keeps loading and behaving exactly as it did before. A config
+that mixes a `catalog` key with either legacy form is rejected rather than
+silently merged — pick one shape.
 
 ## `jobs`
 

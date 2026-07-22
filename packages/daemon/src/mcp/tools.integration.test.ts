@@ -30,11 +30,20 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, expect, test } from "vitest";
+import { type DaemonConfig, DaemonConfigSchema } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { type Identity, loadOrCreateIdentity } from "../identity/identity.js";
 import { JobManager, type WorkspaceResolver } from "../jobs/job-manager.js";
 import { registerJobRoutes } from "../jobs/routes.js";
-import type { ModelResolver } from "../node/catalog.js";
+import {
+  advertisedModels,
+  buildCatalog,
+  DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
+  type ModelResolver,
+  makeModelResolver,
+  validateCatalog,
+} from "../node/catalog.js";
+import { createNodeInfoProvider } from "../node/node-info.js";
 import { PairingManager } from "../pairing/pairing.js";
 import {
   makeNodeInfo,
@@ -48,6 +57,7 @@ import {
 } from "../transport/client.js";
 import { NodeServer } from "../transport/server.js";
 import { TrustStore } from "../trust/trust-store.js";
+import { DAEMON_VERSION } from "../version.js";
 import { GitError } from "../workspace/git.js";
 import type { ApplyDelegatedArtifactFn } from "./artifact-applier.js";
 import { DelegationRegistry } from "./delegation-registry.js";
@@ -113,10 +123,23 @@ afterEach(async () => {
 interface DaemonOptions {
   executors?: Executor[];
   resolveWorkspace?: WorkspaceResolver;
-  /** Defaults to a permissive resolver (`{ ok: true }`, no endpoint). */
+  /** Defaults to a permissive resolver (`{ ok: true }`, no endpoint). Ignored when `catalogConfig` is set. */
   resolveModel?: ModelResolver;
   maxConcurrentJobs?: number;
   maxQueuedJobs?: number;
+  /**
+   * A schema-validated daemon config carrying `catalog` +
+   * `executors.{agent,write}.defaultModel` (build one with
+   * `DaemonConfigSchema.parse({ catalog, executors })` — see
+   * {@link createWorkerWithCatalog}). When set, this worker resolves models
+   * through the REAL `buildCatalog` -> `validateCatalog` ->
+   * `makeModelResolver` pipeline — genuine `fetch` over loopback, no
+   * `fetchImpl` injection — instead of `resolveModel`, and its NodeInfo
+   * advertises the resulting status-stamped catalog via the real
+   * `createNodeInfoProvider`. The same startup path `daemon.ts` runs, minus
+   * the MCP/control/discovery surfaces this harness's worker role never uses.
+   */
+  catalogConfig?: DaemonConfig;
 }
 
 async function createDaemon(
@@ -127,27 +150,53 @@ async function createDaemon(
   const dataDir = resolveDataDir({ HOMEFLEET_DATA_DIR: tempDir });
   const identity = await loadOrCreateIdentity(dataDir);
   const trustStore = await TrustStore.load(dataDir);
-  const nodeInfo = (): NodeInfo => makeNodeInfo(identity.deviceId, name);
-  const pairing = new PairingManager({
-    trustStore,
-    nodeInfoProvider: nodeInfo,
-  });
 
   const workspaceDir = await makeTempDataDir(`homefleet-mcpws-${name}-`);
   const resolveWorkspace: WorkspaceResolver =
     options.resolveWorkspace ??
     (async () => ({ dir: workspaceDir, release: async () => {} }));
 
+  const { catalogConfig } = options;
+  const catalog =
+    catalogConfig !== undefined ? buildCatalog(catalogConfig) : undefined;
+
   const jobManager = new JobManager({
     executors: options.executors ?? [],
     resolveWorkspace,
-    resolveModel: options.resolveModel ?? (() => ({ ok: true })),
+    resolveModel:
+      catalog !== undefined
+        ? makeModelResolver(catalog)
+        : (options.resolveModel ?? (() => ({ ok: true }))),
     ...(options.maxConcurrentJobs !== undefined
       ? { maxConcurrentJobs: options.maxConcurrentJobs }
       : {}),
     ...(options.maxQueuedJobs !== undefined
       ? { maxQueuedJobs: options.maxQueuedJobs }
       : {}),
+  });
+
+  // The catalog path mirrors daemon.ts's real startup order (NodeInfo is
+  // built AFTER the JobManager, from a validated catalog); the plain path
+  // keeps the pre-A2 canned fixture untouched for every other test in this
+  // file.
+  let nodeInfo: () => NodeInfo;
+  if (catalogConfig !== undefined && catalog !== undefined) {
+    const modelStatuses = await validateCatalog(catalog, {
+      timeoutMs: DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
+    });
+    nodeInfo = createNodeInfoProvider({
+      deviceId: identity.deviceId,
+      config: { node: { name }, executors: catalogConfig.executors },
+      daemonVersion: DAEMON_VERSION,
+      jobs: jobManager,
+      models: advertisedModels(catalog, modelStatuses),
+    });
+  } else {
+    nodeInfo = (): NodeInfo => makeNodeInfo(identity.deviceId, name);
+  }
+  const pairing = new PairingManager({
+    trustStore,
+    nodeInfoProvider: nodeInfo,
   });
 
   const server = new NodeServer({
@@ -1193,4 +1242,144 @@ test("an apply against a repoId no longer mapped locally reports failed without 
   expect(finished.artifactStatus).toBe("failed");
   expect(finished.applyError).toMatch(/no local repo mapped/i);
   expect(calls).toHaveLength(0);
+});
+
+// --- Model catalog (A2): end-to-end tests ------------------------------
+
+/**
+ * Starts a REAL worker daemon whose model resolution goes through the actual
+ * `buildCatalog` -> `validateCatalog` -> `makeModelResolver` pipeline (see
+ * `createDaemon`'s `catalogConfig` option) — genuine `fetch` over loopback to
+ * the mock model endpoint's `GET /models`, no `fetchImpl` injection. Also
+ * registers a real `AgentExecutor` so recon jobs actually run.
+ * `executors.agent.defaultModel` defaults to the catalog's first model id.
+ */
+async function createWorkerWithCatalog(catalog: {
+  defaultEndpoint?: { baseUrl: string };
+  models: Array<{ id: string; label?: string; contextWindow?: number }>;
+}): Promise<Daemon> {
+  const catalogConfig = DaemonConfigSchema.parse({
+    catalog,
+    executors: { agent: { defaultModel: catalog.models[0]?.id } },
+  });
+  return createDaemon("worker", {
+    executors: [new AgentExecutor({})],
+    catalogConfig,
+  });
+}
+
+/**
+ * Polls `job_result` until the job reaches a terminal outcome: either the
+ * tool call itself errors (e.g. an unknown jobId) or the protocol result is
+ * populated (`result !== null`, the same terminal check every other poll in
+ * this file uses — `job_result` always returns `structuredContent`, even for
+ * a still-running job, so that alone can't signal "terminal").
+ */
+async function runToTerminal(
+  client: Client,
+  jobId: string,
+): Promise<CallToolResult> {
+  for (let i = 0; i < 100; i++) {
+    const r = await call(client, "job_result", { jobId });
+    if (
+      r.isError ||
+      JobResultOutputSchema.parse(r.structuredContent).result !== null
+    ) {
+      return r;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`job ${jobId} did not reach a terminal result in time`);
+}
+
+test("list_nodes advertises the worker's catalog with live status", async () => {
+  const model = await MockOpenAiEndpoint.start([], {
+    models: ["qwen3.5-9b"],
+  });
+  cleanups.push(() => model.close());
+  const agent = await createDaemon("agent");
+  const worker = await createWorkerWithCatalog({
+    defaultEndpoint: { baseUrl: model.baseUrl },
+    models: [{ id: "qwen3.5-9b", label: "Qwen 3.5 9B", contextWindow: 32768 }],
+  });
+  await pairAToB(agent, worker);
+  const { client } = await connectAgent(
+    agent,
+    new Map([[worker.identity.deviceId, endpointOf(worker)]]),
+  );
+
+  const res = await call(client, "list_nodes", {});
+  const nodes = ListNodesOutputSchema.parse(res.structuredContent).nodes;
+  const models =
+    nodes.find((n) => n.deviceId === worker.identity.deviceId)?.models ?? [];
+  expect(models).toContainEqual({
+    id: "qwen3.5-9b",
+    label: "Qwen 3.5 9B",
+    contextWindow: 32768,
+    status: "ok",
+  });
+});
+
+test("delegate_task recon uses the requested model", async () => {
+  const model = await MockOpenAiEndpoint.start(
+    [{ kind: "content", content: "done" }],
+    { models: ["qwen3.5-9b"] },
+  );
+  cleanups.push(() => model.close());
+  const agent = await createDaemon("agent");
+  const worker = await createWorkerWithCatalog({
+    defaultEndpoint: { baseUrl: model.baseUrl },
+    models: [{ id: "qwen3.5-9b", contextWindow: 32768 }],
+  });
+  await pairAToB(agent, worker);
+  const { client } = await connectAgent(
+    agent,
+    new Map([[worker.identity.deviceId, endpointOf(worker)]]),
+  );
+
+  const res = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "recon",
+      workspace: WORKSPACE,
+      prompt: "summarize",
+      model: "qwen3.5-9b",
+    },
+  });
+  const { jobId } = DelegateTaskOutputSchema.parse(res.structuredContent);
+  await runToTerminal(client, jobId);
+  expect((model.requests[0]?.body as { model: string }).model).toBe(
+    "qwen3.5-9b",
+  );
+});
+
+test("delegate_task with an un-offered model is a clean MODEL_NOT_OFFERED error", async () => {
+  const model = await MockOpenAiEndpoint.start([], {
+    models: ["qwen3.5-9b"],
+  });
+  cleanups.push(() => model.close());
+  const agent = await createDaemon("agent");
+  const worker = await createWorkerWithCatalog({
+    defaultEndpoint: { baseUrl: model.baseUrl },
+    models: [{ id: "qwen3.5-9b", contextWindow: 32768 }],
+  });
+  await pairAToB(agent, worker);
+  const { client } = await connectAgent(
+    agent,
+    new Map([[worker.identity.deviceId, endpointOf(worker)]]),
+  );
+
+  const res = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: { type: "recon", workspace: WORKSPACE, prompt: "x", model: "ghost" },
+  });
+  expect(res.isError).toBe(true);
+  const text = (res.content[0] as { text: string }).text;
+  // describeHfpFailure's default branch (no MODEL_NOT_OFFERED-specific case
+  // needed: it already threads the code and the resolver's message through,
+  // e.g. `The worker returned an error (MODEL_NOT_OFFERED): this node does
+  // not offer model "ghost"`) surfaces both.
+  expect(text).toMatch(/MODEL_NOT_OFFERED/);
+  expect(text).toMatch(/does not offer model "ghost"/);
+  expect(text).not.toMatch(/\bat .*client\.ts:|Error:.*\n\s+at /); // no raw stack
 });

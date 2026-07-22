@@ -35,7 +35,7 @@ HomeFleet is that missing thin layer:
 - **MCP-native** — appears as `list_nodes` / `delegate_task` tools inside your existing agent session; results stream back into its context
 - **LAN auto-discovery** — daemons find each other via mDNS; pair with a short code, Syncthing-style (device ID = certificate fingerprint, mutual TLS, no CA, no accounts)
 - **Local models by default** — worker machines drive tasks with whatever OpenAI-compatible server they have (Ollama, LM Studio, llama.cpp server)
-- **Capability-aware** — nodes advertise what they can do; a weak GPU box still earns its keep as an execution node (tests, builds, file ops) while stronger machines do the thinking
+- **Capability-aware** — nodes advertise a validated model catalog; delegate to a specific model or be cleanly denied
 
 ## How it works
 
@@ -64,7 +64,7 @@ Explicit non-goals for v0.1: code-**writing** delegation (added in v0.2, below),
 
 ## v0.2: code-writing delegation
 
-Workers can now *write* code, not just read it. Configure `executors.write` on a worker (an OpenAI-compatible endpoint plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
+Workers can now *write* code, not just read it. Configure `executors.write` on a worker (a [catalog](docs/reference/configuration.md#catalog) `defaultModel` plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
 
 ## Quickstart
 
@@ -122,19 +122,26 @@ command allowlist, for one repo:
 
 ```json
 {
-  "executors": {
-    "agent": {
-      "endpoint": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
-        "model": "qwen3.5-9b",
-        "contextWindow": 32768
+  "catalog": {
+    "models": [
+      {
+        "id": "qwen3.5-9b",
+        "contextWindow": 32768,
+        "endpoint": { "baseUrl": "http://127.0.0.1:8080/v1" }
       }
-    },
+    ]
+  },
+  "executors": {
+    "agent": { "defaultModel": "qwen3.5-9b" },
     "command": { "allowlist": { "pnpm": {} } }
   },
   "workspace": { "allowedRepoIds": ["homefleet"] }
 }
 ```
+
+(The pre-A2 shape — `executors.agent.endpoint: { baseUrl, model,
+contextWindow }` directly, no `catalog` section — still loads unchanged; the
+daemon upgrades it automatically at startup.)
 
 A delegator mapping a local repoId to its checkout, so `delegate_task` can
 sync it to a worker:
@@ -241,7 +248,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → packaging & painless install → dashboard (read-only, then fleet management) → per-node model catalog → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md).
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done) → packaging & painless install → dashboard (read-only, then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
