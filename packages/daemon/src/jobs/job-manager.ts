@@ -35,7 +35,6 @@ import type {
 } from "@homefleet/executors";
 import type {
   CancelResponse,
-  HfpError,
   JobEvent,
   JobId,
   JobParams,
@@ -252,14 +251,10 @@ export class JobManager {
         : undefined;
     const resolution = this.resolveModel(params.type, requestedModel);
     if (!resolution.ok) {
-      // ModelResolution.details is typed as the looser Record<string,
-      // unknown> (catalog.ts has no wire-schema dependency); every value the
-      // resolver actually constructs is a plain JSON-safe literal, so this
-      // narrows to the wire-safe HfpError shape rather than widening it.
       throw new JobDispatchError(
         resolution.code,
         resolution.message,
-        resolution.details as unknown as HfpError["details"],
+        resolution.details,
       );
     }
     // Bound the queue: accept only if a slot is free (starts immediately) or

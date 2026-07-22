@@ -503,10 +503,13 @@ test("submit rejects when no model resolves (NO_MODEL_SPECIFIED)", () => {
   expect(() => manager.submit(reconParams(), OWNER)).toThrow(JobDispatchError);
 });
 
-test("submit accepts a command job without consulting a model", () => {
+test("submit runs a command job through resolution, which short-circuits (no model)", () => {
   const resolveModel = vi.fn(() => ({ ok: true as const }));
   const manager = makeManager({ resolveModel });
   expect(() => manager.submit(commandParams(), OWNER)).not.toThrow();
+  // The resolver IS consulted for every job type — it just returns { ok: true }
+  // for a non-model-bearing command job (requestedModel is always undefined).
+  expect(resolveModel).toHaveBeenCalledWith("command", undefined);
 });
 
 test("onJobEvicted fires with the evicted jobId on retention overflow", async () => {

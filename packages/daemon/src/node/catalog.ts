@@ -8,6 +8,7 @@ import {
   MIN_AGENT_CONTEXT_WINDOW,
 } from "@homefleet/executors";
 import type {
+  HfpError,
   HfpErrorCode,
   JobType,
   ModelInfo,
@@ -72,7 +73,7 @@ export type ModelResolution =
       ok: false;
       code: HfpErrorCode;
       message: string;
-      details?: Record<string, unknown>;
+      details?: HfpError["details"];
     };
 
 export type ModelResolver = (
