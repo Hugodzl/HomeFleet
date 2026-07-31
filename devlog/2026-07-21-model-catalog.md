@@ -255,7 +255,41 @@ transfer the bundle first, then reject. That is the accepted trade-off, now
 observed rather than assumed — and a concrete argument for revisiting the
 delegator-side pre-check if bundle transfers ever get expensive.
 
-Not covered: write-task model targeting on the rig (proven in E2E tests and at
-every layer, but no real-hardware write job was run), and multi-model catalogs
-with per-entry endpoints — both rigs serve exactly one model, so
-"pick the *right* model of several" is still only unit/E2E-tested.
+## Rig smoke, part 3: write delegation with an explicit model id
+
+The capability that did not exist before A2 — v0.2's write tasks always used
+their endpoint's default model — run against the tower's 35B.
+
+**First attempt failed in 5.5 s, correctly.** The task carried
+`verifyCommand: pnpm vitest run <file>` and came back
+`COMMAND_NOT_ALLOWED: verifyCommand "pnpm" is not on this worker's allowlist`
+with `toolCalls: 0, wallMs: 0` and no artifact. The gate is the **write
+executor's own** `commandAllowlist` — not the `command` executor's
+`{pnpm,git,node}` — and the tower's unmodified `executors.write` block has
+none. Operator error on the driver's part, and a clean demonstration that the
+verify gate fires fail-closed *before* model resolution or any tool call. The
+tower's config was left alone rather than widened to suit the test.
+
+**Second attempt succeeded in 61.4 s** (worker `wallMs` 58 658, 2 tool calls,
+8 519 prompt / 458 completion tokens) with `model: "qwen3.6-35b-a3b"`
+explicitly targeted. `artifactStatus: "applied"` — branch
+`homefleet/dfeccacbfe7e`, 1 file, +13/−0, authored `HomeFleet Worker
+<worker@263d9c76.invalid>`, fetched into the laptop clone with the working
+tree and existing branches untouched. The task was deliberately a real gap
+this feature's own final review had flagged: no test pinned the legacy
+duplicate-advisory-id merge. The model wrote it correctly.
+
+**The finding worth keeping: vitest-green is not typecheck-green here.** The
+delivered test passed `vitest` but failed `tsc`:
+`TS2532: Object is possibly 'undefined'` — `models[0].id` under this repo's
+`noUncheckedIndexedAccess`. Vitest strips types, so the very `verifyCommand`
+the first attempt tried (`pnpm vitest run …`) would have reported **green and
+hidden it**. For this codebase a worker-side verify wants `pnpm typecheck` (or
+both); a test-only verify buys false confidence on exactly the class of defect
+a small model is most likely to produce. Fixed with a one-character `?.` and
+kept: the worker's commit is merged with its authorship intact, the fix is a
+separate follow-up commit.
+
+Still not covered: multi-model catalogs with per-entry endpoints — both rig
+nodes serve exactly one model, so "pick the *right* model of several" remains
+unit/E2E-tested only.

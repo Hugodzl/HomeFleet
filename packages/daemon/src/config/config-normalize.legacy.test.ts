@@ -9,5 +9,5 @@ test("two advisory models[] entries sharing an id merge into one catalog entry",
     ],
   }) as { catalog: { models: Array<Record<string, unknown>> } };
   expect(out.catalog.models).toHaveLength(1);
-  expect(out.catalog.models[0].id).toBe("dup");
+  expect(out.catalog.models[0]?.id).toBe("dup");
 });
