@@ -214,3 +214,48 @@ separate agents, and the over-broad conjunct still slipped through every one of
 them. No unit test caught it because every test wrote the *new* config shape or
 a hand-built legacy one — none used a real v0.2 config off a real machine. The
 regression test added here is that literal tower config.
+
+## Rig smoke, part 2: green end to end
+
+Both nodes on `cfaebc6`, both on their **unmodified pre-A2 `config.json`** (the
+whole point — auto-migration is what is under test):
+
+| | laptop | tower |
+| --- | --- | --- |
+| server | Ollama | llama.cpp `llama-server` (`--cpu-moe --jinja`, Q4_K_M) |
+| model | `qwen3.5:4b` | `qwen3.6-35b-a3b` |
+| legacy config | `agent.endpoint` + advisory `models[]` | `agent.endpoint` (16384) + `write.endpoint` (32768), one server |
+| advertised | `contextWindow 16384, status "ok"` | `contextWindow 32768` (reconciled to the larger), `status "ok"` |
+
+**Advertisement, through the real MCP front door.** `list_nodes` from an MCP
+client on the laptop returned the tower as
+`models=[{"id":"qwen3.6-35b-a3b","contextWindow":32768,"status":"ok"}]` — legacy
+config → migrated catalog → live `/v1/models` probe → HFP `hello` across the LAN
+→ MCP output, all of it real.
+
+**Targeting.** `delegate_task` recon at the tower with an explicit
+`model: "qwen3.6-35b-a3b"`: accepted in 2.2 s (bundle sync + dispatch), terminal
+**succeeded** at 82.9 s wall (worker-side `wallMs` 77 199), 5 tool calls,
+4 995 prompt / 470 completion tokens. The summary was accurate and cited real
+files (`packages/protocol/package.json`, `src/rpc.ts`) — comparable to the
+v0.2 recon baseline (~105 s) on the same box.
+
+**Enforcement.** Two models the tower does not serve — `qwen3.5:4b` (the
+*laptop's* model, the realistic operator slip) and a typo'd `qwen3.6-35b` — both
+came back as
+`The worker returned an error (MODEL_NOT_OFFERED): this node does not offer model "…"`
+in 0.1 s, `isError: true`, no stack leakage. The exact contract the E2E tests
+assert, confirmed against real daemons over the LAN.
+
+One honest note on that 0.1 s: enforcement is worker-side (deviation 3 — no
+delegator-side fast-fail), so `delegate_task` still syncs the workspace *before*
+the worker rejects. It was instant here only because the repo was already in
+sync from the previous job; a first-ever delegation with a bad model id would
+transfer the bundle first, then reject. That is the accepted trade-off, now
+observed rather than assumed — and a concrete argument for revisiting the
+delegator-side pre-check if bundle transfers ever get expensive.
+
+Not covered: write-task model targeting on the rig (proven in E2E tests and at
+every layer, but no real-hardware write job was run), and multi-model catalogs
+with per-entry endpoints — both rigs serve exactly one model, so
+"pick the *right* model of several" is still only unit/E2E-tested.
