@@ -598,6 +598,51 @@ test("legacy agent+write endpoints sharing a model id and an IDENTICAL endpoint 
   expect(config.executors.write?.defaultModel).toBe("qwen");
 });
 
+test("the canonical v0.2 worker config (one server, per-executor contextWindows) still loads", async () => {
+  // Regression guard for the real reference-rig tower config: ONE llama-server,
+  // one model id, but v0.2's per-executor contextWindow (agent 16384 / write
+  // 32768). A2 moved contextWindow from per-executor to per-model, so the two
+  // legacy windows collapse onto one entry (max wins). This must load — it is
+  // the shape every v0.2 rig node has.
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({
+      node: { name: "tower" },
+      executors: {
+        agent: {
+          endpoint: {
+            baseUrl: "http://127.0.0.1:8080/v1",
+            model: "qwen3.6-35b-a3b",
+            contextWindow: 16384,
+          },
+        },
+        write: {
+          endpoint: {
+            baseUrl: "http://127.0.0.1:8080/v1",
+            model: "qwen3.6-35b-a3b",
+            contextWindow: 32768,
+          },
+        },
+        command: { allowlist: { pnpm: {} } },
+      },
+      models: [{ id: "qwen3.6-35b-a3b", contextWindow: 32768 }],
+      workspace: { allowedRepoIds: ["homefleet"] },
+      repos: [],
+    }),
+  );
+  const config = await loadDaemonConfig(dir);
+  expect(config.catalog.models).toEqual([
+    {
+      id: "qwen3.6-35b-a3b",
+      endpoint: { baseUrl: "http://127.0.0.1:8080/v1" },
+      contextWindow: 32768,
+    },
+  ]);
+  expect(config.executors.agent?.defaultModel).toBe("qwen3.6-35b-a3b");
+  expect(config.executors.write?.defaultModel).toBe("qwen3.6-35b-a3b");
+});
+
 test("a non-ENOENT read failure throws instead of yielding defaults", async () => {
   const dir = await newDataDir();
   // A directory where the file should be makes readFile fail with a

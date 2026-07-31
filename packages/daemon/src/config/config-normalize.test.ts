@@ -173,26 +173,42 @@ test("agent+write endpoints sharing an id and baseUrl but DIFFERENT apiKeys do n
   expect(out.catalog.models).toHaveLength(2);
 });
 
-test("agent+write endpoints sharing an id and baseUrl but DIFFERENT contextWindows do not merge", () => {
+test("agent+write on ONE server sharing an id collapse even when their contextWindows differ (max wins)", () => {
+  // The canonical v0.2 worker config: one model server, one model id, but a
+  // per-executor contextWindow (v0.2 declared the window per executor; A2
+  // moved it per model). Same server + same id is NOT ambiguous — nothing can
+  // be misrouted — so it must collapse to one entry, not trip the duplicate-id
+  // rule. The window is reconciled to the max: it gates only the resolver's
+  // >= MIN_AGENT_CONTEXT_WINDOW floor, both legacy values already had to clear
+  // that floor to parse under v0.2, and max can never turn a config that used
+  // to load into a floor rejection.
   const out = normalizeLegacyConfig({
     executors: {
       agent: {
         endpoint: {
           baseUrl: "http://h/v1",
           model: "qwen",
-          contextWindow: 32768,
+          contextWindow: 16384,
         },
       },
       write: {
         endpoint: {
           baseUrl: "http://h/v1",
           model: "qwen",
-          contextWindow: 8192,
+          contextWindow: 32768,
         },
       },
     },
   }) as NormalizedLegacyConfig;
-  expect(out.catalog.models).toHaveLength(2);
+  expect(out.catalog.models).toEqual([
+    {
+      id: "qwen",
+      endpoint: { baseUrl: "http://h/v1" },
+      contextWindow: 32768,
+    },
+  ]);
+  expect(out.executors.agent).toEqual({ defaultModel: "qwen" });
+  expect(out.executors.write).toEqual({ defaultModel: "qwen" });
 });
 
 test("non-object input is returned unchanged", () => {

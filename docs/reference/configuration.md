@@ -368,6 +368,22 @@ an old config keeps loading and behaving exactly as it did before. A config
 that mixes a `catalog` key with either legacy form is rejected rather than
 silently merged — pick one shape.
 
+Two legacy specifics, since v0.2 declared the endpoint (and its context
+window) *per executor* while a catalog declares them *per model*:
+
+- **One server, two executors.** When `executors.agent.endpoint` and
+  `executors.write.endpoint` name the same model id on the same `baseUrl`,
+  they collapse into a single catalog entry — the ordinary rig setup. If their
+  `contextWindow`s differ (v0.2 allowed a different window per executor), the
+  larger wins: the value gates only the `MIN_AGENT_CONTEXT_WINDOW` floor at
+  dispatch, and both legacy values already had to clear that floor, so the
+  merge can never make a previously-loading config start failing.
+- **One id, two servers.** When those two endpoints name the same model id but
+  *different* `baseUrl`s (or different `apiKey`s), the config is **rejected**
+  with a duplicate-model-id error. There is no principled winner, and silently
+  picking one would route recon jobs at the write executor's server. Give the
+  two servers distinct model ids, or write an explicit `catalog`.
+
 ## `jobs`
 
 Overrides for the in-memory `JobManager`'s limits. **All three keys are

@@ -173,3 +173,44 @@ assertion down and removing the debug line.
 Next: the deferred rig smoke (human-gated, same posture as v0.2's), and
 whatever cluster-A work follows per the backlog-structuring doc's sequencing
 now that A2 has landed ahead of it.
+
+## Rig smoke, part 1: back-compat bug found on real hardware
+
+The rig smoke earned its keep before a single job was delegated. Bringing the
+two nodes up on the merged build:
+
+- **Laptop (Ollama, `qwen3.5:4b`)** — started clean on its untouched v0.2
+  config and advertised
+  `protocolVersion 0.3.0, models [{ id: "qwen3.5:4b", contextWindow: 16384, status: "ok" }]`.
+  Legacy auto-migration and the live `/v1/models` probe both worked first try.
+- **Tower (llama-server, `qwen3.6-35b-a3b`)** — `homefleetd` **refused to
+  start**: `duplicate catalog model id "qwen3.6-35b-a3b"`.
+
+The tower's config is the canonical v0.2 worker shape: one server, one model
+id, and a *per-executor* `contextWindow` (agent 16384, write 32768). The
+normalizer's conflict test — added in the final-review pass to stop two legacy
+endpoints on *different* servers from silently collapsing — also OR'd in
+`contextWindow` inequality, so same-server/same-id/different-window tripped it
+and produced two same-id entries, which the duplicate-id `superRefine` then
+rejected. Every v0.2 rig node with per-executor windows would have hit this.
+
+The structural cause is real, not incidental: A2 moved `contextWindow` from
+per-executor to per-model, so v0.2's per-executor windows are not expressible
+in a catalog and *must* be reconciled somewhere. Three options were on the
+table — migrate the tower's config (hides the regression), add a per-executor
+window override (makes v0.2 literally expressible, but the executors do not
+read `contextWindow` at all today, so it would be pure ceremony), or fix the
+normalizer. Fixed the normalizer: `sameEndpoint` compares the *server* only,
+and differing windows on one server reconcile to the larger. Max is safe
+because the value gates only the dispatch-time `MIN_AGENT_CONTEXT_WINDOW`
+floor and both legacy values already had to clear that floor to parse under
+v0.2 — so the merge cannot turn a previously-loading config into a rejection.
+The genuine ambiguity (same id, *different* servers) still rejects loudly;
+that distinction now has tests on both sides.
+
+Lesson worth keeping: the final-review fix was written from a reasoned hazard
+("recon could be silently rerouted to the write server") and reviewed by three
+separate agents, and the over-broad conjunct still slipped through every one of
+them. No unit test caught it because every test wrote the *new* config shape or
+a hand-built legacy one — none used a real v0.2 config off a real machine. The
+regression test added here is that literal tower config.
