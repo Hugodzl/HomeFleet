@@ -290,6 +290,56 @@ a small model is most likely to produce. Fixed with a one-character `?.` and
 kept: the worker's commit is merged with its authorship intact, the fix is a
 separate follow-up commit.
 
-Still not covered: multi-model catalogs with per-entry endpoints — both rig
-nodes serve exactly one model, so "pick the *right* model of several" remains
-unit/E2E-tested only.
+## Rig smoke, part 4: closing the multi-model gap
+
+Parts 1–3 all ran against nodes serving exactly ONE model, which makes
+"targeting works" unfalsifiable — a mis-route would have succeeded identically.
+Closing that needed a node with two models.
+
+**The tower could not be it.** A sweep found exactly one GGUF on the machine
+(the 20.6 GB primary), no Ollama, and an embedding model in the HF cache in the
+wrong format. More decisively: **~0.3 GB of truly free RAM** (2.42 GB
+available, 26.3/34.4 GB committed, the 35B's working set 19 GB). A second
+llama-server there would thrash even if a model were downloaded.
+
+**The laptop became the multi-model node instead**, and is a better testbed:
+Ollama serves many models from one endpoint (the most common real multi-model
+setup), and — unlike llama-server, which ignores the request's `model` field
+and serves whatever it loaded — Ollama honors it. Pulled `llama3.2:1b`
+(deliberately a *different family* from `qwen3.5:4b`, so the tokenizers differ)
+and rewrote the laptop's config to an explicit two-entry catalog with
+**per-entry endpoints**. Both entries validated in a **single** probe — the
+group-by-baseUrl dedup path, on real hardware — and both advertised
+`status: "ok"` with their `label`s.
+
+`delegate_task` needs a *paired peer*, so a node cannot delegate to itself.
+Rather than expose Ollama on the LAN (elevated firewall rule) or add a `repos`
+mapping to the tower, a **second daemon** was run on the laptop as a pure
+delegator — its own data dir, ports 56470/56472/56473, `discovery` off with a
+`staticNodes` entry pointing at the worker — and paired over real loopback
+mTLS. This is the topology the config docs already anticipate ("`udpPort: 0`
+… tests, multiple daemons on one machine"), but with real model serving rather
+than faked capability profiles.
+
+**Proof method.** All Ollama models are unloaded before each job, so whatever
+`/api/ps` reports resident afterwards is definitively what served it:
+
+| case | requested | resident after | result |
+| --- | --- | --- | --- |
+| A | `llama3.2:1b` | `["llama3.2:1b"]` | routed to the small model |
+| B | `qwen3.5:4b` | `["qwen3.5:4b"]` | routed to the big model |
+| C | *omitted* | `["qwen3.5:4b"]` | fell back to `executors.agent.defaultModel` |
+| D | `mistral:7b` | `[]` | `MODEL_NOT_OFFERED` in 0.1 s, no model ever loaded |
+
+Independent corroboration: `promptTokens` for the **identical** prompt differed
+by model — 826 (llama3.2) vs 714 (qwen3.5) — so the two jobs provably reached
+two different tokenizers, not merely left different resident state behind. Case
+D's empty resident set also confirms rejection happens before any model contact.
+
+That closes the last gap this feature had: per-model targeting, the default
+fallback, and denial are now all verified against real model servers on real
+hardware, with a *falsifiable* assertion.
+
+Remaining honest caveat: both catalog entries in part 4 share one `baseUrl`, so
+per-entry endpoints pointing at two genuinely *distinct* backends is still
+unit/E2E-tested only — the tower's RAM ceiling is what blocks it, not the code.
