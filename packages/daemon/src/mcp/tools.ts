@@ -94,7 +94,7 @@ export interface McpToolCollaborators {
   hfpClient: DelegationClient;
   workspaceSync: WorkspaceSyncClient;
   repoResolver: RepoResolver;
-  nodeDirectory: Pick<NodeDirectory, "list" | "resolve">;
+  nodeDirectory: Pick<NodeDirectory, "list" | "resolve" | "advertisedModels">;
   delegations: DelegationRegistry;
   /**
    * The write-artifact fetch-and-apply plumbing `job_result` drives lazily
@@ -632,6 +632,27 @@ export function registerHomeFleetTools(
             "this daemon's config repos list before delegating a task " +
             "against it.",
         );
+      }
+
+      // ADVISORY model pre-check, before the sync: enforcement is worker-side
+      // (its catalog is the truth), but syncing first means a mistyped model
+      // id pays for a whole bundle transfer before the worker says no. One
+      // cheap `hello` buys that back. Skipped entirely when the task names no
+      // model — the default path stays a single round-trip — and inconclusive
+      // answers (peer asleep, empty pre-A2 catalog) fall through to the
+      // worker rather than inventing a rejection. See
+      // NodeDirectory.advertisedModels.
+      const requestedModel = task.type === "command" ? undefined : task.model;
+      if (requestedModel !== undefined) {
+        const offered = await nodeDirectory.advertisedModels(node);
+        if (offered !== undefined && !offered.includes(requestedModel)) {
+          return fail(
+            `MODEL_NOT_OFFERED: node "${resolved.name}" does not offer model ` +
+              `"${requestedModel}". It advertises: ${offered.join(", ")}. ` +
+              "Name one of those, or omit task.model to use the node's " +
+              "default.",
+          );
+        }
       }
 
       const target: HfpTarget = {

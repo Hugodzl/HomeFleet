@@ -176,6 +176,42 @@ export class NodeDirectory {
       port: endpoint.port,
     };
   }
+
+  /**
+   * The model ids a paired node currently advertises, for `delegate_task`'s
+   * ADVISORY pre-check — the worker's own catalog stays authoritative.
+   *
+   * Deliberately three-valued: a list, or `undefined` meaning *inconclusive*,
+   * never an empty list. An unpaired/undiscovered device, a failed `hello`,
+   * and a peer advertising an EMPTY catalog all answer `undefined`, so the
+   * caller proceeds and lets the worker decide. The empty case matters: a
+   * pre-A2 peer advertises its old advisory `config.models`, which is empty
+   * even while it serves a model through its inline endpoint — answering `[]`
+   * there would reject a model that node can actually run.
+   */
+  async advertisedModels(deviceId: string): Promise<string[] | undefined> {
+    const resolved = this.resolve(deviceId);
+    if (resolved?.host === undefined || resolved.port === undefined) {
+      return undefined; // unpaired, or paired but never discovered
+    }
+    let nodeInfo: NodeInfo;
+    try {
+      ({ nodeInfo } = await this.hfpClient.hello(
+        {
+          host: resolved.host,
+          port: resolved.port,
+          expectedDeviceId: deviceId,
+          timeoutMs: this.helloTimeoutMs,
+        },
+        this.ourNodeInfo(),
+      ));
+    } catch {
+      return undefined; // down, asleep, refused: the worker will answer
+    }
+    return nodeInfo.models.length > 0
+      ? nodeInfo.models.map((m) => m.id)
+      : undefined;
+  }
 }
 
 /**

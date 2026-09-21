@@ -135,3 +135,76 @@ describe("NodeDirectory.resolve", () => {
     expect(directory.resolve("f".repeat(64))).toBeUndefined();
   });
 });
+
+describe("NodeDirectory.advertisedModels", () => {
+  /** A NodeInfo advertising a catalog of `ids`. */
+  function withModels(deviceId: string, ids: string[]): NodeInfo {
+    return {
+      ...makeNodeInfo(deviceId, "worker"),
+      models: ids.map((id) => ({ id, status: "ok" as const })),
+    };
+  }
+
+  test("returns the ids a reachable node advertises", async () => {
+    const directory = new NodeDirectory({
+      trustStore: fakeTrust([{ deviceId: DEV_B, name: "worker" }]),
+      source: fakeSource({ [DEV_B]: { host: "127.0.0.1", port: 5000 } }),
+      hfpClient: {
+        hello: async () => ({ nodeInfo: withModels(DEV_B, ["big", "small"]) }),
+      },
+      ourNodeInfo: ourInfo,
+    });
+
+    expect(await directory.advertisedModels(DEV_B)).toEqual(["big", "small"]);
+  });
+
+  test("an empty advertised catalog is inconclusive, not an empty answer", async () => {
+    // A pre-A2 peer advertises config.models — empty even while it serves a
+    // model through its inline endpoint. Answering [] would let the caller
+    // reject a model that node can actually run.
+    const directory = new NodeDirectory({
+      trustStore: fakeTrust([{ deviceId: DEV_B, name: "worker" }]),
+      source: fakeSource({ [DEV_B]: { host: "127.0.0.1", port: 5000 } }),
+      hfpClient: {
+        hello: async () => ({ nodeInfo: makeNodeInfo(DEV_B, "worker") }),
+      },
+      ourNodeInfo: ourInfo,
+    });
+
+    expect(await directory.advertisedModels(DEV_B)).toBeUndefined();
+  });
+
+  test("a failed hello is inconclusive (undefined), never a throw", async () => {
+    const directory = new NodeDirectory({
+      trustStore: fakeTrust([{ deviceId: DEV_B, name: "worker" }]),
+      source: fakeSource({ [DEV_B]: { host: "127.0.0.1", port: 5000 } }),
+      hfpClient: {
+        hello: async () => {
+          throw new Error("asleep");
+        },
+      },
+      ourNodeInfo: ourInfo,
+    });
+
+    expect(await directory.advertisedModels(DEV_B)).toBeUndefined();
+  });
+
+  test("an undiscovered or unpaired node is inconclusive without a hello", async () => {
+    let helloCalls = 0;
+    const directory = new NodeDirectory({
+      trustStore: fakeTrust([{ deviceId: DEV_C, name: "asleep" }]),
+      source: fakeSource({}),
+      hfpClient: {
+        hello: async () => {
+          helloCalls += 1;
+          return { nodeInfo: makeNodeInfo(DEV_C, "asleep") };
+        },
+      },
+      ourNodeInfo: ourInfo,
+    });
+
+    expect(await directory.advertisedModels(DEV_C)).toBeUndefined();
+    expect(await directory.advertisedModels("f".repeat(64))).toBeUndefined();
+    expect(helloCalls).toBe(0);
+  });
+});

@@ -90,6 +90,18 @@ function fakeWorkspaceSync(
   };
 }
 
+/** A {@link fakeWorkspaceSync} that records how many syncs it was asked for. */
+function countingWorkspaceSync(): WorkspaceSyncClient & { calls: number } {
+  const sync = {
+    calls: 0,
+    syncWorkspace: async () => {
+      sync.calls += 1;
+      return { headCommit: FAKE_SYNCED_HEAD_COMMIT };
+    },
+  };
+  return sync;
+}
+
 /** A repoResolver fake mapping `WORKSPACE.repoId` to a fixed local path. */
 function fakeRepoResolver(
   mapping: Record<string, string> = { "test-repo": FAKE_REPO_PATH },
@@ -257,6 +269,14 @@ interface ConnectAgentOverrides {
   repoResolver?: RepoResolver;
   /** Overrides the artifact applier (default: fails loudly if ever called). */
   applyArtifact?: ApplyDelegatedArtifactFn;
+  /**
+   * Wraps the real NodeDirectory (default: used as-is) — for forcing
+   * `delegate_task`'s advisory model pre-check to be inconclusive so the
+   * worker-side rejection path stays under test.
+   */
+  wrapNodeDirectory?: (
+    directory: NodeDirectory,
+  ) => Pick<NodeDirectory, "list" | "resolve" | "advertisedModels">;
 }
 
 /** Wires an MCP server for `agent`, connects a Client over a linked transport. */
@@ -277,7 +297,8 @@ async function connectAgent(
     hfpClient: overrides.hfpClient ?? agent.client,
     workspaceSync: overrides.workspaceSync ?? fakeWorkspaceSync(),
     repoResolver: overrides.repoResolver ?? fakeRepoResolver(),
-    nodeDirectory,
+    nodeDirectory:
+      overrides.wrapNodeDirectory?.(nodeDirectory) ?? nodeDirectory,
     delegations,
     applyArtifact:
       overrides.applyArtifact ??
@@ -1357,7 +1378,7 @@ test("delegate_task recon uses the requested model", async () => {
   );
 });
 
-test("delegate_task with an un-offered model is a clean MODEL_NOT_OFFERED error", async () => {
+test("delegate_task rejects an un-offered model BEFORE syncing the workspace", async () => {
   const model = await MockOpenAiEndpoint.start([], {
     models: ["qwen3.5-9b"],
   });
@@ -1368,9 +1389,56 @@ test("delegate_task with an un-offered model is a clean MODEL_NOT_OFFERED error"
     models: [{ id: "qwen3.5-9b", contextWindow: 32768 }],
   });
   await pairAToB(agent, worker);
+  const workspaceSync = countingWorkspaceSync();
   const { client } = await connectAgent(
     agent,
     new Map([[worker.identity.deviceId, endpointOf(worker)]]),
+    { workspaceSync },
+  );
+
+  const res = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: { type: "recon", workspace: WORKSPACE, prompt: "x", model: "ghost" },
+  });
+  expect(res.isError).toBe(true);
+  const text = (res.content[0] as { text: string }).text;
+  // The agent-facing contract matches the worker-side rejection — same code,
+  // same "does not offer model" phrasing — so a front agent that learned one
+  // reads the other. What the pre-check adds is naming what IS offered.
+  expect(text).toMatch(/MODEL_NOT_OFFERED/);
+  expect(text).toMatch(/does not offer model "ghost"/);
+  expect(text).toMatch(/qwen3\.5-9b/);
+  expect(text).not.toMatch(/\bat .*client\.ts:|Error:.*\n\s+at /); // no raw stack
+  // The whole point: no bundle ever crossed the wire.
+  expect(workspaceSync.calls).toBe(0);
+});
+
+test("an inconclusive pre-check still delegates, and the worker rejects", async () => {
+  // The pre-check is advisory: a peer that cannot be asked (asleep at hello
+  // time, or advertising an empty pre-A2 catalog) must NOT block delegation —
+  // the worker stays the source of truth. Same rejection, later and costlier.
+  const model = await MockOpenAiEndpoint.start([], {
+    models: ["qwen3.5-9b"],
+  });
+  cleanups.push(() => model.close());
+  const agent = await createDaemon("agent");
+  const worker = await createWorkerWithCatalog({
+    defaultEndpoint: { baseUrl: model.baseUrl },
+    models: [{ id: "qwen3.5-9b", contextWindow: 32768 }],
+  });
+  await pairAToB(agent, worker);
+  const workspaceSync = countingWorkspaceSync();
+  const { client } = await connectAgent(
+    agent,
+    new Map([[worker.identity.deviceId, endpointOf(worker)]]),
+    {
+      workspaceSync,
+      wrapNodeDirectory: (directory) => ({
+        list: () => directory.list(),
+        resolve: (id) => directory.resolve(id),
+        advertisedModels: async () => undefined,
+      }),
+    },
   );
 
   const res = await call(client, "delegate_task", {
@@ -1386,4 +1454,5 @@ test("delegate_task with an un-offered model is a clean MODEL_NOT_OFFERED error"
   expect(text).toMatch(/MODEL_NOT_OFFERED/);
   expect(text).toMatch(/does not offer model "ghost"/);
   expect(text).not.toMatch(/\bat .*client\.ts:|Error:.*\n\s+at /); // no raw stack
+  expect(workspaceSync.calls).toBe(1); // it got all the way to the worker
 });
