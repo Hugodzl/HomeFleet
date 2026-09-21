@@ -364,3 +364,59 @@ trip over it. Promoted into the reference docs, no code touched:
 
 The design choice is unchanged and still deliberate; what was missing was the
 operator-facing consequence of it.
+
+## Closing deviation 3: the delegator-side fast-fail
+
+**2026-09-21.** A2 shipped with enforcement worker-side only, and rig smoke
+part 2 recorded the honest cost: `delegate_task` syncs the workspace *before*
+the worker rejects an un-offered model. It was instant on the rig only because
+the repo was already in sync; a first-ever delegation with a bad model id
+would transfer the whole bundle, then reject. The spec had always called for
+an advisory delegator-side pre-check (§4); the plan deferred it because
+`nodeDirectory.resolve()` holds no capabilities to check without an extra
+round-trip.
+
+It now does one. `NodeDirectory.advertisedModels()` asks the target what it
+advertises — one `hello`, the same call `list_nodes` already makes — and
+`delegate_task` rejects locally when the requested id is absent, before the
+sync. A test asserts the sync fake was called **zero** times on that path;
+that assertion, not the error text, is the point of the change.
+
+What kept it honest is the shape of the answer. `advertisedModels` is
+three-valued, never an empty list: unpaired, undiscovered, failed hello, and
+an *empty advertised catalog* all answer `undefined`, and `undefined`
+delegates exactly as before. The empty case is the one that would have bitten
+— a pre-A2 peer advertises its old advisory `config.models`, which is empty
+even while it serves a model through its inline `endpoint`. A pre-check that
+read `[]` as "offers nothing" would have refused to delegate to every older
+node in the fleet. So the rule is one-directional: reject only what an
+advertisement positively excludes, never accept on its say-so. A stale ad
+still ends in the worker's own `MODEL_NOT_OFFERED`, and there is a test for
+that path too — the old rig-smoke assertion, kept alive by injecting an
+inconclusive pre-check.
+
+The rejection deliberately reuses the worker's wording (`MODEL_NOT_OFFERED`,
+`does not offer model "x"`) so a front agent reads both the same way, and adds
+what the node *does* offer — which the worker-side error cannot cheaply do.
+
+`pnpm typecheck` earned its place again on the way through: the suite was
+green while `tsc` failed on a test fake missing the new method. Exactly the
+class of defect the docs note added earlier today describes, caught by the
+command that note says to run.
+
+## Backlog audit: two of the v0.1 debt items were already done
+
+Chasing "what's next" surfaced that `docs/backlog.md`'s v0.1 debt list had
+gone stale. The `registerExistingCheckouts` populated-dir filter and the
+per-iteration eviction stop-check were both fixed on 2026-07-10 in `e394923`
+and had been sitting in the list ever since, making the project look like it
+carried more debt than it does.
+
+The mDNS same-hostname probe race is genuinely still open, and reads smaller
+than it is. The local mitigation (the self-echo watchdog) works; "fixing it at
+the source" means bonjour-service, which on a probe conflict calls
+`service.stop()` and `console.log`s an `Error` — no event, no rename, nothing
+to subscribe to. Checked today: **1.4.4, the current latest, is byte-identical
+on that path**, so there is no upgrade to take. What remains is an upstream
+PR, a pinned `patchedDependencies` patch, or a different library. The list now
+says so instead of implying a quick win.

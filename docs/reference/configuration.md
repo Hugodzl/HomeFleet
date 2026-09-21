@@ -352,6 +352,18 @@ resolvable endpoint or a below-the-floor `contextWindow` is rejected
 `INVALID_REQUEST`. All three are **submit-time** errors — the job is never
 queued — the same posture as the existing `UNSUPPORTED_JOB_TYPE` gate.
 
+**Where the rejection happens.** The worker's own catalog is authoritative,
+but `delegate_task` also pre-checks a requested model against what the
+target *advertises* — one `hello`, before the workspace sync — so a mistyped
+or wrong-node model id does not pay for a whole bundle transfer first. The
+pre-check is advisory and deliberately one-directional: it only ever rejects
+a model the target's advertisement positively excludes. A node that cannot
+be asked (asleep, or advertising an empty catalog, as a pre-catalog peer
+does) is delegated to exactly as before, and the worker answers. The
+delegator never *accepts* a model on the advertisement's say-so either — a
+stale ad still ends in the worker's own `MODEL_NOT_OFFERED`. Jobs that name
+no `model` skip the pre-check entirely.
+
 **Startup validation.** At boot, the daemon best-effort probes `GET
 {baseUrl}/models` once per *distinct* endpoint in the catalog and stamps
 each model id with a status surfaced via the `list_nodes` MCP tool (and

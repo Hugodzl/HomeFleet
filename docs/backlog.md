@@ -67,9 +67,23 @@ for the approval side).
 
 ## Known technical debt (from v0.1)
 
-Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md):
+Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md).
+**Audited 2026-09-21** — this list had gone stale; status is now recorded
+against each item.
 
-- `registerExistingCheckouts` populated-dir filter
-- Per-iteration stop-check in workspace eviction
-- mDNS same-hostname probe race — mitigated, still worth fixing at the source
-- npm packaging (v0.1 installs from source only)
+- ~~`registerExistingCheckouts` populated-dir filter~~ — **done** (`e394923`,
+  2026-07-10): the startup scan skips dirs with no `.git` gitlink, so a
+  half-created checkout no longer counts against `maxCachedCheckouts`.
+- ~~Per-iteration stop-check in workspace eviction~~ — **done** (`e394923`,
+  2026-07-10): `evictToCapacity` re-checks `stopped` every iteration, and
+  again inside the repo lock.
+- mDNS same-hostname probe race — **open, and bigger than it reads.** The
+  local mitigation (self-echo watchdog, `SELF_ECHO_DEADLINE_MS`) works and is
+  tested; "at the source" means bonjour-service, which on a probe conflict
+  calls `service.stop()` and `console.log`s an `Error` — no event, no rename.
+  Re-checked 2026-09-21: **1.4.4, the current latest, is byte-identical on
+  this path**, so there is no version to upgrade into. Real options are an
+  upstream PR, a pinned `pnpm.patchedDependencies` patch, or replacing the
+  library — none of them small. Not a quick win; decide deliberately.
+- npm packaging (v0.1 installs from source only) — **open**, and now owned by
+  [S1](specs/2026-07-12-s1-packaging-design.md) rather than this list.
