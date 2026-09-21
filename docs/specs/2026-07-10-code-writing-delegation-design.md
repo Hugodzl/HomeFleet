@@ -202,6 +202,13 @@ not `baseRef` — the ref may have moved locally since delegation).
   `edit_file`'s strict contract, and report-only verify are all chosen to
   maximize its odds; the rig smoke tells us the truth and the devlog
   publishes it.
+- **Report-only verify puts the burden on choosing the command well**: it
+  reports, it never blocks, so a weak verify is indistinguishable from a
+  passing one. Rig smoke confirmed the sharp edge — a test-only
+  `verifyCommand` reports green on a `noUncheckedIndexedAccess` type error,
+  because vitest strips types. Operators should name a typechecking command
+  (`pnpm typecheck` here); see
+  [configuration reference → `executors.write`](../reference/configuration.md#executorswrite).
 - **Write-capable loops enlarge the attack surface**: mitigations are the
   `.git` write refusal, hook neutralization on all executor git ops, the
   expected-ref + headCommit binding on the return path, and the reserved

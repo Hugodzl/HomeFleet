@@ -343,3 +343,24 @@ hardware, with a *falsifiable* assertion.
 Remaining honest caveat: both catalog entries in part 4 share one `baseUrl`, so
 per-entry endpoints pointing at two genuinely *distinct* backends is still
 unit/E2E-tested only — the tower's RAM ceiling is what blocks it, not the code.
+
+## Docs follow-up: the verify-command finding, promoted
+
+**2026-09-21.** Part 3's finding — *vitest-green is not typecheck-green here* —
+had been sitting in this devlog only, where nobody configuring a node would
+trip over it. Promoted into the reference docs, no code touched:
+
+- `docs/reference/configuration.md`, `executors.write`: a note after the
+  report-only paragraph saying to make `verifyCommand` typecheck rather than
+  only test, with the observed case (`TS2532` on an unguarded `models[0].id`
+  under `noUncheckedIndexedAccess`, passing `pnpm vitest run <file>`) and
+  `pnpm typecheck` named as the command to use for this repo. The
+  `commandAllowlist` row now also points out that the verify runner itself
+  has to be allowlisted for any of this to run.
+- `docs/specs/2026-07-10-code-writing-delegation-design.md`, "Risks, stated":
+  one bullet naming the real cost of report-only verify — it never blocks, so
+  a weak verify is indistinguishable from a passing one, and choosing the
+  command well is the whole mitigation.
+
+The design choice is unchanged and still deliberate; what was missing was the
+operator-facing consequence of it.

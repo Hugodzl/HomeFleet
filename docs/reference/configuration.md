@@ -246,7 +246,7 @@ write jobs outright.
 | Key               | Type                        | Default    | Meaning |
 | ----------------- | ---------------------------- | ---------- | ------- |
 | `defaultModel`     | string, optional              | *(none)*   | The `catalog.models[].id` a write task uses when it names no `model` of its own — a write task can target a specific catalog model, the same as recon (see [`catalog`](#catalog)). Must reference an existing catalog id. |
-| `commandAllowlist` | same shape as `executors.command.allowlist`, optional | *(absent, disabled)* | Gates **two** things: the write agent's own `run_command` tool, and the task's optional `verifyCommand` (a job naming a verify command not on this list fails with `COMMAND_NOT_ALLOWED` before any model traffic). Absent disables both. |
+| `commandAllowlist` | same shape as `executors.command.allowlist`, optional | *(absent, disabled)* | Gates **two** things: the write agent's own `run_command` tool, and the task's optional `verifyCommand` (a job naming a verify command not on this list fails with `COMMAND_NOT_ALLOWED` before any model traffic). Absent disables both. A node meant to verify needs the runner itself listed here — for this repo `pnpm`, so a job can name `pnpm typecheck`; see the note below on why a test-only verify is not enough. |
 
 The write agent works in a dedicated, throwaway worktree of the synced repo
 (never a shared checkout), its `write_file`/`edit_file` tools are contained
@@ -256,6 +256,18 @@ done, the daemon commits **everything changed in the worktree** as author
 `HomeFleet Worker <worker@<deviceId8>.invalid>` and bundles the result; the
 optional `verifyCommand` then runs **report-only** (its exit code and output
 tail ride back in the job result; a failing verify never fails the job).
+
+> **Make `verifyCommand` typecheck, not just test.** Because verify is
+> report-only, its whole value is the signal it hands back — and a test-only
+> verify goes green on exactly the class of defect a small model is most
+> likely to produce. Observed on the rig: a worker-written test passed
+> `pnpm vitest run <file>` but failed `tsc` with
+> `TS2532: Object is possibly 'undefined'` on an unguarded `models[0].id`
+> under this repo's `noUncheckedIndexedAccess`. Vitest strips types rather
+> than checking them, so a `vitest`-only verify would have reported green and
+> hidden it. For this codebase name `pnpm typecheck` (or a command that runs
+> typecheck *and* tests) — a passing test run alone is not evidence the code
+> compiles.
 
 > **Warning — `git` in the allowlist.** Putting `git` (or any tool that can
 > drive git) in `commandAllowlist` lets the model mint **its own commits**
