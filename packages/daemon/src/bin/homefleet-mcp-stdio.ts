@@ -21,7 +21,6 @@
  * live "point Claude Code at it" test is the human's to run — see the daemon
  * README.
  */
-import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadDaemonConfig } from "../config/config.js";
@@ -40,6 +39,7 @@ import { createNodeInfoProvider } from "../node/node-info.js";
 import { HfpClient } from "../transport/client.js";
 import { TrustStore } from "../trust/trust-store.js";
 import { DAEMON_VERSION } from "../version.js";
+import { isInvokedDirectly } from "./invoked-directly.js";
 
 /**
  * Assembles the MCP server the stdio shim serves, from on-disk daemon state in
@@ -104,12 +104,9 @@ async function main(): Promise<void> {
   // stdin closes (the client disconnected).
 }
 
-// Only run when invoked directly (e.g. via tsx), never when imported by a test.
-const invokedPath = process.argv[1] === undefined ? undefined : process.argv[1];
-if (
-  invokedPath !== undefined &&
-  fileURLToPath(import.meta.url) === invokedPath
-) {
+// Only run when invoked directly (bare node, tsx, or an npm -g symlink/shim),
+// never when imported by a test.
+if (isInvokedDirectly(import.meta.url, process.argv[1])) {
   main().catch((error: unknown) => {
     process.stderr.write(
       `homefleet-mcp-stdio failed to start: ${

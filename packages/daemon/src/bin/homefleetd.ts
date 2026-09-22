@@ -9,11 +9,11 @@
  * `--version` prints its version line to stdout and exits without starting
  * the daemon.
  */
-import { fileURLToPath } from "node:url";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { Daemon } from "../daemon.js";
 import { DAEMON_VERSION } from "../version.js";
+import { isInvokedDirectly } from "./invoked-directly.js";
 
 /**
  * `--version`'s exact stdout line, if `argv` requests it — `undefined`
@@ -88,12 +88,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-// Only run when invoked directly (e.g. via tsx), never when imported by a test.
-const invokedPath = process.argv[1] === undefined ? undefined : process.argv[1];
-if (
-  invokedPath !== undefined &&
-  fileURLToPath(import.meta.url) === invokedPath
-) {
+// Only run when invoked directly (bare node, tsx, or an npm -g symlink/shim),
+// never when imported by a test.
+if (isInvokedDirectly(import.meta.url, process.argv[1])) {
   const version = versionOutput(process.argv.slice(2));
   if (version !== undefined) {
     process.stdout.write(`${version}\n`);

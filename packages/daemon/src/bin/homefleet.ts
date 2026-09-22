@@ -13,12 +13,12 @@
  * process exit — mirroring the invoked-directly guard + stderr-output house
  * pattern used by homefleetd.ts / homefleet-mcp-stdio.ts.
  */
-import { fileURLToPath } from "node:url";
 import { type CliDeps, runCli } from "../cli/cli.js";
 import { ControlClient } from "../cli/control-client.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
+import { isInvokedDirectly } from "./invoked-directly.js";
 
 async function main(): Promise<number> {
   const dataDir = resolveDataDir();
@@ -33,12 +33,9 @@ async function main(): Promise<number> {
   return runCli(process.argv.slice(2), deps);
 }
 
-// Only run when invoked directly (e.g. via tsx), never when imported by a test.
-const invokedPath = process.argv[1] === undefined ? undefined : process.argv[1];
-if (
-  invokedPath !== undefined &&
-  fileURLToPath(import.meta.url) === invokedPath
-) {
+// Only run when invoked directly (bare node, tsx, or an npm -g symlink/shim),
+// never when imported by a test.
+if (isInvokedDirectly(import.meta.url, process.argv[1])) {
   main().then(
     (exitCode) => {
       process.exitCode = exitCode;
