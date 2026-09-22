@@ -2,7 +2,17 @@
  * Build → check → stage → `npm pack` for the release tarball (S1 spec §2).
  */
 import { spawnSync } from "node:child_process";
-import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   buildPublishManifest,
@@ -14,12 +24,24 @@ export interface PackOptions {
   /** `packages/daemon` */
   daemonDir: string;
   licensePath: string;
-  /** Wiped and recreated on every run. */
-  stagingDir: string;
   /** Where `homefleet-<version>.tgz` lands. */
   outDir: string;
   /** Run the daemon's tsup build first (off only for unit tests). */
   build: boolean;
+  /**
+   * Where the built bins live (and, when `build` is true, where they're
+   * built to). Defaults to `<daemonDir>/dist/bin` — the real build output a
+   * normal `pnpm pack:release` ships.
+   *
+   * WHY a default rather than always the real dist/bin: the integration test
+   * builds here too, and `tsup`'s `clean: true` wipes the target directory
+   * first. A shared checkout's `packages/daemon/dist/bin` can be the file a
+   * running `homefleetd` (started by `homefleet setup`'s Task Scheduler
+   * entry) was launched from, so rebuilding it out from under that process —
+   * or racing a second session's own build — is not safe to do as a side
+   * effect of `pnpm test`. Tests pass a private `distDir` instead.
+   */
+  distDir?: string;
 }
 
 export interface PackResult {
@@ -34,13 +56,23 @@ export async function packRelease(options: PackOptions): Promise<PackResult> {
     await readFile(path.join(options.daemonDir, "package.json"), "utf8"),
   ) as DaemonPackageJson;
   const manifest = buildPublishManifest(daemonPkg);
+  const distDir =
+    options.distDir ?? path.join(options.daemonDir, "dist", "bin");
 
   if (options.build) {
-    run("pnpm", ["--filter", daemonPkg.name, "build"], options.daemonDir);
+    // WHY --out-dir rather than the package's own `build` script: it lets us
+    // redirect tsup's (and its `clean: true`) output away from the real
+    // dist/bin without a second tsup config. tsup's CLI flag wins over
+    // tsup.config.ts's `outDir`.
+    run(
+      "pnpm",
+      ["--filter", daemonPkg.name, "exec", "tsup", "--out-dir", distDir],
+      options.daemonDir,
+    );
   }
 
   for (const binPath of Object.values(manifest.bin)) {
-    const absolute = path.join(options.daemonDir, binPath);
+    const absolute = path.join(distDir, path.basename(binPath));
     try {
       await access(absolute);
     } catch {
@@ -50,32 +82,53 @@ export async function packRelease(options: PackOptions): Promise<PackResult> {
     }
   }
 
-  await rm(options.stagingDir, { recursive: true, force: true });
-  await mkdir(path.join(options.stagingDir, "dist"), { recursive: true });
-  await cp(
-    path.join(options.daemonDir, "dist", "bin"),
-    path.join(options.stagingDir, "dist", "bin"),
-    { recursive: true },
-  );
-  await cp(options.licensePath, path.join(options.stagingDir, "LICENSE"));
-  await writeFile(
-    path.join(options.stagingDir, "package.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  );
+  const stagingDir = await mkdtemp(path.join(tmpdir(), "homefleet-pack-"));
+  try {
+    await mkdir(path.join(stagingDir, "dist"), { recursive: true });
+    await cp(distDir, path.join(stagingDir, "dist", "bin"), {
+      recursive: true,
+    });
+    await cp(options.licensePath, path.join(stagingDir, "LICENSE"));
+    await writeFile(
+      path.join(stagingDir, "package.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+    );
 
-  await mkdir(options.outDir, { recursive: true });
-  const report = parsePackReport(
-    run(
-      "npm",
-      ["pack", "--json", "--pack-destination", options.outDir],
-      options.stagingDir,
-    ),
+    await mkdir(options.outDir, { recursive: true });
+    await clearStaleTarballs(options.outDir);
+    const report = parsePackReport(
+      run(
+        "npm",
+        ["pack", "--json", "--pack-destination", options.outDir],
+        stagingDir,
+      ),
+    );
+    return {
+      tarballPath: path.join(options.outDir, report.filename),
+      files: [...report.files].sort(),
+      manifest,
+    };
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * WHY: `release/*.tgz` globs (locally and in CI) must never pick up a
+ * tarball from a previous version left behind by an earlier run.
+ */
+async function clearStaleTarballs(outDir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(outDir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries
+      .filter((name) => /^homefleet-.*\.tgz$/.test(name))
+      .map((name) => rm(path.join(outDir, name), { force: true })),
   );
-  return {
-    tarballPath: path.join(options.outDir, report.filename),
-    files: [...report.files].sort(),
-    manifest,
-  };
 }
 
 export function parsePackReport(stdout: string): {
@@ -129,9 +182,11 @@ function run(command: string, args: string[], cwd: string): string {
       });
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {
-    throw new Error(
-      `pack-release: \`${command} ${args.join(" ")}\` exited ${result.status}`,
-    );
+    const detail =
+      result.status === null
+        ? `terminated by signal ${result.signal}`
+        : `exited ${result.status}`;
+    throw new Error(`pack-release: \`${command} ${args.join(" ")}\` ${detail}`);
   }
   return result.stdout;
 }

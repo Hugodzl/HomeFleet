@@ -35,7 +35,6 @@ async function main(): Promise<void> {
   const result = await packRelease({
     daemonDir,
     licensePath: path.join(repoRoot, "LICENSE"),
-    stagingDir: path.join(outDir, "staging"),
     outDir,
     build: true,
   });

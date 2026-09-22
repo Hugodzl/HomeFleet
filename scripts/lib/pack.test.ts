@@ -56,10 +56,37 @@ describe("packRelease fail-loud checks", () => {
       packRelease({
         daemonDir: dir,
         licensePath: path.join(dir, "LICENSE"),
-        stagingDir: path.join(dir, "staging"),
         outDir: path.join(dir, "out"),
         build: false,
       }),
     ).rejects.toThrow(/missing built bin .*homefleet\.js/);
+  });
+
+  test("checks for the built bin under a custom distDir, not daemonDir/dist/bin", async () => {
+    await writeFile(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        name: "@homefleet/daemon",
+        version: "1.2.3",
+        type: "module",
+        engines: { node: ">=20" },
+        bin: { homefleet: "./dist/bin/homefleet.js" },
+      }),
+    );
+    await writeFile(path.join(dir, "LICENSE"), "license");
+    const distDir = path.join(dir, "private-dist");
+    await expect(
+      packRelease({
+        daemonDir: dir,
+        licensePath: path.join(dir, "LICENSE"),
+        outDir: path.join(dir, "out"),
+        distDir,
+        build: false,
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `missing built bin .*${"private-dist".replace(/\\/g, "\\\\")}.*homefleet\\.js`,
+      ),
+    );
   });
 });

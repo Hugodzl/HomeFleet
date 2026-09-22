@@ -1,8 +1,22 @@
 /**
  * Real-I/O tier: runs the actual daemon build and a real `npm pack` against
  * packages/daemon, then asserts exactly what the tarball ships.
+ *
+ * WHY a private `distDir`: `packRelease` builds with `tsup --out-dir`, whose
+ * `clean: true` wipes the target directory first. Building into the real
+ * `packages/daemon/dist/bin` here would race a second session sharing this
+ * checkout, and `homefleet setup`'s Task Scheduler autostart runs
+ * `dist/bin/homefleetd.js` directly — `pnpm test` must never touch it.
  */
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,15 +31,21 @@ const repoRoot = path.resolve(
 const daemonDir = path.join(repoRoot, "packages", "daemon");
 
 let workDir: string;
+let outDir: string;
 let result: PackResult;
 
 beforeAll(async () => {
   workDir = await mkdtemp(path.join(tmpdir(), "hf-pack-int-"));
+  outDir = path.join(workDir, "out");
+  // A stale tarball from a previous version must not survive packing.
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, "homefleet-0.0.1.tgz"), "stale");
+
   result = await packRelease({
     daemonDir,
     licensePath: path.join(repoRoot, "LICENSE"),
-    stagingDir: path.join(workDir, "staging"),
-    outDir: path.join(workDir, "out"),
+    outDir,
+    distDir: path.join(workDir, "dist-bin"),
     build: true,
   });
 }, 180_000); // a tsup build + npm pack; slow on Windows runners
@@ -59,13 +79,18 @@ test("ships exactly LICENSE, package.json and dist/bin — nothing else", () => 
   );
 });
 
-test("staged manifest has zero @homefleet/* deps", async () => {
-  const staged = JSON.parse(
-    await readFile(path.join(workDir, "staging", "package.json"), "utf8"),
-  ) as { dependencies: Record<string, string> };
+test("manifest deps have no @homefleet/* deps, and package.json ships", () => {
   expect(
-    Object.keys(staged.dependencies).filter((name) =>
+    Object.keys(result.manifest.dependencies).filter((name) =>
       name.startsWith("@homefleet/"),
     ),
   ).toEqual([]);
+  expect(result.files).toContain("package.json");
+});
+
+test("stale tarballs in outDir are cleared before packing", async () => {
+  const entries = await readdir(outDir);
+  expect(entries.filter((name) => name.endsWith(".tgz"))).toEqual([
+    path.basename(result.tarballPath),
+  ]);
 });
