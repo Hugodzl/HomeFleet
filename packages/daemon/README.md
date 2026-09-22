@@ -26,6 +26,12 @@ dependencies + Node builtins left external, resolved from `node_modules`
 | `homefleet` | `dist/bin/homefleet.js` | The operator CLI (below). |
 | `homefleet-mcp-stdio` | `dist/bin/homefleet-mcp-stdio.js` | The stdio MCP shim (below). |
 
+Installed from a [release tarball](../../README.md#install), the three bins are
+on PATH directly (npm generates the Windows `.cmd`/`.ps1` shims and Linux
+symlinks). The release manifest is generated from this package.json by
+`scripts/lib/publish-manifest.ts` — workspace deps are dropped because tsup
+bundles them.
+
 After building, invoke them directly via `node` — this always works, needs no
 linking step, and has no side effects on this or any other project:
 

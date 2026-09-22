@@ -66,42 +66,38 @@ Explicit non-goals for v0.1: code-**writing** delegation (added in v0.2, below),
 
 Workers can now *write* code, not just read it. Configure `executors.write` on a worker (a [catalog](docs/reference/configuration.md#catalog) `defaultModel` plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
 
+## Install
+
+You need **Node ≥ 20** and git. Install the latest release globally:
+
+```bash
+npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
+```
+
+(the exact URL is on the [Releases page](https://github.com/Hugodzl/HomeFleet/releases)).
+That puts `homefleetd`, `homefleet` and `homefleet-mcp-stdio` on your PATH.
+To update, install the newer tarball the same way. Then scaffold the machine
+with `homefleet setup` (below).
+
+Working on HomeFleet itself? See [Development](#development) for running from
+source.
+
 ## Quickstart
 
-Single machine, dev setup. This is enough to build the daemon, run it, and
-point an MCP client at it — pairing a second real machine is the
+Single machine, dev setup. This is enough to run the daemon and point an MCP
+client at it — pairing a second real machine is the
 [two-machine demo](#two-machine-demo) below.
 
-You need Node ≥ 20, pnpm 11 (`corepack enable` is the easiest way), and git;
-recon jobs additionally need an OpenAI-compatible model server on the worker
-(Ollama, LM Studio, llama.cpp `llama-server`, ...).
-
-```bash
-git clone https://github.com/Hugodzl/HomeFleet.git
-cd HomeFleet
-pnpm install
-pnpm build        # tsup bundles packages/daemon's three bins to dist/bin/*.js
-```
-
-`pnpm build` is required — the bins are plain, bare-`node`-runnable ESM files;
-there is no `tsx`/dev-mode path for running them. Invoke them with
-`node`:
-
-```bash
-node packages/daemon/dist/bin/homefleet.js --help
-```
-
-(A bare `homefleet`/`homefleetd` shell command is also possible via `pnpm
-link --global`, with a caveat — see
-[`packages/daemon/README.md`](packages/daemon/README.md#bins). The `node ...`
-form above always works with no setup, so the rest of this guide uses it.)
+See [Install](#install) above; recon jobs additionally need an
+OpenAI-compatible model server on the worker (Ollama, LM Studio, llama.cpp
+`llama-server`, ...).
 
 Next, scaffold this machine — prints this node's identity and the commands
 *you* run yourself in an elevated PowerShell (the daemon never elevates
 itself):
 
 ```bash
-node packages/daemon/dist/bin/homefleet.js setup
+homefleet setup
 ```
 
 Run the printed `New-NetFirewallRule` commands (TCP for HFP — the daemon's
@@ -160,7 +156,7 @@ than being silently ignored).
 Now start the daemon (foreground; stop with Ctrl-C):
 
 ```bash
-node packages/daemon/dist/bin/homefleetd.js
+homefleetd
 ```
 
 It prints its device ID, bound ports, and data directory to stderr once it's
@@ -179,9 +175,8 @@ This is the v0.1 acceptance path: two physical machines, each running
 `homefleetd`, paired, delegating a real job to a real local model. This
 exact path ran for real on the reference rig on 2026-07-09 — timings, token
 rates, and the Windows MAX_PATH lesson it surfaced are in the
-[rig devlog](devlog/2026-07-09-m8-rig-bringup.md). Follow the
-[Quickstart](#quickstart) above through `pnpm build` **on both machines**
-first, then:
+[rig devlog](devlog/2026-07-09-m8-rig-bringup.md). Follow
+[Install](#install) above **on both machines** first, then:
 
 1. On **each** machine, run `homefleet setup` and run the printed firewall
    commands in an elevated PowerShell. Then write `config.json`: give the
@@ -192,17 +187,17 @@ first, then:
    start `homefleetd` — config is read once at startup, not reloaded.
 2. **Pair them.** On machine B (the worker), open a pairing window:
    ```bash
-   node packages/daemon/dist/bin/homefleet.js pair begin
+   homefleet pair begin
    ```
    This prints a short code. On machine A (the delegator), connect to B using
    B's LAN address, B's HFP port (`56370` by default), and that code:
    ```bash
-   node packages/daemon/dist/bin/homefleet.js pair connect <B-host> <B-hfp-port> <code> [--expect <B-device-id>]
+   homefleet pair connect <B-host> <B-hfp-port> <code> [--expect <B-device-id>]
    ```
 3. **Verify.** On either machine:
    ```bash
-   node packages/daemon/dist/bin/homefleet.js nodes    # the peer, with live capabilities
-   node packages/daemon/dist/bin/homefleet.js status   # this node's own live status
+   homefleet nodes    # the peer, with live capabilities
+   homefleet status   # this node's own live status
    ```
 4. **Point a Claude Code session's MCP at machine A's local daemon** (see the
    Quickstart's `claude mcp add` command — always the *local* daemon; MCP
@@ -236,19 +231,31 @@ point.
 
 ## Development
 
+Running from source instead of a release:
+
 ```bash
-pnpm install
+git clone https://github.com/Hugodzl/HomeFleet.git
+cd HomeFleet
+pnpm install     # pnpm 11 — `corepack enable` is the easiest way
 pnpm build       # tsup — required before running any packages/daemon bin
-pnpm test        # vitest
-pnpm typecheck   # tsc across packages
-pnpm lint        # biome
+node packages/daemon/dist/bin/homefleet.js --help
 ```
 
-Everything is testable on a single machine — integration tests run multiple daemons as local processes with faked capability profiles.
+The bins are plain, bare-`node`-runnable ESM files; substitute
+`node packages/daemon/dist/bin/<bin>.js` for the bare commands used above.
+
+```bash
+pnpm test          # vitest (includes a real build + npm pack of the release tarball)
+pnpm typecheck     # tsc across packages and scripts/
+pnpm lint          # biome
+pnpm pack:release  # build release/homefleet-<version>.tgz locally
+```
+
+Everything is testable on a single machine — integration tests run multiple daemons as local processes with faked capability profiles. Cutting a release: [docs/reference/releasing.md](docs/reference/releasing.md).
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done) → packaging & painless install → dashboard (read-only, then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done) → painless install → dashboard (read-only, then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 

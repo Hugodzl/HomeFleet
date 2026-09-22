@@ -85,5 +85,7 @@ against each item.
   this path**, so there is no version to upgrade into. Real options are an
   upstream PR, a pinned `pnpm.patchedDependencies` patch, or replacing the
   library — none of them small. Not a quick win; decide deliberately.
-- npm packaging (v0.1 installs from source only) — **open**, and now owned by
-  [S1](specs/2026-07-12-s1-packaging-design.md) rather than this list.
+- ~~npm packaging (v0.1 installs from source only)~~ — **done** (S1,
+  2026-09-22): GitHub Releases tarball via `v*` tag; see
+  [releasing](reference/releasing.md). Public npm registry publish is still
+  deliberately deferred.
