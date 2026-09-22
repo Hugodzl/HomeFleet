@@ -1,0 +1,96 @@
+name: Release
+
+# A v* tag packs, smokes and publishes a GitHub Release. Run it by hand
+# (workflow_dispatch) to exercise pack + smoke on the current branch without
+# creating a Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  pack:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Pack (tag must match the daemon version)
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            pnpm pack:release --tag "$GITHUB_REF_NAME"
+          else
+            pnpm pack:release
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homefleet-tarball
+          path: release/*.tgz
+          if-no-files-found: error
+
+  # Install the REAL artifact the way a user does: no checkout, no pnpm,
+  # deps from the registry, npm-generated shims. Node 20 = the documented floor.
+  smoke:
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: homefleet-tarball
+          path: release
+      - name: Global install
+        run: npm i -g ./release/homefleet-*.tgz
+      - name: Bins print their exact version (exit 0 alone is not enough)
+        run: |
+          version="$(basename release/homefleet-*.tgz .tgz)"
+          version="${version#homefleet-}"
+          test "$(homefleet --version)" = "homefleet $version"
+          test "$(homefleetd --version)" = "homefleetd $version"
+          command -v homefleet-mcp-stdio
+      - name: Bins via the PowerShell shims
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = (Get-Item release/homefleet-*.tgz).BaseName
+          $version = $name.Substring("homefleet-".Length)
+          if ((homefleet --version) -ne "homefleet $version") { exit 1 }
+          if ((homefleetd --version) -ne "homefleetd $version") { exit 1 }
+
+  release:
+    needs: smoke
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: homefleet-tarball
+          path: release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" release/*.tgz
+          --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag
