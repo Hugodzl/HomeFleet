@@ -2,7 +2,11 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["packages/*/src/**/*.test.ts", "packages/*/test/**/*.test.ts"],
+    include: [
+      "packages/*/src/**/*.test.ts",
+      "packages/*/test/**/*.test.ts",
+      "scripts/**/*.test.ts",
+    ],
     // Many daemon tests are real-I/O integration tests: they spawn real git
     // subprocesses and bind real UDP sockets. Their wall-time is dominated by
     // OS process/socket latency, which balloons on slow CI (Windows runners)

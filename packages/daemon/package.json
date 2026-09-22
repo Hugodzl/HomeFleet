@@ -4,6 +4,9 @@
   "description": "homefleetd — the HomeFleet per-machine daemon (MCP front, node service, discovery, dispatch)",
   "license": "Apache-2.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "exports": {
     ".": {
       "types": "./src/index.ts",
