@@ -731,6 +731,7 @@ export function registerHomeFleetTools(
       }
       try {
         const snapshot = await hfpClient.jobSnapshot(targetFor(route), jobId);
+        delegations.observeStatus(jobId, snapshot.status);
         return ok(`Job ${jobId} is ${snapshot.status}.`, {
           jobId,
           status: snapshot.status,
@@ -763,6 +764,7 @@ export function registerHomeFleetTools(
       }
       try {
         const snapshot = await hfpClient.jobSnapshot(targetFor(route), jobId);
+        delegations.observeStatus(jobId, snapshot.status);
         const result = snapshot.result ?? null;
         if (result === null) {
           return ok(`Job ${jobId} is ${snapshot.status}; no result yet.`, {

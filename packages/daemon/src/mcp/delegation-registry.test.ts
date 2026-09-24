@@ -48,7 +48,7 @@ describe("DelegationRegistry", () => {
 
   test("recordApplied remembers a write job's applied artifact until the entry is evicted", () => {
     const registry = new DelegationRegistry();
-    registry.record("job-w", route(1), "command");
+    registry.record("job-w", route(1), "write");
     expect(registry.appliedArtifact("job-w")).toBeUndefined();
 
     const applied = {

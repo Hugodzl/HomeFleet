@@ -21,6 +21,14 @@
  * {@link MAX_TRACKED_DELEGATIONS} entries the oldest is evicted. A `Map`
  * preserves insertion order, so the first key is always the oldest; touching
  * an existing job (re-record) moves it to the newest slot.
+ *
+ * The registry also records each delegation's `type`, when it was recorded,
+ * and the last status an MCP tool observed for it ({@link
+ * DelegationRegistry.observeStatus}). {@link DelegationRegistry.list} exposes
+ * this as metadata for the read-only loopback control API (the dashboard).
+ * That status is deliberately LAST-SEEN, not live: it is only ever updated
+ * when `job_status` or `job_result` observes a snapshot from the worker, and
+ * `list()`/the dashboard never make a LAN call of their own to refresh it.
  */
 
 import type { JobStatus, JobType } from "@homefleet/protocol";

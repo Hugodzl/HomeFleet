@@ -434,11 +434,17 @@ test("delegate_task (command) end-to-end: jobId, then job_status and job_result"
   );
   expect(node).toBe(worker.identity.deviceId);
   expect(delegations.lookup(jobId)).toBeDefined();
+  expect(delegations.list()[0]).toMatchObject({
+    jobId,
+    type: "command",
+    lastStatus: "queued",
+  });
 
   // job_status returns a valid protocol status.
   const status = await call(client, "job_status", { jobId });
   const parsedStatus = JobStatusOutputSchema.parse(status.structuredContent);
   expect(JobStatusSchema.options).toContain(parsedStatus.status);
+  expect(delegations.list()[0]?.lastStatus).toBe(parsedStatus.status);
 
   // Poll job_result until the job is terminal.
   let resultStructured: unknown;
@@ -458,6 +464,8 @@ test("delegate_task (command) end-to-end: jobId, then job_status and job_result"
   // Non-write jobs carry NO artifact surface.
   expect(finished.artifactStatus).toBeUndefined();
   expect(finished.reviewCommand).toBeUndefined();
+  // job_result observed the terminal status; the dashboard reads it from here.
+  expect(delegations.list()[0]?.lastStatus).toBe("succeeded");
 });
 
 test("delegate_task (recon) end-to-end via the mock model endpoint", async () => {
