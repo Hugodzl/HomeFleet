@@ -13,6 +13,7 @@
  * process exit — mirroring the invoked-directly guard + stderr-output house
  * pattern used by homefleetd.ts / homefleet-mcp-stdio.ts.
  */
+import { existsSync } from "node:fs";
 import { type CliDeps, runCli } from "../cli/cli.js";
 import { ControlClient } from "../cli/control-client.js";
 import { loadDaemonConfig } from "../config/config.js";
@@ -29,6 +30,7 @@ async function main(): Promise<number> {
     makeControlClient: (options) => new ControlClient(options),
     stdout: (line) => process.stdout.write(`${line}\n`),
     stderr: (line) => process.stderr.write(`${line}\n`),
+    fileExists: existsSync,
   };
   return runCli(process.argv.slice(2), deps);
 }

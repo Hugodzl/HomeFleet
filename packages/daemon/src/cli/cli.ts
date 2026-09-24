@@ -64,6 +64,14 @@ export interface CliDeps {
    * `defaultDaemonEntryPath`); overridable for tests or a non-standard layout.
    */
   daemonEntryPath?: string;
+  /**
+   * Checks whether a path exists on disk (real: `fs.existsSync`). Used by
+   * `setup` to decide whether to print a "you need to build first" hint next
+   * to the autostart command: with a packaged `npm i -g` install the resolved
+   * `homefleetd.js` always exists, so the hint would be actively wrong there.
+   * Defaults to `true` (assume it exists, i.e. no hint) when not supplied.
+   */
+  fileExists?: (path: string) => boolean;
 }
 
 const USAGE = `homefleet - HomeFleet operator CLI
@@ -177,11 +185,13 @@ async function runSetup(deps: CliDeps): Promise<number> {
   deps.stdout(
     `  ${generateAutostartCreateCommand({ nodeExecPath, daemonEntryPath })}`,
   );
-  deps.stdout(
-    "(The path above is the built daemon entry — run `pnpm build` first so it " +
-      "exists. If you invoke the CLI from source rather than the packaged bin, " +
-      "pass the real homefleetd.js path.)",
-  );
+  const daemonEntryExists = deps.fileExists?.(daemonEntryPath) ?? true;
+  if (!daemonEntryExists) {
+    deps.stdout(
+      "(homefleetd.js was not found at the path above. Running from source? " +
+        "Run `pnpm build` first so it exists.)",
+    );
+  }
   return 0;
 }
 

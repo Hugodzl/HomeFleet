@@ -124,6 +124,7 @@ function makeHarness(
     stderr: (line) => stderrLines.push(line),
     nodeExecPath: "C:\\fake\\node.exe",
     daemonEntryPath: "C:\\fake\\homefleetd.ts",
+    fileExists: () => true,
   };
   return {
     deps,
@@ -220,6 +221,32 @@ describe("setup", () => {
     expect(stdoutLines.join("\n")).toContain(
       "(unset — falls back to this machine's hostname",
     );
+  });
+
+  test("prints no build hint when the daemon entry path exists", async () => {
+    const { deps, stdoutLines } = makeHarness();
+    const fileExistsCalls: string[] = [];
+    deps.fileExists = (path: string) => {
+      fileExistsCalls.push(path);
+      return true;
+    };
+    const code = await runCli(["setup"], deps);
+    expect(code).toBe(0);
+    expect(fileExistsCalls).toEqual(["C:\\fake\\homefleetd.ts"]);
+    const output = stdoutLines.join("\n");
+    expect(output).not.toContain("was not found");
+    expect(output).not.toContain("pnpm build");
+  });
+
+  test("prints a build hint when the daemon entry path is missing", async () => {
+    const { deps, stdoutLines } = makeHarness();
+    deps.fileExists = () => false;
+    const code = await runCli(["setup"], deps);
+    expect(code).toBe(0);
+    const output = stdoutLines.join("\n");
+    expect(output).toContain("homefleetd.js was not found at the path above");
+    expect(output).toContain("Running from source?");
+    expect(output).toContain("pnpm build");
   });
 });
 
