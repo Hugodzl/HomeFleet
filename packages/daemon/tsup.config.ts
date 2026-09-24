@@ -13,15 +13,35 @@ type Plugin = NonNullable<Options["esbuildPlugins"]>[number];
 // lookup that would differ between a checkout and an `npm i -g` install.
 // Vitest implements `?raw` natively; esbuild does not, so this resolves any
 // `?raw` specifier to its file and loads it with the `text` loader.
+//
+// The resolved virtual path is deliberately suffixed with a NUL byte rather
+// than left as the bare `*.css`/`*.js` filename. tsup registers its own
+// postcss `onLoad` for any path ending in `.css` BEFORE this plugin's own
+// (user `esbuildPlugins` always run last — see tsup's `build()`), and that
+// callback's filter has no namespace restriction, so it still claims loads
+// in OUR "raw-text" namespace even though we set that namespace explicitly.
+// Left alone, that silently reinterprets `app.css?raw` as a real stylesheet
+// asset and tsup emits a second `dist/bin/*.css` file the bin never
+// references (caught by scripts/lib/pack.integration.test.ts). Renaming the
+// virtual path so it no longer matches `/\.css$/` keeps every other
+// `onLoad` from matching, while `pluginData` still carries the real
+// filesystem path this plugin needs to actually read the source.
 const rawText: Plugin = {
   name: "raw-text",
   setup(build) {
-    build.onResolve({ filter: /\?raw$/ }, (args) => ({
-      path: path.resolve(args.resolveDir, args.path.slice(0, -"?raw".length)),
-      namespace: "raw-text",
-    }));
+    build.onResolve({ filter: /\?raw$/ }, (args) => {
+      const realPath = path.resolve(
+        args.resolveDir,
+        args.path.slice(0, -"?raw".length),
+      );
+      return {
+        path: `${realPath}\0raw`,
+        namespace: "raw-text",
+        pluginData: { realPath },
+      };
+    });
     build.onLoad({ filter: /.*/, namespace: "raw-text" }, async (args) => ({
-      contents: await readFile(args.path, "utf8"),
+      contents: await readFile(args.pluginData.realPath, "utf8"),
       loader: "text",
     }));
   },

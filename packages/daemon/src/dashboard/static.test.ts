@@ -37,3 +37,18 @@ test("security headers carry the strict CSP and anti-framing/sniffing headers", 
   expect(STATIC_SECURITY_HEADERS["referrer-policy"]).toBe("no-referrer");
   expect(STATIC_SECURITY_HEADERS["cache-control"]).toBe("no-store");
 });
+
+test("the page's script, view model and stylesheet are served with exact types", () => {
+  expect(lookupStaticAsset("/dashboard/app.js")?.contentType).toBe(
+    "text/javascript; charset=utf-8",
+  );
+  expect(lookupStaticAsset("/dashboard/view-model.js")?.contentType).toBe(
+    "text/javascript; charset=utf-8",
+  );
+  expect(lookupStaticAsset("/dashboard/app.css")?.contentType).toBe(
+    "text/css; charset=utf-8",
+  );
+  expect(lookupStaticAsset("/dashboard/app.js")?.body).toContain(
+    "/control/jobs",
+  );
+});

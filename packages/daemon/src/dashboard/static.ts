@@ -11,7 +11,10 @@
  * own discipline (textContent-only rendering, GET-only fetches) is enforced
  * separately by assets.scan.test.ts.
  */
+import appCss from "./assets/app.css?raw";
+import appJs from "./assets/app.js?raw";
 import indexHtml from "./assets/index.html?raw";
+import viewModelJs from "./assets/view-model.js?raw";
 
 export interface StaticAsset {
   body: string;
@@ -40,6 +43,18 @@ export const STATIC_SECURITY_HEADERS: Readonly<Record<string, string>> = {
 
 const ASSETS: ReadonlyMap<string, StaticAsset> = new Map([
   ["/", { body: indexHtml, contentType: "text/html; charset=utf-8" }],
+  [
+    "/dashboard/app.js",
+    { body: appJs, contentType: "text/javascript; charset=utf-8" },
+  ],
+  [
+    "/dashboard/view-model.js",
+    { body: viewModelJs, contentType: "text/javascript; charset=utf-8" },
+  ],
+  [
+    "/dashboard/app.css",
+    { body: appCss, contentType: "text/css; charset=utf-8" },
+  ],
 ]);
 
 /** The asset served at exactly `pathname`, or `undefined`. */
