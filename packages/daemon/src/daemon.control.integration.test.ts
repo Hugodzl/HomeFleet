@@ -24,7 +24,12 @@
 import { expect, test } from "vitest";
 import { ControlClient } from "./cli/control-client.js";
 import type { Daemon } from "./daemon.js";
-import { createDaemonHarness, HOST } from "./test-fixtures.js";
+import { JobResultOutputSchema } from "./mcp/tools.js";
+import {
+  createDaemonHarness,
+  delegatorOverrides,
+  HOST,
+} from "./test-fixtures.js";
 
 const h = createDaemonHarness({ tempPrefix: "homefleet-daemon-control" });
 
@@ -95,3 +100,116 @@ test("pairing through the real control-API HTTP surface seeds known-nodes, so th
   await delegator.stop();
   await worker.stop();
 }, 30_000);
+
+/** GET against a daemon's control port; `withHeader` adds the CSRF header. */
+async function controlGet(
+  daemon: Daemon,
+  path: string,
+  withHeader: boolean,
+): Promise<Response> {
+  return fetch(`http://${HOST}:${daemon.controlPort}${path}`, {
+    headers: withHeader ? { "x-homefleet-control": "1" } : {},
+  });
+}
+
+test("the assembled daemon serves the dashboard and lists jobs on both sides of a delegation", async () => {
+  const src = await h.makeSrcRepo("dashboard integration");
+  const { daemon: worker } = await h.startDaemon("worker", {
+    executors: {
+      command: { allowlist: { node: { executable: process.execPath } } },
+    },
+    workspace: { allowedRepoIds: ["repo-x"] },
+  });
+  const { daemon: delegator } = await h.startDaemon(
+    "delegator",
+    delegatorOverrides(worker, src),
+  );
+  await h.pair(delegator, worker);
+
+  // The page itself: no control header needed, strict CSP present.
+  const page = await controlGet(delegator, "/", false);
+  expect(page.status).toBe(200);
+  expect(page.headers.get("content-security-policy")).toContain(
+    "default-src 'none'",
+  );
+  expect(await page.text()).toContain("data-homefleet-dashboard");
+
+  const mcp = await h.connectMcp(delegator);
+  const delegated = await mcp.callTool({
+    name: "delegate_task",
+    arguments: {
+      node: worker.deviceId,
+      task: {
+        type: "command",
+        workspace: { repoId: "repo-x" },
+        command: "node",
+        args: ["-e", "process.stdout.write('ok')"],
+      },
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = (delegated.structuredContent ?? {}) as { jobId: string };
+  await h.waitUntil(async () => {
+    const r = await mcp.callTool({ name: "job_result", arguments: { jobId } });
+    return JobResultOutputSchema.parse(r.structuredContent).result !== null;
+  });
+
+  // Delegator side: the job is listed with the worker's paired name and the
+  // terminal status job_result observed.
+  const mine = (await (
+    await controlGet(delegator, "/control/jobs", true)
+  ).json()) as {
+    worker: unknown[];
+    delegated: Array<Record<string, unknown>>;
+  };
+  expect(mine.worker).toEqual([]);
+  expect(mine.delegated[0]).toMatchObject({
+    jobId,
+    type: "command",
+    targetDeviceId: worker.deviceId,
+    targetName: "worker",
+    repoId: "repo-x",
+    lastStatus: "succeeded",
+  });
+
+  // Worker side: the same job, owned by the delegator, metadata only.
+  const theirs = (await (
+    await controlGet(worker, "/control/jobs", true)
+  ).json()) as {
+    worker: Array<Record<string, unknown>>;
+    delegated: unknown[];
+  };
+  expect(theirs.delegated).toEqual([]);
+  expect(theirs.worker[0]).toMatchObject({
+    jobId,
+    type: "command",
+    ownerDeviceId: delegator.deviceId,
+    ownerName: "delegator",
+    status: "succeeded",
+  });
+  expect(theirs.worker[0]).not.toHaveProperty("params");
+  expect(theirs.worker[0]).not.toHaveProperty("result");
+
+  // The daemon-level rename (Task 7 review, Finding 2): the internal
+  // `owner`/`deviceId` keys the JobManager/DelegationRegistry actually use
+  // must not leak alongside their renamed `ownerDeviceId`/`targetDeviceId`
+  // public forms.
+  expect(theirs.worker[0]).not.toHaveProperty("owner");
+  expect(mine.delegated[0]).not.toHaveProperty("deviceId");
+
+  // Names are resolved live from the trust store on every call: once the
+  // peer drops out of it, its name is omitted from the listing (the device
+  // id and job data stay put) rather than going stale.
+  await worker.trustStore.remove(delegator.deviceId);
+  const theirsAfterUntrust = (await (
+    await controlGet(worker, "/control/jobs", true)
+  ).json()) as { worker: Array<Record<string, unknown>> };
+  expect(theirsAfterUntrust.worker[0]).toMatchObject({
+    jobId,
+    ownerDeviceId: delegator.deviceId,
+  });
+  expect(theirsAfterUntrust.worker[0]).not.toHaveProperty("ownerName");
+
+  // The data route still refuses a header-less request.
+  expect((await controlGet(worker, "/control/jobs", false)).status).toBe(403);
+}, 90_000);
