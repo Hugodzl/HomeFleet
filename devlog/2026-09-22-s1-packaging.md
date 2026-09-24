@@ -72,3 +72,19 @@ The pack test really builds and really runs `npm pack`, adding a few seconds
 to every `pnpm test`. That's the spec's real-I/O tier doing its job; the
 tarball's exact file list is asserted, so a stray file in a future release
 fails CI instead of shipping.
+
+## Addendum (2026-09-24): smoking the product, not the version string
+
+Asked "was it tested thoroughly?", the honest answer was no: the release
+smoke proved the bins *start* (`--version`, which does load every third-party
+import), but nothing had ever run the daemon from an installed copy.
+`scripts/smoke-installed.mjs` now does, in both release smoke legs: it starts
+the installed `homefleetd` against a throwaway data dir (loopback, fixed high
+ports, discovery off so it can't collide with or announce to a real daemon),
+checks `homefleet status` / `nodes` / `setup` against it, drives an MCP
+`initialize` + `tools/list` through `homefleet-mcp-stdio`, and on Windows
+asserts that `setup`'s autostart command targets the *installed*
+`homefleetd.js` (on the runner: `C:\npm\prefix\node_modules\homefleet\…`),
+not a checkout. Green first time here (temp `--prefix` install) and on both
+runners. Still untested: pairing and a delegated job between two installed
+machines, and the Release-creating job itself, which only a tag runs.
