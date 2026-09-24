@@ -42,7 +42,7 @@ function fakeConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
     node: {},
     hfp: { host: "0.0.0.0", port: 56370 },
     mcp: { host: "127.0.0.1", port: 56372 },
-    control: { host: "127.0.0.1", port: 56373 },
+    control: { host: "127.0.0.1", port: 56373, dashboard: true },
     executors: {},
     models: [],
     jobs: {},

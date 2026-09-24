@@ -195,13 +195,20 @@ export const McpConfigSchema = z.strictObject({
 export type McpConfig = z.infer<typeof McpConfigSchema>;
 
 /**
- * Bind address for the daemon control API the `homefleet` CLI talks to.
+ * Bind address for the daemon control API the `homefleet` CLI talks to, and
+ * the on/off switch for the read-only web dashboard served on that same port.
  * Loopback-only by design: it is a local admin surface; remote
  * administration goes through HFP (mTLS + pairing), never this port.
  */
 export const ControlConfigSchema = z.strictObject({
   host: LoopbackHostSchema.default("127.0.0.1"),
   port: z.int().min(0).max(65535).default(DEFAULT_CONTROL_PORT),
+  /**
+   * Serve the read-only web dashboard at `http://<host>:<port>/`. The JSON
+   * data routes stay up either way (the CLI uses them); `false` only 404s
+   * the page and its static assets.
+   */
+  dashboard: z.boolean().default(true),
 });
 export type ControlConfig = z.infer<typeof ControlConfigSchema>;
 

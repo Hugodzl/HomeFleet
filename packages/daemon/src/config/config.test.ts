@@ -54,7 +54,7 @@ test("a missing config file yields all defaults", async () => {
     node: {},
     hfp: { host: "0.0.0.0", port: HFP_DEFAULT_PORT },
     mcp: { host: "127.0.0.1", port: DEFAULT_MCP_PORT },
-    control: { host: "127.0.0.1", port: DEFAULT_CONTROL_PORT },
+    control: { host: "127.0.0.1", port: DEFAULT_CONTROL_PORT, dashboard: true },
     executors: {},
     catalog: { models: [] },
     jobs: {},
@@ -239,7 +239,21 @@ test("partial hfp/mcp/control configs merge with defaults", async () => {
   expect(config.control).toEqual({
     host: "127.0.0.1",
     port: DEFAULT_CONTROL_PORT,
+    dashboard: true,
   });
+});
+
+test("control.dashboard defaults to true and can be turned off", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ control: { dashboard: false } }));
+  const config = await loadDaemonConfig(dir);
+  expect(config.control.dashboard).toBe(false);
+});
+
+test("a non-boolean control.dashboard throws (fail closed)", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ control: { dashboard: "yes" } }));
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
 test("an out-of-range hfp port throws (fail closed)", async () => {
