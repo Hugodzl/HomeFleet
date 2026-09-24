@@ -191,14 +191,16 @@ non-loopback host outright, because this surface carries no per-request auth.
 
 ## `control`
 
-The loopback admin API the `homefleet` CLI uses for `pair`/`nodes`/`status`
+The loopback admin API the `homefleet` CLI uses for `pair`/`nodes`/`status`,
+and the read-only dashboard
 (see [ADR-0006](../adr/0006-daemon-assembly-and-control-channel.md)). Same
 loopback enforcement as `mcp`.
 
-| Key    | Type                                  | Default        | Meaning |
-| ------ | -------------------------------------- | --------------- | ------- |
-| `host` | one of `127.0.0.1`, `::1`, `localhost`  | `"127.0.0.1"`   | Bind address; same loopback allow-list as `mcp.host`. |
-| `port` | integer, 0–65535                       | `56373`         | Control API port. |
+| Key         | Type                                  | Default        | Meaning |
+| ----------- | -------------------------------------- | --------------- | ------- |
+| `host`      | one of `127.0.0.1`, `::1`, `localhost`  | `"127.0.0.1"`   | Bind address; same loopback allow-list as `mcp.host`. |
+| `port`      | integer, 0–65535                       | `56373`         | Control API port. |
+| `dashboard` | boolean                                | `true`          | Serve the read-only web dashboard at `http://<host>:<port>/` (open it with `homefleet dashboard`). `false` 404s the page; the JSON routes the CLI uses stay up. |
 
 ## `executors`
 

@@ -196,8 +196,9 @@ rates, and the Windows MAX_PATH lesson it surfaced are in the
    ```
 3. **Verify.** On either machine:
    ```bash
-   homefleet nodes    # the peer, with live capabilities
-   homefleet status   # this node's own live status
+   homefleet nodes      # the peer, with live capabilities
+   homefleet status     # this node's own live status
+   homefleet dashboard  # opens the read-only web dashboard (this node, paired nodes, recent jobs) served by the local daemon on 127.0.0.1
    ```
 4. **Point a Claude Code session's MCP at machine A's local daemon** (see the
    Quickstart's `claude mcp add` command — always the *local* daemon; MCP

@@ -22,7 +22,10 @@ dashboard. The roadmap's "tray app + web dashboard" covers the viewing half;
 this extends it to editing (rename a node, tune its parameters). The daemon's
 HTTP API was deliberately designed so a dashboard can be added as a client
 (design doc, v0.1 non-goals), so the seam already exists — the brainstorm is
-scope (tray vs. web vs. both) and which mutations the API should expose.
+scope (tray vs. web vs. both) and which mutations the API should expose. The
+read-only viewing half shipped as the dashboard (spec
+`specs/2026-09-24-read-only-dashboard-design.md`); A1 now means the
+mutations.
 
 ### Control over local models per node (A2)
 

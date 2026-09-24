@@ -92,7 +92,7 @@ Recommendations, not decisions:
 
 > v0.2 write delegation (committed, in progress)
 > → **S1** packaging (debt item, unlocks B1)
-> → read-only dashboard (existing roadmap item)
+> → read-only dashboard (existing roadmap item) — **done 2026-09-24**
 > → **S2 + A1** config mutation API + GUI mutations
 > → **S3 + A2** capability-ad rev + model catalog
 > → **S5 + A3** management trust tier + remote install

@@ -1,8 +1,7 @@
 # Read-only Dashboard — Design
 
 - **Date:** 2026-09-24
-- **Status:** design approved by Hugo 2026-09-24 (brainstorm). Next: the
-  implementation plan in `docs/plans/2026-09-24-read-only-dashboard.md`.
+- **Status:** implemented.
 - **Roadmap slot:** third step of the
   [approved sequencing](2026-07-12-backlog-structuring.md#approved-sequencing)
   (after S1 packaging, before S2 + A1). The
