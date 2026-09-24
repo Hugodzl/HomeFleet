@@ -1,4 +1,4 @@
-import { createSocket, type Socket } from "node:dgram";
+import { createSocket, Socket } from "node:dgram";
 import { once } from "node:events";
 import {
   DISCOVERY_MAX_DATAGRAM_BYTES,
@@ -253,19 +253,32 @@ test("re-announces on the configured interval", async () => {
 });
 
 test("stop closes the socket and halts re-announcing", async () => {
+  // Count sends at the source. The peer's receive count alone can't prove
+  // the halt: an announce sent just before stop() may still be in flight on
+  // loopback when stop() resolves and land afterwards — a pre-stop send, not
+  // a re-announce (the flake this test used to have under suite load).
+  const sendSpy = vi.spyOn(Socket.prototype, "send");
+  cleanups.push(() => sendSpy.mockRestore());
   const peer = await rawPeer();
   const a = await startInstance(announcement(deviceIdA), {
     sendTarget: { address: "127.0.0.1", port: peer.port },
     announceIntervalMs: 30,
   });
+  const socket = (a.discovery as unknown as { socket: Socket }).socket;
+  const sendsFromA = () =>
+    sendSpy.mock.contexts.filter((context) => context === socket).length;
   await vi.waitFor(() => {
     expect(peer.received.length).toBeGreaterThanOrEqual(1);
   }, DELIVERY_TIMEOUT_MS);
 
   await a.discovery.stop();
-  const seen = peer.received.length;
+  const sentBeforeStop = sendsFromA();
+  expect(() => socket.address()).toThrow(/not running/i);
+  // Several announce intervals: a surviving timer would send again.
   await new Promise((resolve) => setTimeout(resolve, 120));
-  expect(peer.received.length).toBe(seen);
+  expect(sendsFromA()).toBe(sentBeforeStop);
+  // Nothing beyond the pre-stop announces ever reaches the wire.
+  expect(peer.received.length).toBeLessThanOrEqual(sentBeforeStop);
 
   // Idempotent.
   await a.discovery.stop();
