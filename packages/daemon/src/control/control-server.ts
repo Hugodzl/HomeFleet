@@ -49,6 +49,12 @@
  * - Handlers never leak stack traces: every error response is a plain
  *   `{ error: string }` object built from a caught error's `.message`
  *   (never the error object, never `.stack`).
+ * - Dashboard static routes (`GET`/`HEAD` of the exact paths in
+ *   ../dashboard/static.ts) are the ONLY routes exempt from the control
+ *   header. They still pass the Host check and readiness guard, serve
+ *   fixed embedded bytes, and carry a strict CSP plus frame/sniff headers.
+ *   The page's own data fetches are same-origin and send the header, so no
+ *   CORS headers are ever added.
  *
  * NOTE: local processes are trusted (same posture as the MCP front) — there
  * is no per-request auth token in v0. The defenses above are about the
@@ -82,6 +88,11 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { ExecutorKind, ModelInfo, NodeRole } from "@homefleet/protocol";
+import {
+  lookupStaticAsset,
+  STATIC_SECURITY_HEADERS,
+  type StaticAsset,
+} from "../dashboard/static.js";
 import { LOOPBACK_HOSTS } from "../mcp/http-transport.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
@@ -166,6 +177,11 @@ export interface ControlServerOptions {
   port?: number;
   /** Extra allowed Host header values (beyond the bound loopback host:port). */
   allowedHosts?: string[];
+  /**
+   * Serve the read-only dashboard's static assets (default `true`; config
+   * `control.dashboard`). `false` 404s them; data routes are unaffected.
+   */
+  dashboard?: boolean;
 }
 
 export interface RunningControlServer {
@@ -193,6 +209,25 @@ function respondError(
   message: string,
 ): void {
   respondJson(res, status, { error: message });
+}
+
+/** Serves an embedded dashboard asset with the static security headers. */
+function serveStatic(
+  res: ServerResponse,
+  asset: StaticAsset,
+  headOnly: boolean,
+): void {
+  const body = Buffer.from(asset.body, "utf8");
+  res.writeHead(200, {
+    ...STATIC_SECURITY_HEADERS,
+    "content-type": asset.contentType,
+    "content-length": String(body.length),
+  });
+  if (headOnly) {
+    res.end();
+  } else {
+    res.end(body);
+  }
 }
 
 /** Extracts a safe, stack-free message from an unknown thrown value. */
@@ -270,6 +305,7 @@ export async function startControlServer(
   }
 
   const { surface } = options;
+  const dashboardEnabled = options.dashboard ?? true;
 
   // Built synchronously in the `listen` callback (below), before any request
   // can be accepted. The handler additionally refuses to serve while this is
@@ -376,6 +412,26 @@ export async function startControlServer(
       return;
     }
 
+    const method = req.method ?? "GET";
+    const pathname = (req.url ?? "").split("?")[0];
+
+    // Dashboard static assets: exempt from the control header (a browser
+    // NAVIGATION cannot set custom headers) but NOT from the Host check
+    // above or the readiness guard. They are fixed embedded bytes that
+    // never carry live data; the data they render is fetched from the
+    // header-protected routes below. See ../dashboard/static.ts.
+    if (method === "GET" || method === "HEAD") {
+      const asset = lookupStaticAsset(pathname ?? "");
+      if (asset !== undefined) {
+        if (!dashboardEnabled) {
+          respondError(res, 404, "not found");
+          return;
+        }
+        serveStatic(res, asset, method === "HEAD");
+        return;
+      }
+    }
+
     // Browser CSRF defense: see the module header. A cross-origin fetch()
     // cannot set this header without a CORS preflight, and this server sends
     // no Access-Control-Allow-* headers, so the browser blocks the real
@@ -384,9 +440,6 @@ export async function startControlServer(
       respondError(res, 403, `missing required "${CONTROL_HEADER}" header`);
       return;
     }
-
-    const method = req.method ?? "GET";
-    const pathname = (req.url ?? "").split("?")[0];
 
     try {
       if (method === "POST" && pathname === "/control/pair/begin") {

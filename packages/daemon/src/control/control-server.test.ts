@@ -5,7 +5,11 @@
  * codes), not any real pairing/trust/directory logic (those are covered
  * where they live: pairing.test.ts, trust-store.test.ts, node-directory.test.ts).
  */
-import { type IncomingMessage, request } from "node:http";
+import {
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  request,
+} from "node:http";
 import { afterEach, expect, test } from "vitest";
 import {
   CONTROL_HEADER,
@@ -162,6 +166,46 @@ function postJson(
     path,
     body: JSON.stringify(body),
     ...(headers !== undefined ? { headers } : {}),
+  });
+}
+
+/** Like `send`, but returns raw text + response headers (for static routes). */
+function getRaw(
+  port: number,
+  options: {
+    method?: string;
+    path: string;
+    headers?: Record<string, string>;
+    hostHeader?: string;
+  },
+): Promise<{ status: number; headers: IncomingHttpHeaders; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: options.method ?? "GET",
+        path: options.path,
+        agent: false,
+        headers: {
+          host: options.hostHeader ?? `127.0.0.1:${port}`,
+          ...options.headers,
+        },
+      },
+      (res: IncomingMessage) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            text: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -494,4 +538,68 @@ test("close() is clean and idempotent-safe across restarts", async () => {
   running.splice(running.indexOf(first), 1);
   const second = await start();
   expect(second.port).toBeGreaterThan(0);
+});
+
+test("GET / serves the dashboard WITHOUT the control header, with security headers", async () => {
+  const server = await start();
+  const res = await getRaw(server.port, { path: "/" });
+  expect(res.status).toBe(200);
+  expect(res.headers["content-type"]).toBe("text/html; charset=utf-8");
+  expect(res.headers["content-security-policy"]).toContain(
+    "default-src 'none'",
+  );
+  expect(res.headers["x-frame-options"]).toBe("DENY");
+  expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  expect(res.headers["cache-control"]).toBe("no-store");
+  expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  expect(res.text).toContain("data-homefleet-dashboard");
+});
+
+test("HEAD / returns headers and no body", async () => {
+  const server = await start();
+  const res = await getRaw(server.port, { method: "HEAD", path: "/" });
+  expect(res.status).toBe(200);
+  expect(res.headers["content-type"]).toBe("text/html; charset=utf-8");
+  expect(res.text).toBe("");
+});
+
+test("static routes still enforce the Host allow-list (DNS rebinding)", async () => {
+  const server = await start();
+  const res = await getRaw(server.port, {
+    path: "/",
+    hostHeader: "evil.example:80",
+  });
+  expect(res.status).toBe(403);
+});
+
+test("POST / is not a static route: 403 without the header, 404 with it", async () => {
+  const server = await start();
+  expect(
+    (await getRaw(server.port, { method: "POST", path: "/" })).status,
+  ).toBe(403);
+  expect(
+    (
+      await getRaw(server.port, {
+        method: "POST",
+        path: "/",
+        headers: { [CONTROL_HEADER]: "1" },
+      })
+    ).status,
+  ).toBe(404);
+});
+
+test("data routes still require the control header", async () => {
+  const server = await start();
+  const res = await getRaw(server.port, { path: "/control/status" });
+  expect(res.status).toBe(403);
+});
+
+test("dashboard: false 404s the page but keeps data routes", async () => {
+  const server = await start({ dashboard: false });
+  expect((await getRaw(server.port, { path: "/" })).status).toBe(404);
+  const status = await getRaw(server.port, {
+    path: "/control/status",
+    headers: { [CONTROL_HEADER]: "1" },
+  });
+  expect(status.status).toBe(200);
 });

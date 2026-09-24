@@ -554,6 +554,7 @@ export class Daemon {
       surface: controlSurface,
       host: config.control.host,
       port: config.control.port,
+      dashboard: config.control.dashboard,
     });
     controlPort = controlServer.port;
     this.teardown.push(() => controlServer.close());

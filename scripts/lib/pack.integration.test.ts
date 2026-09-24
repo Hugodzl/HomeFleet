@@ -94,3 +94,11 @@ test("stale tarballs in outDir are cleared before packing", async () => {
     path.basename(result.tarballPath),
   ]);
 });
+
+test("the built homefleetd.js embeds the dashboard page (?raw plugin ran)", async () => {
+  const bin = await readFile(
+    path.join(workDir, "dist-bin", "homefleetd.js"),
+    "utf8",
+  );
+  expect(bin).toContain("data-homefleet-dashboard");
+});
