@@ -570,6 +570,68 @@ test("a throwing onJobEvicted hook breaks neither eviction nor stop", async () =
   await expect(manager.stop()).resolves.toBeUndefined();
 });
 
+test("list() returns every retained job newest first, metadata only", async () => {
+  const manager = makeManager({ maxConcurrentJobs: 1 });
+  const first = manager.submit(commandParams(), OWNER);
+  const second = manager.submit(commandParams(), OTHER_OWNER);
+  await waitUntil(() => isSucceeded(manager, first.jobId));
+  await waitUntil(() => {
+    try {
+      return manager.snapshot(second.jobId, OTHER_OWNER).status === "succeeded";
+    } catch {
+      return false;
+    }
+  });
+
+  const listed = manager.list();
+  expect(listed.map((job) => job.jobId)).toEqual([second.jobId, first.jobId]);
+  const [newest] = listed;
+  expect(newest).toMatchObject({
+    jobId: second.jobId,
+    type: "command",
+    owner: OTHER_OWNER,
+    repoId: "r",
+    status: "succeeded",
+  });
+  expect(typeof newest?.createdAt).toBe("number");
+  expect(typeof newest?.startedAt).toBe("number");
+  expect(typeof newest?.terminalAt).toBe("number");
+  // Metadata only: no params body, events, or result payload.
+  expect(Object.keys(newest ?? {}).sort()).toEqual(
+    [
+      "createdAt",
+      "jobId",
+      "owner",
+      "repoId",
+      "startedAt",
+      "status",
+      "terminalAt",
+      "type",
+    ].sort(),
+  );
+});
+
+test("list() reports a failed job's error code", async () => {
+  const manager = makeManager({ executors: [new ThrowingExecutor()] });
+  const bad = manager.submit(commandParams(), OWNER);
+  await waitUntil(() => {
+    try {
+      return manager.snapshot(bad.jobId, OWNER).status === "failed";
+    } catch {
+      return false;
+    }
+  });
+  expect(manager.list()[0]).toMatchObject({
+    jobId: bad.jobId,
+    status: "failed",
+    errorCode: "INTERNAL",
+  });
+});
+
+test("list() on a fresh manager is empty", () => {
+  expect(makeManager().list()).toEqual([]);
+});
+
 /** A second command-typed executor is a config error, so the backstop test's
  * "subsequent job" is a recon job served by this agent-typed stand-in. */
 class SucceedingExecutor2 implements Executor<"recon"> {

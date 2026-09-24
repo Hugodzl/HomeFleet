@@ -35,11 +35,13 @@ import type {
 } from "@homefleet/executors";
 import type {
   CancelResponse,
+  HfpErrorCode,
   JobEvent,
   JobId,
   JobParams,
   JobResult,
   JobSnapshot,
+  JobStatus,
   JobType,
   WorkspaceRef,
 } from "@homefleet/protocol";
@@ -157,6 +159,21 @@ export interface JobSubscription {
    * synchronously and no live events will follow, so the route may end.
    */
   isTerminal: boolean;
+}
+
+/** A metadata-only view of one retained job, for the local control API. */
+export interface JobListing {
+  jobId: JobId;
+  type: JobType;
+  /** Device ID of the submitting peer. */
+  owner: string;
+  repoId: string;
+  status: JobStatus;
+  createdAt: number;
+  startedAt?: number;
+  terminalAt?: number;
+  /** The terminal result's error code, when it carries one. */
+  errorCode?: HfpErrorCode;
 }
 
 export class JobManager {
@@ -298,6 +315,35 @@ export class JobManager {
       status: record.status,
       ...(record.result !== undefined ? { result: record.result } : {}),
     });
+  }
+
+  /**
+   * Every retained job (active + terminal), newest first, as METADATA ONLY
+   * (no params body, events, or result payload).
+   *
+   * NOT owner-scoped, deliberately: this feeds the loopback control API's
+   * `/control/jobs` (the local, same-OS-user dashboard). It must never be
+   * exposed over HFP, where {@link snapshot}'s owner check is the isolation
+   * boundary between peers.
+   */
+  list(): JobListing[] {
+    return [...this.records.values()].reverse().map((record) => ({
+      jobId: record.jobId,
+      type: record.params.type,
+      owner: record.owner,
+      repoId: record.params.workspace.repoId,
+      status: record.status,
+      createdAt: record.createdAt,
+      ...(record.startedAt !== undefined
+        ? { startedAt: record.startedAt }
+        : {}),
+      ...(record.terminalAt !== undefined
+        ? { terminalAt: record.terminalAt }
+        : {}),
+      ...(record.result?.error !== undefined
+        ? { errorCode: record.result.error.code }
+        : {}),
+    }));
   }
 
   /**
