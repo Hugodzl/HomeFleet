@@ -1,7 +1,7 @@
 /**
  * The daemon's CONTROL API (M9 Unit 7): a loopback HTTP server the
- * `homefleet` CLI uses to drive pairing, list nodes, and read status against
- * the RUNNING daemon.
+ * `homefleet` CLI uses to drive pairing, list nodes, read status, list
+ * recent jobs, and serve the read-only dashboard against the RUNNING daemon.
  *
  * Why this exists: pairing is server-side state — the RESPONDER's live
  * `PairingManager` owns the currently-active pairing code, and the RUNNING
@@ -87,7 +87,14 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import type { ExecutorKind, ModelInfo, NodeRole } from "@homefleet/protocol";
+import type {
+  ExecutorKind,
+  HfpErrorCode,
+  JobStatus,
+  JobType,
+  ModelInfo,
+  NodeRole,
+} from "@homefleet/protocol";
 import {
   lookupStaticAsset,
   STATIC_SECURITY_HEADERS,
@@ -131,6 +138,41 @@ export interface ControlStatus {
   maxConcurrentJobs: number;
 }
 
+/** One worker-side job (this node ran it for a peer), as `/control/jobs` reports it. */
+export interface WorkerJobSummary {
+  jobId: string;
+  type: JobType;
+  ownerDeviceId: string;
+  /** The owner's paired name, when it is (still) in the trust store. */
+  ownerName?: string;
+  repoId: string;
+  status: JobStatus;
+  createdAt: number;
+  startedAt?: number;
+  terminalAt?: number;
+  errorCode?: HfpErrorCode;
+}
+
+/** One delegated job (this node sent it out), as `/control/jobs` reports it. */
+export interface DelegatedJobSummary {
+  jobId: string;
+  type: JobType;
+  targetDeviceId: string;
+  targetName?: string;
+  repoId: string;
+  recordedAt: number;
+  /** Last status the MCP tools observed — "last seen", never fetched live. */
+  lastStatus: JobStatus;
+  lastStatusAt: number;
+  appliedBranch?: string;
+}
+
+/** The `GET /control/jobs` body: metadata only, newest first. */
+export interface ControlJobs {
+  worker: WorkerJobSummary[];
+  delegated: DelegatedJobSummary[];
+}
+
 /** The outcome of an outbound pairing attempt, as `pair/connect` reports it. */
 export interface PairConnectSummary {
   accepted: boolean;
@@ -166,6 +208,12 @@ export interface ControlSurface {
   status(): ControlStatus;
   /** The live paired-node directory; wraps `NodeDirectory.list`. */
   listNodes(): Promise<NodeDirectoryEntry[]>;
+  /**
+   * Recent jobs in both directions, metadata only (no prompts, output, or
+   * results) — the dashboard's jobs view. Local-admin only: the worker list
+   * is NOT owner-scoped (see JobManager.list).
+   */
+  listJobs(): ControlJobs;
 }
 
 export interface ControlServerOptions {
@@ -380,6 +428,10 @@ export async function startControlServer(
     respondJson(res, 200, { nodes });
   }
 
+  async function handleJobs(res: ServerResponse): Promise<void> {
+    respondJson(res, 200, surface.listJobs());
+  }
+
   async function handle(
     req: IncomingMessage,
     res: ServerResponse,
@@ -456,6 +508,10 @@ export async function startControlServer(
       }
       if (method === "GET" && pathname === "/control/nodes") {
         await handleNodes(res);
+        return;
+      }
+      if (method === "GET" && pathname === "/control/jobs") {
+        await handleJobs(res);
         return;
       }
       respondError(res, 404, "not found");

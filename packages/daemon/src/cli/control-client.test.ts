@@ -9,6 +9,7 @@
  */
 import { afterEach, expect, test } from "vitest";
 import {
+  type ControlJobs,
   type ControlServerOptions,
   type ControlStatus,
   type ControlSurface,
@@ -58,6 +59,7 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
     }),
     status: () => status,
     listNodes: async () => [],
+    listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
     ...overrides,
   };
 }

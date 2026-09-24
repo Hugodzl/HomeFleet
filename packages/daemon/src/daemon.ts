@@ -17,6 +17,7 @@ import {
 import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
 import {
+  type ControlJobs,
   type ControlStatus,
   type ControlSurface,
   type PairConnectSummary,
@@ -549,6 +550,32 @@ export class Daemon {
         };
       },
       listNodes: () => nodeDirectory.list(),
+      listJobs: (): ControlJobs => {
+        // Resolve names from the LIVE trust store on every call, so a peer
+        // paired or renamed later shows up correctly on the next poll.
+        const names = new Map(
+          trustStore.list().map((device) => [device.deviceId, device.name]),
+        );
+        const nameOf = (deviceId: string) => names.get(deviceId);
+        return {
+          worker: jobManager.list().map(({ owner, ...job }) => {
+            const ownerName = nameOf(owner);
+            return {
+              ...job,
+              ownerDeviceId: owner,
+              ...(ownerName !== undefined ? { ownerName } : {}),
+            };
+          }),
+          delegated: delegations.list().map(({ deviceId, ...job }) => {
+            const targetName = nameOf(deviceId);
+            return {
+              ...job,
+              targetDeviceId: deviceId,
+              ...(targetName !== undefined ? { targetName } : {}),
+            };
+          }),
+        };
+      },
     };
     const controlServer = await startControlServer({
       surface: controlSurface,

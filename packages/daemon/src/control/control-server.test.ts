@@ -13,6 +13,7 @@ import {
 import { afterEach, expect, test } from "vitest";
 import {
   CONTROL_HEADER,
+  type ControlJobs,
   type ControlServerOptions,
   type ControlStatus,
   type ControlSurface,
@@ -59,6 +60,7 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
     }),
     status: () => status,
     listNodes: async () => [],
+    listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
     ...overrides,
   };
 }
@@ -641,4 +643,46 @@ test("dashboard: false 404s the page but keeps data routes", async () => {
     headers: { [CONTROL_HEADER]: "1" },
   });
   expect(status.status).toBe(200);
+});
+
+test("GET /control/jobs returns the surface's listing (header required)", async () => {
+  const jobs: ControlJobs = {
+    worker: [
+      {
+        jobId: "11111111-1111-4111-8111-111111111111",
+        type: "command",
+        ownerDeviceId: FAKE_PEER_DEVICE_ID,
+        ownerName: "peer-node",
+        repoId: "repo-x",
+        status: "running",
+        createdAt: 1,
+        startedAt: 2,
+      },
+    ],
+    delegated: [
+      {
+        jobId: "22222222-2222-4222-8222-222222222222",
+        type: "write",
+        targetDeviceId: FAKE_PEER_DEVICE_ID,
+        targetName: "peer-node",
+        repoId: "repo-x",
+        recordedAt: 3,
+        lastStatus: "succeeded",
+        lastStatusAt: 4,
+        appliedBranch: "homefleet/222222222222",
+      },
+    ],
+  };
+  const server = await start({
+    surface: fakeSurface({ listJobs: () => jobs }),
+  });
+  const ok = await send(server.port, { method: "GET", path: "/control/jobs" });
+  expect(ok.status).toBe(200);
+  expect(ok.json).toEqual(jobs);
+  const denied = await send(server.port, {
+    method: "GET",
+    path: "/control/jobs",
+    headers: { [CONTROL_HEADER]: undefined },
+  });
+  expect(denied.status).toBe(403);
 });
