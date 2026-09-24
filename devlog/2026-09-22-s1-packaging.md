@@ -88,3 +88,31 @@ asserts that `setup`'s autostart command targets the *installed*
 not a checkout. Green first time here (temp `--prefix` install) and on both
 runners. Still untested: pairing and a delegated job between two installed
 machines, and the Release-creating job itself, which only a tag runs.
+
+## Addendum (2026-09-24): v0.3.0, the first packaged release, on the rig
+
+`v0.3.0` was tagged and the full workflow ran for the first time end to end,
+including the Release job that only a tag reaches: [the
+Release](https://github.com/Hugodzl/HomeFleet/releases/tag/v0.3.0) carries
+`homefleet-0.3.0.tgz` (460,806 bytes). Both rig machines then installed it
+from that public URL with `npm i -g` — the real user path, no checkout
+involved — and ran the *installed* `homefleetd` on their existing data dirs.
+
+| Check | Result |
+| --- | --- |
+| Install from the Release URL, both machines | `homefleet 0.3.0` / `homefleetd 0.3.0`, 121 deps, ~12 s |
+| Existing identity, trust and config carried over | yes — tower's pre-catalog config still normalizes, model `status: ok` |
+| `setup` autostart targets the installed `homefleetd.js` | yes, and the file exists (tower) |
+| laptop → tower command job (`git rev-parse HEAD`) | succeeded, 33 ms worker wall, ~2 s end to end |
+| tower → laptop command job | succeeded, 76 ms worker wall, 1.4 s end to end |
+| laptop → tower **write** job (tower's qwen3.6-35b-a3b writes a test) | succeeded in 53 s, 2 tool calls; branch applied on the laptop; its 3 tests pass and it is lint-clean |
+
+One correction came from the tower session, not the product: the brief said
+the reverse job should return the laptop's HEAD. It returned the tower's —
+correctly, since a command job runs against the *delegator's* bundled
+workspace. The brief was wrong, the product was right.
+
+The tower also surfaced two real rough edges, now in the backlog: `setup`'s
+autostart hint still says "run `pnpm build` first", which is wrong for a
+packaged install; and the daemon's stderr shows mojibake for `—`/`…` when
+redirected to a file on Windows.

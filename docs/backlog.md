@@ -89,3 +89,14 @@ against each item.
   2026-09-22): GitHub Releases tarball via `v*` tag; see
   [releasing](reference/releasing.md). Public npm registry publish is still
   deliberately deferred.
+
+## Known rough edges (from the v0.3.0 rig test, 2026-09-24)
+
+- **`homefleet setup`'s autostart hint is stale for packaged installs.** It
+  says "run `pnpm build` first so it exists" (`packages/daemon/src/cli/cli.ts:181`),
+  which only applies from source. Show it only when the resolved
+  `homefleetd.js` is missing, or drop it.
+- **Mojibake in redirected daemon stderr on Windows.** `—` and `…` in startup
+  and warning lines come out as `â€"` / `â€¦` when stderr is redirected to a
+  file (the rig's detached-daemon pattern). Keep daemon log lines ASCII, or make
+  the output encoding explicit.
