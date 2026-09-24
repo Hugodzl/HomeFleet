@@ -65,17 +65,10 @@ add-a-new-machine a one-step flow on both ends (install on the new box,
 approve from an existing one — the fleet GUI above is the natural surface
 for the approval side).
 
-### Coordination ideas from Grok Bot (2026-09-24)
+### Coordination ideas
 
-The six entries below come from a look at SpaceXAI's Grok Bot (Aug 2026 beta),
-whose agents coordinate through shared threads under a "Chief of Staff"
-orchestrator, escalate for approval, and keep memory and learned routines.
-Its internals are undisclosed, so these borrow the *patterns*, not an
-implementation. Deliberately **not** borrowed: cloud VMs, UI-driven computer
-use, and worker-to-worker meshes — the last would erode the hub-and-spoke
-trust model (ADR 0004). Listed most-relevant first; the first two address
-the biggest gap (what an unattended local model does when it's stuck or the
-task is multi-step).
+Patterns borrowed from multi-agent products; the analysis is in
+[devlog 018](../devlog/2026-09-24-multi-agent-coordination-patterns.md).
 
 #### Mid-job clarification requests
 
