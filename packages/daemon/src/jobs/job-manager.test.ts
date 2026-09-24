@@ -621,11 +621,27 @@ test("list() reports a failed job's error code", async () => {
       return false;
     }
   });
-  expect(manager.list()[0]).toMatchObject({
+  const [listed] = manager.list();
+  expect(listed).toMatchObject({
     jobId: bad.jobId,
     status: "failed",
     errorCode: "INTERNAL",
   });
+  // Exact key set: the base metadata keys plus errorCode, and nothing else —
+  // guards against a future change leaking the error message/result payload.
+  expect(Object.keys(listed ?? {}).sort()).toEqual(
+    [
+      "createdAt",
+      "errorCode",
+      "jobId",
+      "owner",
+      "repoId",
+      "startedAt",
+      "status",
+      "terminalAt",
+      "type",
+    ].sort(),
+  );
 });
 
 test("list() on a fresh manager is empty", () => {
