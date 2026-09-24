@@ -1,6 +1,6 @@
 {
   "name": "@homefleet/daemon",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "homefleetd — the HomeFleet per-machine daemon (MCP front, node service, discovery, dispatch)",
   "license": "Apache-2.0",
   "type": "module",
