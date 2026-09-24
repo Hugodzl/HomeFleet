@@ -35,10 +35,13 @@ const FORBIDDEN_JS: RegExp[] = [
   /document\.write/,
   /\beval\s*\(/,
   /\bnew\s+Function\b/,
+  /\bFunction\s*\(/,
+  /createContextualFragment|DOMParser|srcdoc|\.submit\(/,
   /set(?:Timeout|Interval)\(\s*["'`]/,
   /XMLHttpRequest/,
   /sendBeacon/,
   /\bmethod\s*:\s*["'`](?!GET["'`])/,
+  /\bmethod\s*=\s*["'](?!GET)/,
 ];
 
 test("client JS contains no HTML/eval sinks and no non-GET request", async () => {

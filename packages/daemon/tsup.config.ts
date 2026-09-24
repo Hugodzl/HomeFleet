@@ -14,10 +14,13 @@ type Plugin = NonNullable<Options["esbuildPlugins"]>[number];
 // Vitest implements `?raw` natively; esbuild does not, so this resolves any
 // `?raw` specifier to its file and loads it with the `text` loader.
 //
-// The resolved virtual path is deliberately suffixed with a NUL byte rather
-// than left as the bare `*.css`/`*.js` filename. tsup registers its own
-// postcss `onLoad` for any path ending in `.css` BEFORE this plugin's own
-// (user `esbuildPlugins` always run last — see tsup's `build()`), and that
+// The resolved virtual path is deliberately suffixed with a printable
+// `.raw` marker rather than left as the bare `*.css`/`*.js` filename (a
+// literal NUL byte was tried first, but that ends up embedded verbatim in
+// esbuild's path comments and sourcemap `sources` entries, corrupting the
+// built bin with real NUL bytes). tsup registers its own postcss `onLoad`
+// for any path ending in `.css` BEFORE this plugin's own (user
+// `esbuildPlugins` always run last — see tsup's `build()`), and that
 // callback's filter has no namespace restriction, so it still claims loads
 // in OUR "raw-text" namespace even though we set that namespace explicitly.
 // Left alone, that silently reinterprets `app.css?raw` as a real stylesheet
@@ -35,7 +38,7 @@ const rawText: Plugin = {
         args.path.slice(0, -"?raw".length),
       );
       return {
-        path: `${realPath}\0raw`,
+        path: `${realPath}.raw`,
         namespace: "raw-text",
         pluginData: { realPath },
       };
