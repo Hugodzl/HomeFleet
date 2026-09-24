@@ -136,6 +136,17 @@ test("job rows prefer paired names and format times/status", () => {
         terminalAt: now - 1_000,
         errorCode: "INTERNAL",
       },
+      {
+        jobId: "33333333-3333-4333-8333-333333333333",
+        type: "command",
+        ownerDeviceId: "b".repeat(64),
+        ownerName: "tower",
+        repoId: "homefleet",
+        status: "succeeded",
+        createdAt: now - 120_000,
+        startedAt: now - 60_000,
+        terminalAt: now - 1_000,
+      },
     ],
     delegated: [
       {
@@ -148,6 +159,15 @@ test("job rows prefer paired names and format times/status", () => {
         lastStatus: "succeeded",
         lastStatusAt: now - 2_000,
         appliedBranch: "homefleet/222222222222",
+      },
+      {
+        jobId: "44444444-4444-4444-8444-444444444444",
+        type: "write",
+        targetDeviceId: "b".repeat(64),
+        repoId: "homefleet",
+        recordedAt: now - 30_000,
+        lastStatus: "succeeded",
+        lastStatusAt: now - 2_000,
       },
     ],
   };
@@ -163,6 +183,17 @@ test("job rows prefer paired names and format times/status", () => {
       finished: "1s ago",
       error: "INTERNAL",
     },
+    {
+      jobId: "33333333-333…",
+      type: "command",
+      owner: "tower",
+      repoId: "homefleet",
+      status: "succeeded",
+      created: "2m ago",
+      started: "1m ago",
+      finished: "1s ago",
+      error: "",
+    },
   ]);
   expect(delegatedJobRows(jobs.delegated, now)).toEqual([
     {
@@ -174,6 +205,16 @@ test("job rows prefer paired names and format times/status", () => {
       status: "succeeded",
       seen: "2s ago",
       branch: "homefleet/222222222222",
+    },
+    {
+      jobId: "44444444-444…",
+      type: "write",
+      target: `${"b".repeat(12)}…`,
+      repoId: "homefleet",
+      sent: "30s ago",
+      status: "succeeded",
+      seen: "2s ago",
+      branch: "",
     },
   ]);
 });
