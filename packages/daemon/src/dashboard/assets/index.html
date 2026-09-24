@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-homefleet-dashboard>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HomeFleet</title>
+    <link rel="stylesheet" href="/dashboard/app.css" />
+    <script type="module" src="/dashboard/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>HomeFleet</h1>
+      <span id="updated" class="muted">Loading…</span>
+      <button id="refresh" type="button">Refresh</button>
+    </header>
+    <div id="banner" class="banner" hidden></div>
+    <main>
+      <section>
+        <h2>This node</h2>
+        <div id="self"></div>
+        <h3>Models</h3>
+        <div id="models"></div>
+      </section>
+      <section>
+        <h2>Paired nodes</h2>
+        <div id="nodes"></div>
+      </section>
+      <section>
+        <h2>Worker jobs</h2>
+        <p class="muted">Jobs this node ran for peers. Kept in memory only; the list resets when the daemon restarts.</p>
+        <div id="worker-jobs"></div>
+      </section>
+      <section>
+        <h2>Delegated jobs</h2>
+        <p class="muted">Jobs this node sent out. Status is the last one the MCP tools saw; the dashboard never asks the worker itself.</p>
+        <div id="delegated-jobs"></div>
+      </section>
+    </main>
+  </body>
+</html>

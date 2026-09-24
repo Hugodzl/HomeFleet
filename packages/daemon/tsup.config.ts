@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import type { Plugin } from "esbuild";
 import { defineConfig } from "tsup";
 
 // WHY: the daemon's three bins are consumed as bare-`node`-runnable CLI
@@ -17,6 +20,25 @@ import { defineConfig } from "tsup";
 // re-bundle with esbuild, so we let Node's own resolver load them unmodified
 // and only ask esbuild to flatten our own `.ts` graph (which has none of
 // those hazards) into a single ESM file per bin.
+// WHY: the dashboard's static assets (src/dashboard/assets/*) are imported
+// as `./x.html?raw` so the page ships INSIDE homefleetd.js — no runtime file
+// lookup that would differ between a checkout and an `npm i -g` install.
+// Vitest implements `?raw` natively; esbuild does not, so this resolves any
+// `?raw` specifier to its file and loads it with the `text` loader.
+const rawText: Plugin = {
+  name: "raw-text",
+  setup(build) {
+    build.onResolve({ filter: /\?raw$/ }, (args) => ({
+      path: path.resolve(args.resolveDir, args.path.slice(0, -"?raw".length)),
+      namespace: "raw-text",
+    }));
+    build.onLoad({ filter: /.*/, namespace: "raw-text" }, async (args) => ({
+      contents: await readFile(args.path, "utf8"),
+      loader: "text",
+    }));
+  },
+};
+
 export default defineConfig({
   entry: {
     homefleetd: "src/bin/homefleetd.ts",
@@ -34,4 +56,5 @@ export default defineConfig({
   // node_modules); everything else — third-party deps and node builtins —
   // stays external and is resolved from node_modules at run time.
   noExternal: [/^@homefleet\//],
+  esbuildPlugins: [rawText],
 });
