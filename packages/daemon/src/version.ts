@@ -8,4 +8,4 @@
  * executable — can depend on the version string alone without pulling in the
  * entire daemon assembly (discovery, transport, jobs, executors, ...).
  */
-export const DAEMON_VERSION = "0.2.0";
+export const DAEMON_VERSION = "0.3.0";
