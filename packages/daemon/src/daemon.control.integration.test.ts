@@ -163,6 +163,7 @@ test("the assembled daemon serves the dashboard and lists jobs on both sides of 
     delegated: Array<Record<string, unknown>>;
   };
   expect(mine.worker).toEqual([]);
+  expect(mine.delegated).toHaveLength(1);
   expect(mine.delegated[0]).toMatchObject({
     jobId,
     type: "command",
@@ -180,6 +181,7 @@ test("the assembled daemon serves the dashboard and lists jobs on both sides of 
     delegated: unknown[];
   };
   expect(theirs.delegated).toEqual([]);
+  expect(theirs.worker).toHaveLength(1);
   expect(theirs.worker[0]).toMatchObject({
     jobId,
     type: "command",
@@ -209,6 +211,18 @@ test("the assembled daemon serves the dashboard and lists jobs on both sides of 
     ownerDeviceId: delegator.deviceId,
   });
   expect(theirsAfterUntrust.worker[0]).not.toHaveProperty("ownerName");
+
+  // Same on the delegator side: once the worker drops out of ITS trust
+  // store, the delegated entry keeps targetDeviceId but drops targetName.
+  await delegator.trustStore.remove(worker.deviceId);
+  const mineAfterUntrust = (await (
+    await controlGet(delegator, "/control/jobs", true)
+  ).json()) as { delegated: Array<Record<string, unknown>> };
+  expect(mineAfterUntrust.delegated[0]).toMatchObject({
+    jobId,
+    targetDeviceId: worker.deviceId,
+  });
+  expect(mineAfterUntrust.delegated[0]).not.toHaveProperty("targetName");
 
   // The data route still refuses a header-less request.
   expect((await controlGet(worker, "/control/jobs", false)).status).toBe(403);
