@@ -646,3 +646,83 @@ describe("unexpected errors", () => {
     expect(stderrLines.join("\n")).not.toMatch(/at .*\.ts:\d+/);
   });
 });
+
+describe("dashboard", () => {
+  test("prints the URL from the live control port and opens it", async () => {
+    const harness = makeHarness({
+      controlClient: fakeControlClient({
+        status: async () => ({
+          ...(await fakeControlClient().status()),
+          controlPort: 56399,
+        }),
+      }),
+    });
+    const opened: string[] = [];
+    harness.deps.openUrl = async (url) => {
+      opened.push(url);
+    };
+    const code = await runCli(["dashboard"], harness.deps);
+    expect(code).toBe(0);
+    expect(harness.stdoutLines).toContain(
+      "HomeFleet dashboard: http://127.0.0.1:56399/",
+    );
+    expect(opened).toEqual(["http://127.0.0.1:56399/"]);
+  });
+
+  test("--no-open prints but does not open", async () => {
+    const harness = makeHarness();
+    const opened: string[] = [];
+    harness.deps.openUrl = async (url) => {
+      opened.push(url);
+    };
+    expect(await runCli(["dashboard", "--no-open"], harness.deps)).toBe(0);
+    expect(opened).toEqual([]);
+    expect(harness.stdoutLines.join("\n")).toContain("http://127.0.0.1:56373/");
+  });
+
+  test("an opener failure is a hint, not a failure", async () => {
+    const harness = makeHarness();
+    harness.deps.openUrl = async () => {
+      throw new Error("no browser");
+    };
+    expect(await runCli(["dashboard"], harness.deps)).toBe(0);
+    expect(harness.stderrLines.join("\n")).toContain("no browser");
+  });
+
+  test("IPv6 control host is bracketed in the URL", async () => {
+    const harness = makeHarness({
+      config: fakeConfig({
+        control: { host: "::1", port: 56373, dashboard: true },
+      } as Partial<DaemonConfig>),
+    });
+    expect(await runCli(["dashboard", "--no-open"], harness.deps)).toBe(0);
+    expect(harness.stdoutLines.join("\n")).toContain("http://[::1]:56373/");
+  });
+
+  test("disabled in config exits 1 with an explanation", async () => {
+    const harness = makeHarness({
+      config: fakeConfig({
+        control: { host: "127.0.0.1", port: 56373, dashboard: false },
+      } as Partial<DaemonConfig>),
+    });
+    expect(await runCli(["dashboard"], harness.deps)).toBe(1);
+    expect(harness.stderrLines.join("\n")).toContain("control.dashboard");
+  });
+
+  test("daemon not running reports unreachable", async () => {
+    const harness = makeHarness({
+      controlClient: fakeControlClient({
+        status: async () => {
+          throw new DaemonUnreachableError("127.0.0.1", 56373, new Error("x"));
+        },
+      }),
+    });
+    expect(await runCli(["dashboard"], harness.deps)).toBe(1);
+    expect(harness.stderrLines.join("\n")).toContain("Is homefleetd running?");
+  });
+
+  test("unknown extra argument is a usage error", async () => {
+    const harness = makeHarness();
+    expect(await runCli(["dashboard", "--nope"], harness.deps)).toBe(2);
+  });
+});

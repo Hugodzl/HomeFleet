@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import { type CliDeps, runCli } from "../cli/cli.js";
 import { ControlClient } from "../cli/control-client.js";
+import { openUrl } from "../cli/open-url.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
@@ -31,6 +32,7 @@ async function main(): Promise<number> {
     stdout: (line) => process.stdout.write(`${line}\n`),
     stderr: (line) => process.stderr.write(`${line}\n`),
     fileExists: existsSync,
+    openUrl,
   };
   return runCli(process.argv.slice(2), deps);
 }

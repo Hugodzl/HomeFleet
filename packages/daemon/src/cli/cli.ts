@@ -72,6 +72,11 @@ export interface CliDeps {
    * Defaults to `true` (assume it exists, i.e. no hint) when not supplied.
    */
   fileExists?: (path: string) => boolean;
+  /**
+   * Opens a URL in the default browser (real: ./open-url.js `openUrl`).
+   * Optional so tests never launch a browser; absent means print-only.
+   */
+  openUrl?: (url: string) => Promise<void>;
 }
 
 const USAGE = `homefleet - HomeFleet operator CLI
@@ -95,6 +100,10 @@ Usage:
 
   homefleet status
       Show this node's live status (from the running daemon).
+
+  homefleet dashboard [--no-open]
+      Print the running daemon's read-only dashboard URL and open it in
+      the default browser (--no-open: print only).
 
   homefleet --help
       Show this usage text.
@@ -391,6 +400,49 @@ async function runStatus(deps: CliDeps): Promise<number> {
   });
 }
 
+/**
+ * `homefleet dashboard`: prints the read-only dashboard URL (using the
+ * control port `status()` reports the daemon actually bound to, not just the
+ * configured one) and opens it in the default browser. Gated on
+ * `config.control.dashboard` so an operator who disabled the dashboard gets
+ * a clear reason instead of a browser tab that 404s.
+ */
+async function runDashboard(args: string[], deps: CliDeps): Promise<number> {
+  const noOpen = args.includes("--no-open");
+  const extra = args.filter((arg) => arg !== "--no-open");
+  if (extra.length > 0) {
+    deps.stderr(`dashboard: unexpected argument(s): ${extra.join(" ")}`);
+    return 2;
+  }
+  return withControlClient(deps, async (client, config) => {
+    if (!config.control.dashboard) {
+      deps.stderr(
+        "The dashboard is disabled (control.dashboard is false in config.json).",
+      );
+      return 1;
+    }
+    // status() proves the daemon is up AND gives the port it actually bound.
+    const status = await client.status();
+    const host = config.control.host.includes(":")
+      ? `[${config.control.host}]`
+      : config.control.host;
+    const url = `http://${host}:${status.controlPort}/`;
+    deps.stdout(`HomeFleet dashboard: ${url}`);
+    if (!noOpen && deps.openUrl !== undefined) {
+      try {
+        await deps.openUrl(url);
+      } catch (error) {
+        deps.stderr(
+          `Could not open a browser (${
+            error instanceof Error ? error.message : String(error)
+          }); open the URL above by hand.`,
+        );
+      }
+    }
+    return 0;
+  });
+}
+
 async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
   if (command === "--help" || command === "-h") {
@@ -422,6 +474,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         return 2;
       }
       return runStatus(deps);
+    case "dashboard":
+      return runDashboard(rest, deps);
     default:
       deps.stderr(USAGE);
       return 2;
