@@ -14,6 +14,17 @@ import { resolveDataDir } from "../config/paths.js";
 import { Daemon } from "../daemon.js";
 import { DAEMON_VERSION } from "../version.js";
 import { isInvokedDirectly } from "./invoked-directly.js";
+import { asciiPunctuation } from "./log-line.js";
+
+/**
+ * Writes one line to stderr, passed through {@link asciiPunctuation} first —
+ * see log-line.ts for why. This is the ONE place homefleetd writes to stderr
+ * so every operator-facing line (the started line, onError, onDiagnostic, the
+ * shutdown messages, the startup-failure handler) gets the same treatment.
+ */
+function writeStderrLine(line: string): void {
+  process.stderr.write(`${asciiPunctuation(line)}\n`);
+}
 
 /**
  * `--version`'s exact stdout line, if `argv` requests it — `undefined`
@@ -37,28 +48,28 @@ async function main(): Promise<void> {
     dataDir,
     config,
     onError: (error) => {
-      process.stderr.write(
+      writeStderrLine(
         `homefleetd background error: ${
           error instanceof Error ? error.message : String(error)
-        }\n`,
+        }`,
       );
     },
     // Informational component diagnostics (e.g. the WorkspaceStore's
     // legacy-cache-layout warning) — operator-facing, so they go to stderr
     // like every other line this bin emits.
     onDiagnostic: (message) => {
-      process.stderr.write(`homefleetd: ${message}\n`);
+      writeStderrLine(`homefleetd: ${message}`);
     },
   });
   await daemon.start();
 
   const info = daemon.nodeInfo();
-  process.stderr.write(
+  writeStderrLine(
     `homefleetd started: "${info.name}" (${daemon.deviceId.slice(0, 12)}…) ` +
       `hfp ${config.hfp.host}:${daemon.hfpPort} ` +
       `mcp http://${config.mcp.host}:${daemon.mcpPort}/mcp ` +
       `control http://${config.control.host}:${daemon.controlPort} ` +
-      `data ${dataDir}\n`,
+      `data ${dataDir}`,
   );
 
   // Graceful shutdown: the first signal stops once and exits 0; a second
@@ -67,18 +78,18 @@ async function main(): Promise<void> {
   let stopping = false;
   const shutdown = (signal: string): void => {
     if (stopping) {
-      process.stderr.write("homefleetd: forced exit\n");
+      writeStderrLine("homefleetd: forced exit");
       process.exit(1);
     }
     stopping = true;
-    process.stderr.write(`homefleetd: ${signal} received, shutting down\n`);
+    writeStderrLine(`homefleetd: ${signal} received, shutting down`);
     daemon.stop().then(
       () => process.exit(0),
       (error: unknown) => {
-        process.stderr.write(
+        writeStderrLine(
           `homefleetd: shutdown failed: ${
             error instanceof Error ? error.message : String(error)
-          }\n`,
+          }`,
         );
         process.exit(1);
       },
@@ -96,10 +107,10 @@ if (isInvokedDirectly(import.meta.url, process.argv[1])) {
     process.stdout.write(`${version}\n`);
   } else {
     main().catch((error: unknown) => {
-      process.stderr.write(
+      writeStderrLine(
         `homefleetd failed to start: ${
           error instanceof Error ? error.message : String(error)
-        }\n`,
+        }`,
       );
       process.exit(1);
     });
