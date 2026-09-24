@@ -413,7 +413,7 @@ export async function startControlServer(
     }
 
     const method = req.method ?? "GET";
-    const pathname = (req.url ?? "").split("?")[0];
+    const pathname = (req.url ?? "").split("?")[0] ?? "";
 
     // Dashboard static assets: exempt from the control header (a browser
     // NAVIGATION cannot set custom headers) but NOT from the Host check
@@ -421,7 +421,7 @@ export async function startControlServer(
     // never carry live data; the data they render is fetched from the
     // header-protected routes below. See ../dashboard/static.ts.
     if (method === "GET" || method === "HEAD") {
-      const asset = lookupStaticAsset(pathname ?? "");
+      const asset = lookupStaticAsset(pathname);
       if (asset !== undefined) {
         if (!dashboardEnabled) {
           respondError(res, 404, "not found");

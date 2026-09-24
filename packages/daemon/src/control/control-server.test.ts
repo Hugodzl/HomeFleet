@@ -550,6 +550,7 @@ test("GET / serves the dashboard WITHOUT the control header, with security heade
   );
   expect(res.headers["x-frame-options"]).toBe("DENY");
   expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  expect(res.headers["referrer-policy"]).toBe("no-referrer");
   expect(res.headers["cache-control"]).toBe("no-store");
   expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   expect(res.text).toContain("data-homefleet-dashboard");
@@ -557,10 +558,48 @@ test("GET / serves the dashboard WITHOUT the control header, with security heade
 
 test("HEAD / returns headers and no body", async () => {
   const server = await start();
+  const get = await getRaw(server.port, { path: "/" });
   const res = await getRaw(server.port, { method: "HEAD", path: "/" });
   expect(res.status).toBe(200);
   expect(res.headers["content-type"]).toBe("text/html; charset=utf-8");
   expect(res.text).toBe("");
+  expect(res.headers["content-length"]).toBe(
+    String(Buffer.byteLength(get.text, "utf8")),
+  );
+});
+
+test.each([
+  ["/?q=1", 200],
+  ["/index.html", 403],
+  ["//", 403],
+  ["/%2F", 403],
+])("static routes match by EXACT path only: %s -> %d", async (target, expectedStatus) => {
+  const server = await start();
+  const res = await getRaw(server.port, { path: target });
+  expect(res.status).toBe(expectedStatus);
+});
+
+test("an absolute-form request target is not exact-path-matched: 403 without the control header", async () => {
+  const server = await start();
+  const res = await new Promise<{ status: number }>((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port: server.port,
+        method: "GET",
+        path: `http://127.0.0.1:${server.port}/`,
+        agent: false,
+        headers: { host: `127.0.0.1:${server.port}` },
+      },
+      (httpRes: IncomingMessage) => {
+        httpRes.resume();
+        httpRes.on("end", () => resolve({ status: httpRes.statusCode ?? 0 }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+  expect(res.status).toBe(403);
 });
 
 test("static routes still enforce the Host allow-list (DNS rebinding)", async () => {
