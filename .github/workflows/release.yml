@@ -68,6 +68,16 @@ jobs:
           test "$(homefleet --version)" = "homefleet $version"
           test "$(homefleetd --version)" = "homefleetd $version"
           command -v homefleet-mcp-stdio
+      # Only the smoke script — still no pnpm install on this runner.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/smoke-installed.mjs
+          sparse-checkout-cone-mode: false
+          path: src
+      - name: Run the installed product (daemon, CLI, stdio MCP shim)
+        run: |
+          version="$(basename release/homefleet-*.tgz .tgz)"
+          node src/scripts/smoke-installed.mjs "${version#homefleet-}"
       - name: Bins via the PowerShell shims
         if: runner.os == 'Windows'
         shell: pwsh
