@@ -65,6 +65,69 @@ add-a-new-machine a one-step flow on both ends (install on the new box,
 approve from an existing one — the fleet GUI above is the natural surface
 for the approval side).
 
+### Coordination ideas from Grok Bot (2026-09-24)
+
+The six entries below come from a look at SpaceXAI's Grok Bot (Aug 2026 beta),
+whose agents coordinate through shared threads under a "Chief of Staff"
+orchestrator, escalate for approval, and keep memory and learned routines.
+Its internals are undisclosed, so these borrow the *patterns*, not an
+implementation. Deliberately **not** borrowed: cloud VMs, UI-driven computer
+use, and worker-to-worker meshes — the last would erode the hub-and-spoke
+trust model (ADR 0004). Listed most-relevant first; the first two address
+the biggest gap (what an unattended local model does when it's stuck or the
+task is multi-step).
+
+#### Mid-job clarification requests
+
+Let a worker's local model pause and ask instead of guessing or silently
+failing: a new `question` `JobEvent` on the existing SSE stream plus an
+endpoint to answer it (`POST /hfp/v0/jobs/{id}/answer`). The question
+surfaces to the front agent via MCP, which answers or escalates to the user.
+Brainstorm threads: timeout/default-answer semantics, how the job status
+reflects "waiting for input", replay of unanswered questions after a
+reconnect (`seq` / `Last-Event-ID` already give us that), and a per-job
+"never ask" flag for fully unattended runs.
+
+#### Job chaining without front-agent round-trips
+
+Pipe one job's output straight into the next — e.g. recon on node A feeds a
+write task on node B — without the intermediate result passing through the
+front agent's context. Saves cloud tokens, which is the core value
+proposition, and is a natural first slice of the roadmap's "multi-node
+fan-out". Brainstorm threads: where the chain is defined (a `delegate_task`
+pipeline spec vs. a follow-up referencing a prior `jobId`), which node holds
+the hand-off, and failure/cancellation propagation along the chain.
+
+#### Automatic node routing
+
+`delegate_task` with `node: "auto"`: the daemon picks a node from the
+capability catalog (model, executors, current load/queue depth) instead of
+the front agent choosing. Grok's orchestrator "involves only the relevant
+specialists"; this is the same idea over the model catalog (A2). Needs a
+clear, explainable selection rule and a way to report *why* a node was
+chosen or why none qualified.
+
+#### Saved task templates
+
+Named, reusable delegations stored on the daemon (e.g. "run tests +
+summarize failures", "recon: summarize module X") and exposed as MCP prompts
+or tools. The analogue of Grok's routines/skills. Cheap, and makes common
+workflows one call instead of a hand-written prompt each time.
+
+#### Node roles
+
+A node advertises a specialist role (reviewer, test-runner, docs-writer) —
+a system prompt + model + executor bundle — in its capability advertisement,
+so the front agent (or auto routing) can delegate by role. Pairs with A2
+(per-node model control) and C1 (workspace-less tasks).
+
+#### Per-repo worker memory
+
+Workers cache recon summaries per repo, keyed by commit, and seed later jobs
+with them so repeat recon starts warm. Lowest priority: staleness is the
+real risk — the brainstorm is invalidation (commit distance, touched paths)
+and making reuse visible in the job result so it's never silent.
+
 ## Known technical debt (from v0.1)
 
 Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md).
