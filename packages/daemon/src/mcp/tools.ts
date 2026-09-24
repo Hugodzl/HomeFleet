@@ -694,12 +694,16 @@ export function registerHomeFleetTools(
         // Record ONLY on success, so a failed delegation leaves no phantom
         // route and the registry stays bounded to real jobs. repoId rides
         // along for job_result's write-artifact apply (local repo lookup).
-        delegations.record(jobId, {
-          deviceId: node,
-          host: resolved.host,
-          port: resolved.port,
-          repoId,
-        });
+        delegations.record(
+          jobId,
+          {
+            deviceId: node,
+            host: resolved.host,
+            port: resolved.port,
+            repoId,
+          },
+          task.type,
+        );
         return ok(
           `Delegated ${task.type} job ${jobId} to "${resolved.name}".`,
           { jobId, node },
