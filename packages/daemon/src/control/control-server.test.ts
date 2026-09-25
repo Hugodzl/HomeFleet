@@ -781,3 +781,23 @@ test("GET /control/unpair is not a route (404)", async () => {
   });
   expect(res.status).toBe(404);
 });
+
+test("an oversized body on POST /control/unpair is rejected with 413, surface never called", async () => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      unpair: async () => {
+        called = true;
+        return undefined;
+      },
+    }),
+  });
+  const oversized = Buffer.alloc(MAX_CONTROL_REQUEST_BYTES + 1024, 0x20);
+  const res = await send(server.port, {
+    method: "POST",
+    path: "/control/unpair",
+    body: oversized,
+  });
+  expect(res.status).toBe(413);
+  expect(called).toBe(false);
+});

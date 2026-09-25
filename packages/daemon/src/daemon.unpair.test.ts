@@ -71,6 +71,11 @@ test("a trust persist failure still cuts the peer off, then throws status 500", 
   expect((failure as { status?: number }).status).toBe(500);
   expect((failure as Error).message).toMatch(/not saved/);
   expect((failure as Error).message).toMatch(/restart/);
+  expect((failure as Error).message).toContain("EPERM: disk says no");
+  expect((failure as Error).cause).toBeInstanceOf(Error);
+  expect(((failure as Error).cause as Error).message).toBe(
+    "EPERM: disk says no",
+  );
   expect(f.calls).toEqual([
     `trust.remove:${PEER}`,
     `jobs.cancelOwnedBy:${PEER}`,

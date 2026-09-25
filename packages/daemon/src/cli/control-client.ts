@@ -363,12 +363,9 @@ export class ControlClient implements ControlClientLike {
   }
 
   async unpair(deviceId: string): Promise<UnpairSummary> {
-    const json = await controlRequest(
-      this.options,
-      "POST",
-      "/control/unpair",
-      { deviceId },
-    );
+    const json = await controlRequest(this.options, "POST", "/control/unpair", {
+      deviceId,
+    });
     return validateUnpairSummary(json);
   }
 }
