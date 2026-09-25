@@ -413,6 +413,20 @@ function unknownJob(jobId: string): CallToolResult {
   );
 }
 
+/**
+ * The delegation-registry entry still exists (kept as dashboard history),
+ * but its node was unpaired since: fail closed WITHOUT contacting it. The
+ * unpaired node may still trust us (unpair is one-sided), so without this
+ * guard the tools would keep talking to a node the operator revoked.
+ */
+function noLongerPaired(jobId: string, deviceId: string): CallToolResult {
+  return fail(
+    `Job ${jobId} was delegated to node ${deviceId.slice(0, 12)}…, which is ` +
+      "no longer paired with this node, so it cannot be queried or " +
+      "canceled from here. Pair with it again to reach it.",
+  );
+}
+
 /** Summarizes a directory entry for `list_nodes` output (omits absent caps). */
 function toNodeSummary(entry: {
   deviceId: string;
@@ -729,6 +743,9 @@ export function registerHomeFleetTools(
       if (route === undefined) {
         return unknownJob(jobId);
       }
+      if (nodeDirectory.resolve(route.deviceId) === undefined) {
+        return noLongerPaired(jobId, route.deviceId);
+      }
       try {
         const snapshot = await hfpClient.jobSnapshot(targetFor(route), jobId);
         delegations.observeStatus(jobId, snapshot.status);
@@ -761,6 +778,9 @@ export function registerHomeFleetTools(
       const route = delegations.lookup(jobId);
       if (route === undefined) {
         return unknownJob(jobId);
+      }
+      if (nodeDirectory.resolve(route.deviceId) === undefined) {
+        return noLongerPaired(jobId, route.deviceId);
       }
       try {
         const snapshot = await hfpClient.jobSnapshot(targetFor(route), jobId);
@@ -810,6 +830,9 @@ export function registerHomeFleetTools(
       const route = delegations.lookup(jobId);
       if (route === undefined) {
         return unknownJob(jobId);
+      }
+      if (nodeDirectory.resolve(route.deviceId) === undefined) {
+        return noLongerPaired(jobId, route.deviceId);
       }
       try {
         const response = await hfpClient.cancelJob(targetFor(route), jobId);

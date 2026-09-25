@@ -1468,3 +1468,49 @@ test("an inconclusive pre-check still delegates, and the worker rejects", async 
   expect(text).not.toMatch(/\bat .*client\.ts:|Error:.*\n\s+at /); // no raw stack
   expect(workspaceSync.calls).toBe(1); // it got all the way to the worker
 });
+
+test("job_status / job_result / cancel_job refuse a job whose node is no longer paired, without any HFP call", async () => {
+  const agent = await createDaemon("agent");
+  const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
+  await pairAToB(agent, worker);
+  const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
+  let followUpCalls = 0;
+  const countingClient: DelegationClient = {
+    delegate: (target, params) => agent.client.delegate(target, params),
+    jobSnapshot: (target, jobId) => {
+      followUpCalls += 1;
+      return agent.client.jobSnapshot(target, jobId);
+    },
+    cancelJob: (target, jobId) => {
+      followUpCalls += 1;
+      return agent.client.cancelJob(target, jobId);
+    },
+  };
+  const { client } = await connectAgent(agent, endpoints, {
+    hfpClient: countingClient,
+  });
+
+  const delegated = await call(client, "delegate_task", {
+    node: worker.identity.deviceId,
+    task: {
+      type: "command",
+      workspace: WORKSPACE,
+      command: "node",
+      args: ["-e", "setTimeout(()=>{},30000)"],
+    },
+  });
+  const { jobId } = DelegateTaskOutputSchema.parse(delegated.structuredContent);
+
+  // The agent unpairs the worker (the trust store is what the directory reads).
+  await agent.trustStore.remove(worker.identity.deviceId);
+  followUpCalls = 0;
+
+  for (const name of ["job_status", "job_result", "cancel_job"]) {
+    const result = await call(client, name, { jobId });
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toMatch(
+      /no longer paired/,
+    );
+  }
+  expect(followUpCalls).toBe(0);
+}, 20_000);
