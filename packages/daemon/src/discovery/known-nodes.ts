@@ -137,6 +137,20 @@ export class KnownNodesRegistry {
     await this.persist();
   }
 
+  /**
+   * Forgets a node (unpair's clean-up step) and persists. Returns whether it
+   * was present; an unknown id writes nothing. Mirrors `TrustStore.remove`.
+   * Note that live discovery may re-record a node that is still announcing —
+   * harmless, since knowing a node is not trusting it (see the file doc).
+   */
+  async remove(deviceId: string): Promise<boolean> {
+    const removed = this.entries.delete(deviceId);
+    if (removed) {
+      await this.persist();
+    }
+    return removed;
+  }
+
   private evictOldest(): void {
     let oldestKey: string | null = null;
     let oldestAt = Number.POSITIVE_INFINITY;

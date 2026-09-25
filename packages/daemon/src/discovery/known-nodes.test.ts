@@ -203,6 +203,29 @@ test("caps the registry at MAX_KNOWN_NODES, evicting the oldest sighting", async
   expect(reloaded.list()).toHaveLength(MAX_KNOWN_NODES);
 });
 
+test("remove drops the entry and persists the removal", async () => {
+  const dir = await newDataDir();
+  const registry = await KnownNodesRegistry.load(dir);
+  await registry.record(entry("a"));
+  await registry.record(entry("b"));
+
+  expect(await registry.remove(entry("a").deviceId)).toBe(true);
+  expect(registry.list().map((n) => n.deviceId)).toEqual([entry("b").deviceId]);
+
+  const reloaded = await KnownNodesRegistry.load(dir);
+  expect(reloaded.list().map((n) => n.deviceId)).toEqual([entry("b").deviceId]);
+});
+
+test("remove of an unknown deviceId returns false and writes nothing", async () => {
+  const registry = await KnownNodesRegistry.load(await newDataDir());
+  await registry.record(entry("a"));
+  const writesBefore = registry.writeCount;
+
+  expect(await registry.remove(entry("c").deviceId)).toBe(false);
+  expect(registry.writeCount).toBe(writesBefore);
+  expect(registry.list()).toHaveLength(1);
+});
+
 test("a burst of concurrent records coalesces into a bounded number of writes", async () => {
   const registry = await KnownNodesRegistry.load(await newDataDir());
   // Fire many records without awaiting between them (a discovery flood).
