@@ -19,10 +19,16 @@ described from `docs/releases/<tag>.md`.
    body. Follow the shape of the previous notes: a bold one-line lead, the
    real-hardware proof, `## What's new`, `## Known limitations`, `## Install`,
    and a `**Full changelog:**` compare link.
-3. `pnpm lint && pnpm typecheck && pnpm test`, commit, push.
-4. Optional dry run: `gh workflow run release.yml --ref main` — everything
+3. Update every user-facing text that names the current version or what has
+   shipped: the README **Status** banner, the "currently vX.Y.Z" note in
+   README **Install**, and the README **Roadmap** (mark items done with their
+   version). Check the GitHub repo *About* description too (`gh repo view
+   --json description`) and edit it with `gh repo edit --description` if it
+   has gone stale. `git grep -n "v<previous>"` catches leftovers.
+4. `pnpm lint && pnpm typecheck && pnpm test`, commit, push.
+5. Optional dry run: `gh workflow run release.yml --ref main` — everything
    except the Release.
-5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+6. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 ## If the tag was wrong
 

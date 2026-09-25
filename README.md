@@ -6,21 +6,24 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.2 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.3.1 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
-> `homefleet` operator CLI — and **v0.2 adds code-writing delegation**: a
-> worker's local model edits code in a throwaway worktree and the change comes
-> back as a reviewable `homefleet/<id>` branch in your own repo, landed by a
-> non-forced fetch that never touches your branches or working tree. Both
-> capabilities have run on real hardware, laptop → tower against a local
+> `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
+> local model edits code in a throwaway worktree and the change comes back as a
+> reviewable `homefleet/<id>` branch in your own repo, landed by a non-forced
+> fetch that never touches your branches or working tree. v0.3 made it a
+> **packaged install** — one `npm i -g` of a GitHub Release tarball, no clone or
+> build — and gave each node an enforced **per-node model catalog** (HFP 0.3.0).
+> All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
-> ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), and a scoped write task
-> wrote a new test file that landed and passed, end to end in ~169 s
-> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)). v0.2 is
-> a tagged release you install from source, Windows-first; npm packages come
-> later. The [Quickstart](#quickstart) runs today on a single machine; pairing
-> two real machines is the [two-machine demo](#two-machine-demo).
+> ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
+> wrote a new test file that landed and passed in ~169 s
+> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)), and both
+> rig machines installed v0.3 from its public release URL and passed delegation
+> in both directions. Windows-first; not on the npm registry yet. The
+> [Quickstart](#quickstart) runs today on a single machine; pairing two real
+> machines is the [two-machine demo](#two-machine-demo).
 
 Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
 [ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),
@@ -68,7 +71,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the latest release globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.3.1) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
@@ -256,7 +259,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done) → painless install → dashboard (read-only, then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard (read-only [on `main`, unreleased](docs/specs/2026-09-24-read-only-dashboard-design.md); then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
