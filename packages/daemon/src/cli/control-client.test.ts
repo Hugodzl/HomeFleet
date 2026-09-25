@@ -278,3 +278,31 @@ test("host literals containing ':' (e.g. an IPv6 '::1') are bracketed in the req
   await expect(client.nodes()).resolves.toEqual([]);
   expect(requestedUrl).toBe("http://[::1]:56373/control/nodes");
 });
+
+test("unpair() posts the deviceId and round-trips the summary", async () => {
+  let received: string | undefined;
+  const server = await start({
+    surface: fakeSurface({
+      unpair: async (deviceId) => {
+        received = deviceId;
+        return { deviceId, name: "peer-node", canceledJobs: 1 };
+      },
+    }),
+  });
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const summary = await client.unpair(FAKE_PEER_DEVICE_ID);
+  expect(summary).toEqual({
+    deviceId: FAKE_PEER_DEVICE_ID,
+    name: "peer-node",
+    canceledJobs: 1,
+  });
+  expect(received).toBe(FAKE_PEER_DEVICE_ID);
+});
+
+test("unpair() of a device that is not paired throws ControlRequestError 404", async () => {
+  const server = await start();
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const failure = await client.unpair("c".repeat(64)).catch((e) => e);
+  expect(failure).toBeInstanceOf(ControlRequestError);
+  expect((failure as ControlRequestError).status).toBe(404);
+});

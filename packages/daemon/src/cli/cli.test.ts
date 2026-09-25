@@ -81,6 +81,11 @@ function fakeControlClient(
       maxConcurrentJobs: 4,
     }),
     nodes: async () => [],
+    unpair: async (deviceId: string) => ({
+      deviceId,
+      name: "peer-node",
+      canceledJobs: 0,
+    }),
     ...overrides,
   };
 }

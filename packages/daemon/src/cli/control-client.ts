@@ -22,6 +22,7 @@ import {
   CONTROL_HEADER,
   type ControlStatus,
   type PairConnectSummary,
+  type UnpairSummary,
 } from "../control/control-server.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 
@@ -103,6 +104,7 @@ export interface ControlClientLike {
   pairConnect(input: PairConnectInput): Promise<PairConnectSummary>;
   status(): Promise<ControlStatus>;
   nodes(): Promise<NodeDirectoryEntry[]>;
+  unpair(deviceId: string): Promise<UnpairSummary>;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +242,18 @@ function validateNodesResponse(json: unknown): NodeDirectoryEntry[] {
   );
 }
 
+function validateUnpairSummary(json: unknown): UnpairSummary {
+  assertIsObject(json, "unpair");
+  assertString(json.deviceId, "deviceId", "unpair");
+  assertString(json.name, "name", "unpair");
+  assertNumber(json.canceledJobs, "canceledJobs", "unpair");
+  return {
+    deviceId: json.deviceId,
+    name: json.name,
+    canceledJobs: json.canceledJobs,
+  };
+}
+
 /**
  * Issues one request against the control API. Every request carries {@link
  * CONTROL_HEADER} (required by every route, see control-server.ts) — this is
@@ -346,5 +360,15 @@ export class ControlClient implements ControlClientLike {
   async nodes(): Promise<NodeDirectoryEntry[]> {
     const json = await controlRequest(this.options, "GET", "/control/nodes");
     return validateNodesResponse(json);
+  }
+
+  async unpair(deviceId: string): Promise<UnpairSummary> {
+    const json = await controlRequest(
+      this.options,
+      "POST",
+      "/control/unpair",
+      { deviceId },
+    );
+    return validateUnpairSummary(json);
   }
 }
