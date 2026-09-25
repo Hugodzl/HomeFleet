@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.3.1 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.4.0 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
 > `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
@@ -15,13 +15,18 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > fetch that never touches your branches or working tree. v0.3 made it a
 > **packaged install** — one `npm i -g` of a GitHub Release tarball, no clone or
 > build — and gave each node an enforced **per-node model catalog** (HFP 0.3.0).
+> v0.4 added a **read-only web dashboard** — `homefleet dashboard` opens this
+> node, paired nodes, and jobs in both directions in a browser, served on the
+> existing loopback control port, polling every 3 s with no mutating request.
 > All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
 > wrote a new test file that landed and passed in ~169 s
-> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)), and both
+> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)), both
 > rig machines installed v0.3 from its public release URL and passed delegation
-> in both directions. Windows-first; not on the npm registry yet. The
+> in both directions, and the dashboard showed a live delegated job reach
+> `succeeded` against the tower ([dashboard devlog](devlog/2026-09-24-read-only-dashboard.md)).
+> Windows-first; not on the npm registry yet. The
 > [Quickstart](#quickstart) runs today on a single machine; pairing two real
 > machines is the [two-machine demo](#two-machine-demo).
 
@@ -71,7 +76,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.3.1) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.4.0) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
@@ -259,7 +264,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard (read-only [on `main`, unreleased](docs/specs/2026-09-24-read-only-dashboard-design.md); then fleet management) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
