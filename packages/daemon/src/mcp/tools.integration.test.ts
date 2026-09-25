@@ -601,7 +601,7 @@ test("cancel_job cancels a running job", async () => {
   const worker = await createDaemon("worker", { executors: [nodeAllowlist()] });
   await pairAToB(agent, worker);
   const endpoints = new Map([[worker.identity.deviceId, endpointOf(worker)]]);
-  const { client } = await connectAgent(agent, endpoints);
+  const { client, delegations } = await connectAgent(agent, endpoints);
 
   const delegated = await call(client, "delegate_task", {
     node: worker.identity.deviceId,
@@ -625,6 +625,10 @@ test("cancel_job cancels a running job", async () => {
   const canceled = await call(client, "cancel_job", { jobId });
   expect(canceled.isError).toBeFalsy();
   expect(JobStatusOutputSchema.parse(canceled.structuredContent).status).toBe(
+    "canceled",
+  );
+  // cancel_job observed the returned status; the dashboard reads it from here.
+  expect(delegations.list().find((d) => d.jobId === jobId)?.lastStatus).toBe(
     "canceled",
   );
 

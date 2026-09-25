@@ -813,6 +813,7 @@ export function registerHomeFleetTools(
       }
       try {
         const response = await hfpClient.cancelJob(targetFor(route), jobId);
+        delegations.observeStatus(jobId, response.status);
         return ok(
           `Cancellation requested for job ${jobId}; status is now ${response.status}.`,
           { jobId, status: response.status },

@@ -32,7 +32,7 @@
       </section>
       <section>
         <h2>Delegated jobs</h2>
-        <p class="muted">Jobs this node sent out. Status is the last one the MCP tools saw; the dashboard never asks the worker itself.</p>
+        <p class="muted">Jobs this node sent out. Status is the last one the MCP tools saw; the dashboard never asks the worker itself. Only delegations made through the daemon's HTTP MCP endpoint are listed; jobs delegated via the homefleet-mcp-stdio shim use their own registry and do not appear here.</p>
         <div id="delegated-jobs"></div>
       </section>
     </main>

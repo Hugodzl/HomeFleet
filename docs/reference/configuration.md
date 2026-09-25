@@ -194,7 +194,9 @@ non-loopback host outright, because this surface carries no per-request auth.
 The loopback admin API the `homefleet` CLI uses for `pair`/`nodes`/`status`,
 and the read-only dashboard
 (see [ADR-0006](../adr/0006-daemon-assembly-and-control-channel.md)). Same
-loopback enforcement as `mcp`.
+loopback enforcement as `mcp`. The dashboard's Delegated jobs table only shows
+delegations made through the daemon's HTTP MCP endpoint; jobs delegated via
+the `homefleet-mcp-stdio` shim use their own registry and never appear there.
 
 | Key         | Type                                  | Default        | Meaning |
 | ----------- | -------------------------------------- | --------------- | ------- |
