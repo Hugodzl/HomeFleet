@@ -1,7 +1,7 @@
 # Unpair a Node — Design
 
 - **Date:** 2026-09-25
-- **Status:** proposed (awaiting review).
+- **Status:** implemented.
 - **Backlog:** [A1 → "Unpair a node"](../backlog.md#unpair-a-node). This is
   A1's first mutation, and it ships CLI-first.
 - **Trust model:** [ADR-0004](../adr/0004-syncthing-style-trust-model.md).

@@ -29,25 +29,12 @@ mutations.
 
 ### Unpair a node
 
-There is no way to revoke a pairing today: no CLI command, no control route.
-Dropping a stale peer means stopping `homefleetd`, hand-editing
-`trusted-devices.json` in the data dir, and restarting. That was needed on the
-rig on 2026-09-25 for a leftover `laptop-delegator` entry. Goal: `homefleet
-unpair <name|deviceId>` backed by a control route, so the peer disappears from
-`homefleet nodes` and the dashboard without a restart. Brainstorm threads:
-- **What revocation cuts off.** Remove the entry from the trust store and from
-  `known-nodes.json`. Refuse new HFP connections from that peer, and drop any
-  that are open. Decide what happens to in-flight jobs in both directions,
-  plus the delegation registry's routes to it.
-- **One-sided or mutual.** Does the other side get told, or does it just see
-  the peer as unreachable/untrusted from then on? Either answer has to fit
-  the Syncthing-style trust model (ADR 0004).
-- **How it's invoked.** Pick name or deviceId, and what to do when a name is
-  ambiguous. Ask for confirmation, or add a `--yes` flag.
-- **Where it fits in A1.** It's a natural first mutation. The CLI can ship it
-  before the dashboard grows mutating controls, which would need their own
-  CSRF story. Today every static route is GET-only and the JSON routes are
-  gated by a header.
+**Shipped (2026-09-25)** as `homefleet unpair <name|deviceId> [--yes]` backed
+by `POST /control/unpair` — spec
+`specs/2026-09-25-unpair-node-design.md`. One-sided, CLI-first; no dashboard
+control yet (that needs the A1 mutation CSRF story). Follow-up candidate:
+surface "peer no longer trusts us" as its own directory state instead of
+`reachable: false`.
 
 ### Control over local models per node (A2)
 

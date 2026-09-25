@@ -21,3 +21,23 @@ Certificate tooling: **@peculiar/x509** (WebCrypto-based, actively maintained). 
 - Pairing UX is one short code per machine pair — the Syncthing pattern users already understand.
 - Worker-side authorization still applies on top (repo allowlist, command allowlist); transport identity is necessary, not sufficient.
 - The MCP front is separate: localhost-only, never exposed on the LAN.
+
+## Addendum (2026-09-25): unpairing
+
+`homefleet unpair` / `POST /control/unpair` revokes a pairing on the running
+daemon ([spec](../specs/2026-09-25-unpair-node-design.md)):
+
+- **One-sided, no protocol message.** Only this node's trust list changes;
+  the peer is not told. It sees 401s from us and lists us as unreachable. To
+  end trust both ways, unpair on both nodes. Re-pairing is the ordinary
+  pairing flow (entries are keyed by device ID, so a leftover entry on the
+  other side is simply replaced).
+- **Order:** trust store first (authoritative), then cancel the peer's
+  queued/running jobs here, then forget its known-nodes entry (a hint, not
+  trust).
+- **"Immediate" means per request.** The per-request fingerprint re-check
+  refuses every request that starts after the removal, even on an
+  already-open connection. A request already past the check (an upload,
+  artifact download, or job submit in flight) completes.
+- **Delegating side:** the MCP job tools stop contacting a node that is no
+  longer paired, even though its delegation records are kept as history.

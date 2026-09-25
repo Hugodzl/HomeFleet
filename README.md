@@ -207,6 +207,7 @@ rates, and the Windows MAX_PATH lesson it surfaced are in the
    homefleet nodes      # the peer, with live capabilities
    homefleet status     # this node's own live status
    homefleet dashboard  # opens the read-only web dashboard (this node, paired nodes, recent jobs) served by the local daemon on 127.0.0.1
+   homefleet unpair <name|deviceId> --yes   # revoke a pairing on the running daemon (one-sided; run it on the peer too)
    ```
 4. **Point a Claude Code session's MCP at machine A's local daemon** (see the
    Quickstart's `claude mcp add` command — always the *local* daemon; MCP
@@ -264,7 +265,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → unpair a node ([A1's first mutation](docs/specs/2026-09-25-unpair-node-design.md) — implemented, unreleased) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
