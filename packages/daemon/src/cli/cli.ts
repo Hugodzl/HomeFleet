@@ -30,6 +30,7 @@ import {
   PUBLIC_PROFILE_WARNING,
   publicProfileCheckCommand,
 } from "./setup-commands.js";
+import { resolveUnpairTarget } from "./unpair-target.js";
 
 /** The identity fields `setup` needs; `loadOrCreateIdentity`'s result satisfies this. */
 export interface CliIdentity {
@@ -97,6 +98,13 @@ Usage:
 
   homefleet nodes
       List this node's paired peers (from the running daemon).
+
+  homefleet unpair <name|deviceId> [--yes]
+      Revoke THIS node's trust in a paired peer, on the running daemon: the
+      peer's requests are refused from now on and its jobs here are
+      canceled. <deviceId> may be a unique prefix (8+ hex chars). Without
+      --yes, prints what it would unpair and changes nothing. One-sided:
+      run it on the peer too to end trust both ways.
 
   homefleet status
       Show this node's live status (from the running daemon).
@@ -378,6 +386,77 @@ async function runNodes(deps: CliDeps): Promise<number> {
   });
 }
 
+/**
+ * `homefleet unpair <name|deviceId> [--yes]` (spec 2026-09-25). Resolves the
+ * argument against the LIVE paired list (`/control/nodes`) with
+ * {@link resolveUnpairTarget}, then — only with `--yes` — revokes the FULL
+ * device ID through `/control/unpair`. Without `--yes` it is a preview that
+ * exits 1 having changed nothing: the CLI never prompts (no stdin
+ * dependency; agents drive it as often as people). Full ids are printed, not
+ * short ones, so they can be pinned later with `pair connect --expect`.
+ */
+async function runUnpair(args: string[], deps: CliDeps): Promise<number> {
+  const confirmed = args.includes("--yes");
+  const rest = args.filter((arg) => arg !== "--yes");
+  const unknownOptions = rest.filter((arg) => arg.startsWith("--"));
+  if (unknownOptions.length > 0) {
+    deps.stderr(`unpair: unknown option(s): ${unknownOptions.join(" ")}`);
+    return 2;
+  }
+  if (rest.length !== 1) {
+    deps.stderr("usage: homefleet unpair <name|deviceId> [--yes]");
+    return 2;
+  }
+  const query = rest[0] as string;
+  return withControlClient(deps, async (client) => {
+    const resolution = resolveUnpairTarget(query, await client.nodes());
+    if (resolution.kind === "none") {
+      deps.stderr(
+        `No paired node matches "${query}". Run "homefleet nodes" to list them.`,
+      );
+      return 1;
+    }
+    if (resolution.kind === "ambiguous") {
+      deps.stderr(
+        `"${query}" matches ${resolution.candidates.length} paired nodes:`,
+      );
+      for (const candidate of resolution.candidates) {
+        deps.stderr(`  ${candidate.name}  ${candidate.deviceId}`);
+      }
+      deps.stderr("Re-run with the full device ID.");
+      return 1;
+    }
+    const { node } = resolution;
+    if (!confirmed) {
+      deps.stdout(`Would unpair ${node.name} (${node.deviceId}).`);
+      deps.stderr("Nothing changed. Re-run with --yes to confirm.");
+      return 1;
+    }
+    let summary: Awaited<ReturnType<ControlClientLike["unpair"]>>;
+    try {
+      summary = await client.unpair(node.deviceId);
+    } catch (error) {
+      // 404: someone else unpaired it between our listing and this call.
+      if (error instanceof ControlRequestError && error.status === 404) {
+        deps.stderr(`${node.name} is no longer paired.`);
+        return 1;
+      }
+      throw error;
+    }
+    deps.stdout(`Unpaired ${summary.name} (${summary.deviceId}).`);
+    if (summary.canceledJobs > 0) {
+      deps.stdout(
+        `Canceled ${summary.canceledJobs} job(s) it had queued or running here.`,
+      );
+    }
+    deps.stdout(
+      `${summary.name} may still list this node as paired; run ` +
+        '"homefleet unpair" there too to end trust both ways.',
+    );
+    return 0;
+  });
+}
+
 async function runStatus(deps: CliDeps): Promise<number> {
   return withControlClient(deps, async (client) => {
     const status = await client.status();
@@ -468,6 +547,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         return 2;
       }
       return runNodes(deps);
+    case "unpair":
+      return runUnpair(rest, deps);
     case "status":
       if (rest.length > 0) {
         deps.stderr(`status: unexpected extra argument(s): ${rest.join(" ")}`);

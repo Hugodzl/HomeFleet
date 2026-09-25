@@ -731,3 +731,159 @@ describe("dashboard", () => {
     expect(await runCli(["dashboard", "--nope"], harness.deps)).toBe(2);
   });
 });
+
+describe("unpair", () => {
+  const PEER = {
+    deviceId: FAKE_PEER_DEVICE_ID,
+    name: "peer-node",
+    reachable: true,
+  };
+  const STALE = {
+    deviceId: "c".repeat(64),
+    name: "peer-node",
+    reachable: false,
+  };
+
+  function clientWith(
+    nodes: Array<{ deviceId: string; name: string; reachable: boolean }>,
+    overrides: Partial<ControlClientLike> = {},
+  ): { client: ControlClientLike; unpaired: string[] } {
+    const unpaired: string[] = [];
+    const client = fakeControlClient({
+      nodes: async () => nodes,
+      unpair: async (deviceId) => {
+        unpaired.push(deviceId);
+        return { deviceId, name: "peer-node", canceledJobs: 0 };
+      },
+      ...overrides,
+    });
+    return { client, unpaired };
+  }
+
+  test("no argument is a usage error (exit 2), no control client built", async () => {
+    const h = makeHarness();
+    expect(await runCli(["unpair"], h.deps)).toBe(2);
+    expect(h.stderrLines.join("\n")).toMatch(/usage: homefleet unpair/);
+    expect(h.makeControlClientCalls).toEqual([]);
+  });
+
+  test("two positional arguments is a usage error (exit 2)", async () => {
+    const h = makeHarness();
+    expect(await runCli(["unpair", "a", "b", "--yes"], h.deps)).toBe(2);
+    expect(h.makeControlClientCalls).toEqual([]);
+  });
+
+  test("an unknown option is a usage error (exit 2)", async () => {
+    const h = makeHarness();
+    expect(await runCli(["unpair", "peer-node", "--force"], h.deps)).toBe(2);
+    expect(h.stderrLines.join("\n")).toMatch(/unknown option.*--force/);
+  });
+
+  test("without --yes it previews, changes nothing, and exits 1", async () => {
+    const { client, unpaired } = clientWith([PEER]);
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node"], h.deps)).toBe(1);
+    expect(h.stdoutLines).toEqual([
+      `Would unpair peer-node (${FAKE_PEER_DEVICE_ID}).`,
+    ]);
+    expect(h.stderrLines).toEqual([
+      "Nothing changed. Re-run with --yes to confirm.",
+    ]);
+    expect(unpaired).toEqual([]);
+  });
+
+  test("with --yes it unpairs the resolved full deviceId and explains one-sidedness", async () => {
+    const { client, unpaired } = clientWith([PEER]);
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "--yes", "bbbbbbbb"], h.deps)).toBe(0);
+    expect(unpaired).toEqual([FAKE_PEER_DEVICE_ID]);
+    expect(h.stdoutLines).toEqual([
+      `Unpaired peer-node (${FAKE_PEER_DEVICE_ID}).`,
+      'peer-node may still list this node as paired; run "homefleet unpair" there too to end trust both ways.',
+    ]);
+  });
+
+  test("reports canceled jobs when there were any", async () => {
+    const { client } = clientWith([PEER], {
+      unpair: async (deviceId) => ({
+        deviceId,
+        name: "peer-node",
+        canceledJobs: 2,
+      }),
+    });
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node", "--yes"], h.deps)).toBe(0);
+    expect(h.stdoutLines).toContain(
+      "Canceled 2 job(s) it had queued or running here.",
+    );
+  });
+
+  test("no match exits 1 with a pointer to `homefleet nodes`", async () => {
+    const { client, unpaired } = clientWith([PEER]);
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "desktop", "--yes"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([
+      'No paired node matches "desktop". Run "homefleet nodes" to list them.',
+    ]);
+    expect(unpaired).toEqual([]);
+  });
+
+  test("an ambiguous name exits 1 listing every candidate with its full id", async () => {
+    const { client, unpaired } = clientWith([PEER, STALE]);
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node", "--yes"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([
+      '"peer-node" matches 2 paired nodes:',
+      `  peer-node  ${FAKE_PEER_DEVICE_ID}`,
+      `  peer-node  ${"c".repeat(64)}`,
+      "Re-run with the full device ID.",
+    ]);
+    expect(unpaired).toEqual([]);
+  });
+
+  test("a 404 from the daemon (raced another unpair) exits 1 with a clear line", async () => {
+    const { client } = clientWith([PEER], {
+      unpair: async () => {
+        throw new ControlRequestError(404, "no paired node with deviceId …");
+      },
+    });
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node", "--yes"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual(["peer-node is no longer paired."]);
+  });
+
+  test("a 500 from the daemon is reported cleanly (no stack) and exits 1", async () => {
+    const { client } = clientWith([PEER], {
+      unpair: async () => {
+        throw new ControlRequestError(500, "removal was not saved");
+      },
+    });
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node", "--yes"], h.deps)).toBe(1);
+    expect(h.stderrLines.join("\n")).toMatch(/removal was not saved/);
+    expect(h.stderrLines.join("\n")).not.toMatch(/\bat .*\.ts:\d+/);
+  });
+
+  test("DaemonUnreachableError yields the friendly message and exit 1", async () => {
+    const { client } = clientWith([], {
+      nodes: async () => {
+        throw new DaemonUnreachableError(
+          "127.0.0.1",
+          56373,
+          new Error("ECONNREFUSED"),
+        );
+      },
+    });
+    const h = makeHarness({ controlClient: client });
+    expect(await runCli(["unpair", "peer-node", "--yes"], h.deps)).toBe(1);
+    expect(h.stderrLines.join("\n")).toMatch(/Is homefleetd running\?/);
+  });
+
+  test("usage text lists the command", async () => {
+    const h = makeHarness();
+    await runCli(["--help"], h.deps);
+    expect(h.stdoutLines.join("\n")).toMatch(
+      /homefleet unpair <name\|deviceId> \[--yes\]/,
+    );
+  });
+});
