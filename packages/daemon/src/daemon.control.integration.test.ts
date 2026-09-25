@@ -294,6 +294,11 @@ test("unpair through the real control route: trust revoked live, the peer's job 
     arguments: { jobId },
   });
   expect(followUp.isError).toBe(true);
+  // The worker's 401 is surfaced as an UNAUTHORIZED HFP failure, not a
+  // generic error (see describeHfpFailure in src/mcp/tools.ts).
+  expect((followUp.content as Array<{ text: string }>)[0]?.text).toMatch(
+    /UNAUTHORIZED/,
+  );
 
   // One-sided: the delegator still lists the worker, now unreachable (its
   // hello gets 401).

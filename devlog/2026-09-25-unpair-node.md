@@ -61,6 +61,10 @@ Spec: [unpair a node design](../docs/specs/2026-09-25-unpair-node-design.md).
   itself, discovery will write its `known-nodes.json` entry again. Harmless:
   known-nodes is a hint, not trust, and `NodeDirectory` only ever lists
   paired devices.
+- **A stale delegation to an unpaired node stays unreachable, even for an
+  applied write.** After unpairing a node, `job_result` refuses even an
+  already-applied write job delegated to it. The applied `homefleet/<id>`
+  branch stays in the local repo; only the tool lookup is refused.
 
 ## Rig check (2026-09-25)
 

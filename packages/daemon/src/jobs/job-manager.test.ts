@@ -323,16 +323,24 @@ test("cancelOwnedBy skips terminal jobs and returns 0 for an owner with none act
 });
 
 test("cancelOwnedBy returns promptly even when an executor ignores its abort", async () => {
+  // cancelUnwindTimeoutMs is intentionally large here: it proves cancelOwnedBy
+  // returns synchronously without ever waiting on the executor's unwind, not
+  // merely that it returns before some short timeout fires. The afterEach
+  // teardown's manager.stop() is bounded by the same option, so it is kept
+  // low enough to stay well under vitest's default 5s hook timeout.
   const manager = makeManager({
     executors: [new StuckExecutor()],
-    cancelUnwindTimeoutMs: 50,
+    cancelUnwindTimeoutMs: 2_000,
   });
   const stuck = manager.submit(commandParams(), OWNER).jobId;
   await waitUntil(() => manager.snapshot(stuck, OWNER).status === "running");
 
   const startedAt = Date.now();
   expect(manager.cancelOwnedBy(OWNER)).toBe(1);
-  expect(Date.now() - startedAt).toBeLessThan(25);
+  // The job is still "running": cancelOwnedBy did not await the stuck
+  // executor's unwind before returning.
+  expect(manager.snapshot(stuck, OWNER).status).toBe("running");
+  expect(Date.now() - startedAt).toBeLessThan(1000);
 });
 
 test("subscriberCount is owner-checked and does not leak another peer's job", async () => {

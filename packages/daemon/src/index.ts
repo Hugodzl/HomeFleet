@@ -85,10 +85,13 @@ export {
   type PairConnectSummary,
   type RunningControlServer,
   startControlServer,
+  type UnpairSummary,
 } from "./control/control-server.js";
 export {
   type PairConnectRequest,
   PairConnectRequestSchema,
+  type UnpairRequest,
+  UnpairRequestSchema,
 } from "./control/messages.js";
 export { DAEMON_VERSION, Daemon, type DaemonOptions } from "./daemon.js";
 export {
