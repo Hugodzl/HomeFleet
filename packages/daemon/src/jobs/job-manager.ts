@@ -397,6 +397,33 @@ export class JobManager {
   }
 
   /**
+   * Requests cancellation of every queued or running job `owner` submitted —
+   * unpair's "cut the peer's work off" step. Returns how many jobs it asked
+   * to cancel.
+   *
+   * Deliberately does NOT await the unwinds: a queued job finishes
+   * synchronously inside `cancel()` (no await on that path), and a running
+   * job's abort fires synchronously; the unwind itself is already bounded by
+   * `cancelUnwindTimeoutMs`. Unpair must answer promptly even when an
+   * executor is stuck. Each `cancel()` promise gets a no-op catch: iterating
+   * the records we own cannot hit UNKNOWN_JOB, but the promise must never
+   * go unhandled.
+   *
+   * Like {@link list}, this is for the loopback control API only.
+   */
+  cancelOwnedBy(owner: string): number {
+    let requested = 0;
+    for (const record of [...this.records.values()]) {
+      if (record.owner !== owner || isTerminalJobStatus(record.status)) {
+        continue;
+      }
+      requested += 1;
+      void this.cancel(record.jobId, owner).catch(() => {});
+    }
+    return requested;
+  }
+
+  /**
    * Subscribes to a job's event stream, owner-checked. Buffered events with
    * `seq >= fromSeq` are replayed to `subscriber.onEvent` SYNCHRONOUSLY
    * (before this returns), then — for a still-live job — the subscriber is

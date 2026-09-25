@@ -293,6 +293,48 @@ test("cancel and stop are bounded when an executor ignores its AbortSignal", asy
   expect(Date.now() - startStop).toBeLessThan(2000);
 });
 
+test("cancelOwnedBy cancels the owner's queued and running jobs and leaves other owners alone", async () => {
+  const manager = makeManager({
+    executors: [new AbortAwareExecutor()],
+    maxConcurrentJobs: 1,
+  });
+  const running = manager.submit(commandParams(), OWNER).jobId;
+  await waitUntil(() => manager.snapshot(running, OWNER).status === "running");
+  const queued = manager.submit(commandParams(), OWNER).jobId;
+  const other = manager.submit(commandParams(), OTHER_OWNER).jobId;
+
+  expect(manager.cancelOwnedBy(OWNER)).toBe(2);
+
+  // Queued jobs finish synchronously; running ones as soon as they unwind.
+  expect(manager.snapshot(queued, OWNER).status).toBe("canceled");
+  await waitUntil(() => manager.snapshot(running, OWNER).status === "canceled");
+  // The other owner's job takes the freed slot and is untouched by cancel.
+  expect(manager.snapshot(other, OTHER_OWNER).status).not.toBe("canceled");
+});
+
+test("cancelOwnedBy skips terminal jobs and returns 0 for an owner with none active", async () => {
+  const manager = makeManager({ executors: [new SucceedingExecutor()] });
+  const done = manager.submit(commandParams(), OWNER).jobId;
+  await waitUntil(() => manager.snapshot(done, OWNER).status === "succeeded");
+
+  expect(manager.cancelOwnedBy(OWNER)).toBe(0);
+  expect(manager.cancelOwnedBy("never-submitted")).toBe(0);
+  expect(manager.snapshot(done, OWNER).status).toBe("succeeded");
+});
+
+test("cancelOwnedBy returns promptly even when an executor ignores its abort", async () => {
+  const manager = makeManager({
+    executors: [new StuckExecutor()],
+    cancelUnwindTimeoutMs: 50,
+  });
+  const stuck = manager.submit(commandParams(), OWNER).jobId;
+  await waitUntil(() => manager.snapshot(stuck, OWNER).status === "running");
+
+  const startedAt = Date.now();
+  expect(manager.cancelOwnedBy(OWNER)).toBe(1);
+  expect(Date.now() - startedAt).toBeLessThan(25);
+});
+
 test("subscriberCount is owner-checked and does not leak another peer's job", async () => {
   const manager = makeManager({ executors: [new AbortAwareExecutor()] });
   const { jobId } = manager.submit(commandParams(), OWNER);
