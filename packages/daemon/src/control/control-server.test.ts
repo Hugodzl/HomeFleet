@@ -21,6 +21,7 @@ import {
   type PairConnectSummary,
   type RunningControlServer,
   startControlServer,
+  type UnpairSummary,
 } from "./control-server.js";
 
 const running: RunningControlServer[] = [];
@@ -61,6 +62,10 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
     status: () => status,
     listNodes: async () => [],
     listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
+    unpair: async (deviceId: string): Promise<UnpairSummary | undefined> =>
+      deviceId === FAKE_PEER_DEVICE_ID
+        ? { deviceId, name: "peer-node", canceledJobs: 0 }
+        : undefined,
     ...overrides,
   };
 }
@@ -685,4 +690,94 @@ test("GET /control/jobs returns the surface's listing (header required)", async 
     headers: { [CONTROL_HEADER]: undefined },
   });
   expect(denied.status).toBe(403);
+});
+
+test("POST /control/unpair returns the summary for a paired device", async () => {
+  let received: string | undefined;
+  const server = await start({
+    surface: fakeSurface({
+      unpair: async (deviceId) => {
+        received = deviceId;
+        return { deviceId, name: "peer-node", canceledJobs: 3 };
+      },
+    }),
+  });
+  const res = await postJson(server.port, "/control/unpair", {
+    deviceId: FAKE_PEER_DEVICE_ID,
+  });
+  expect(res.status).toBe(200);
+  expect(res.json).toEqual({
+    deviceId: FAKE_PEER_DEVICE_ID,
+    name: "peer-node",
+    canceledJobs: 3,
+  });
+  expect(received).toBe(FAKE_PEER_DEVICE_ID);
+});
+
+test("POST /control/unpair for a device that is not paired is 404", async () => {
+  const server = await start();
+  const res = await postJson(server.port, "/control/unpair", {
+    deviceId: "c".repeat(64),
+  });
+  expect(res.status).toBe(404);
+  expect(res.json).toEqual({
+    error: `no paired node with deviceId ${"c".repeat(64)}`,
+  });
+});
+
+test.each([
+  ["a short deviceId", { deviceId: "abcd1234" }],
+  ["an uppercase deviceId", { deviceId: "B".repeat(64) }],
+  ["a missing deviceId", {}],
+])("POST /control/unpair rejects %s with 400", async (_label, body) => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      unpair: async () => {
+        called = true;
+        return undefined;
+      },
+    }),
+  });
+  const res = await postJson(server.port, "/control/unpair", body);
+  expect(res.status).toBe(400);
+  expect((res.json as { error: string }).error).toMatch(
+    /^invalid unpair request: deviceId/,
+  );
+  expect(called).toBe(false);
+});
+
+test("POST /control/unpair passes a thrown .status through, never a stack", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      unpair: async () => {
+        throw Object.assign(new Error("removal not saved"), { status: 500 });
+      },
+    }),
+  });
+  const res = await postJson(server.port, "/control/unpair", {
+    deviceId: FAKE_PEER_DEVICE_ID,
+  });
+  expect(res.status).toBe(500);
+  expect(res.json).toEqual({ error: "removal not saved" });
+});
+
+test("POST /control/unpair requires the control header", async () => {
+  const server = await start();
+  const res = await postJson(
+    server.port,
+    "/control/unpair",
+    { deviceId: FAKE_PEER_DEVICE_ID },
+    { [CONTROL_HEADER]: "" },
+  );
+  expect(res.status).toBe(403);
+});
+
+test("GET /control/unpair is not a route (404)", async () => {
+  const server = await start();
+  const res = await send(server.port, {
+    method: "GET",
+    path: "/control/unpair",
+  });
+  expect(res.status).toBe(404);
 });

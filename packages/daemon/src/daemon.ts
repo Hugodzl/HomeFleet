@@ -22,6 +22,7 @@ import {
   type ControlSurface,
   type PairConnectSummary,
   startControlServer,
+  type UnpairSummary,
 } from "./control/control-server.js";
 import { DiscoveryAggregator } from "./discovery/aggregator.js";
 import { KnownNodesRegistry } from "./discovery/known-nodes.js";
@@ -228,6 +229,75 @@ export async function pairWithPeer(options: {
     deviceId: serverDeviceId,
     name: response.nodeInfo.name,
   };
+}
+
+/**
+ * The control API's unpair (`POST /control/unpair`): revokes a pairing on
+ * the LIVE daemon. Order is load-bearing (spec 2026-09-25, ADR-0004
+ * addendum):
+ *
+ * 1. `trustStore.remove` — authoritative. NodeServer re-checks the trust
+ *    store on EVERY request, so from here on every HFP request from the
+ *    device gets 401, including over already-open keep-alive sockets.
+ *    Requests already past that check (an in-flight upload/download/submit)
+ *    complete — the spec's accepted bound.
+ * 2. `jobManager.cancelOwnedBy` — its queued/running jobs here can never be
+ *    fetched again, so they only burn slots; cancelling also ends their SSE
+ *    streams. Fire-and-forget (see cancelOwnedBy).
+ * 3. `knownNodes.remove` — a discovery hint, not trust: best-effort and
+ *    swallowed, exactly like the seeding in {@link pairWithPeer}.
+ *
+ * Not paired -> `undefined` (the route's 404), touching nothing. The name is
+ * read BEFORE removal so the summary can still report it.
+ *
+ * A trust-store PERSIST failure leaves the device already deleted in memory
+ * (TrustStore.remove deletes, then persists): revoked for this run, but back
+ * after a restart. Steps 2–3 still run — fail closed, the device is cut off
+ * either way — and then a `.status = 500` error says so, so the operator
+ * knows to fix the data dir and unpair again after restarting.
+ *
+ * Narrowed via `Pick` so tests pass minimal fakes (daemon.unpair.test.ts).
+ */
+export async function unpairPeer(options: {
+  trustStore: Pick<TrustStore, "list" | "remove">;
+  jobManager: Pick<JobManager, "cancelOwnedBy">;
+  knownNodes: Pick<KnownNodesRegistry, "remove">;
+  deviceId: string;
+}): Promise<UnpairSummary | undefined> {
+  const { trustStore, jobManager, knownNodes, deviceId } = options;
+  const device = trustStore.list().find((d) => d.deviceId === deviceId);
+  if (device === undefined) {
+    return undefined;
+  }
+  let persistFailure: unknown;
+  try {
+    await trustStore.remove(deviceId);
+  } catch (cause) {
+    persistFailure = cause;
+  }
+  const canceledJobs = jobManager.cancelOwnedBy(deviceId);
+  try {
+    await knownNodes.remove(deviceId);
+  } catch {
+    // Swallowed deliberately — see step 3 above.
+  }
+  if (persistFailure !== undefined) {
+    const message =
+      persistFailure instanceof Error
+        ? persistFailure.message
+        : "unknown error";
+    throw Object.assign(
+      new Error(
+        `${device.name} is revoked on the running daemon, but the removal was ` +
+          "not saved to trusted-devices.json, so it will be trusted again " +
+          "after a restart. Fix the data directory, restart homefleetd, and " +
+          `run unpair again: ${message}`,
+        { cause: persistFailure },
+      ),
+      { status: 500 },
+    );
+  }
+  return { deviceId, name: device.name, canceledJobs };
 }
 
 /**
@@ -576,6 +646,8 @@ export class Daemon {
           }),
         };
       },
+      unpair: (deviceId) =>
+        unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
     };
     const controlServer = await startControlServer({
       surface: controlSurface,

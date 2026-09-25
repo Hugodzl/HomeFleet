@@ -1,6 +1,6 @@
 /**
  * The daemon's CONTROL API (M9 Unit 7): a loopback HTTP server the
- * `homefleet` CLI uses to drive pairing, list nodes, read status, list
+ * `homefleet` CLI uses to drive pairing and unpairing, list nodes, read status, list
  * recent jobs, and serve the read-only dashboard against the RUNNING daemon.
  *
  * Why this exists: pairing is server-side state — the RESPONDER's live
@@ -14,7 +14,7 @@
  *
  * Security model (LOAD-BEARING — this is a mutating, network-unauthenticated
  * surface: `pair/begin` opens a pairing window and `pair/connect` can add a
- * trusted device to the live trust store):
+ * trusted device to the live trust store, and `unpair` removes one):
  *
  * - Loopback-only bind, exactly like the MCP HTTP transport: a non-loopback
  *   `host` is refused at start time (never silently coerced to something
@@ -80,6 +80,12 @@
  * -instance random token (e.g. a 0600 file only the same user can read) in
  * place of the static header value — not a rewrite of the network/browser
  * defenses above, which hold independently.
+ *
+ * `unpair` (the inverse trust-store write) is covered by the same sign-off:
+ * a same-OS-user co-resident process can call it just as it can call
+ * `pair/connect`. The worst it can do is REVOKE trust (a local denial of
+ * service), which is strictly less than `pair/connect`'s ADD. The same
+ * per-boot-token upgrade path applies to both.
  */
 import {
   createServer,
@@ -105,6 +111,7 @@ import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
   type PairConnectRequest,
   PairConnectRequestSchema,
+  UnpairRequestSchema,
 } from "./messages.js";
 
 /**
@@ -182,6 +189,15 @@ export interface PairConnectSummary {
   name?: string;
 }
 
+/** The outcome of `POST /control/unpair`. */
+export interface UnpairSummary {
+  deviceId: string;
+  /** The name the device was paired under (read before removal). */
+  name: string;
+  /** How many of its queued/running jobs on THIS node cancellation was requested for. */
+  canceledJobs: number;
+}
+
 /**
  * The daemon-side operations the control API fronts. Injected (built by the
  * `Daemon` assembly, closing over its live collaborators) so this module has
@@ -214,6 +230,16 @@ export interface ControlSurface {
    * is NOT owner-scoped (see JobManager.list).
    */
   listJobs(): ControlJobs;
+  /**
+   * Revokes a pairing on the LIVE daemon: removes `deviceId` from the trust
+   * store (authoritative — every later HFP request from it gets 401), cancels
+   * its queued/running jobs here, and forgets its known-nodes entry.
+   * Resolves `undefined` when the device is not paired (the route's 404).
+   * A thrown error carrying `.status` (e.g. 500 when the trust-store write
+   * failed) passes through; see `unpairPeer` in ../daemon.js. One-sided: the
+   * peer is not told (ADR-0004 addendum).
+   */
+  unpair(deviceId: string): Promise<UnpairSummary | undefined>;
 }
 
 export interface ControlServerOptions {
@@ -284,12 +310,13 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Maps a thrown pairing-attempt error to an HTTP status. Errors that carry a
- * numeric `.status` in the 4xx/5xx range (e.g. `HfpRequestError`) pass it
- * through; anything else (timeout, connection refused, fingerprint mismatch)
- * becomes 502 — the honest "the peer/attempt failed, not this server" code.
+ * Maps a thrown surface error to an HTTP status. Errors that carry a numeric
+ * `.status` in the 4xx/5xx range (e.g. `HfpRequestError`, or unpair's
+ * trust-persist failure) pass it through; anything else becomes `fallback`
+ * — 502 for pairing (the honest "the peer/attempt failed, not this server"
+ * code), 500 for unpair (a purely local operation).
  */
-function pairingErrorStatus(error: unknown): number {
+function errorStatus(error: unknown, fallback: number): number {
   if (
     error !== null &&
     typeof error === "object" &&
@@ -301,7 +328,7 @@ function pairingErrorStatus(error: unknown): number {
       return status;
     }
   }
-  return 502;
+  return fallback;
 }
 
 type BodyRead =
@@ -338,6 +365,55 @@ async function readCappedBody(req: IncomingMessage): Promise<BodyRead> {
 }
 
 /**
+ * Reads, caps, and JSON-parses a control request body. On failure it has
+ * ALREADY responded (413 / 400) and returns `{ ok: false }`; an empty body
+ * parses as `{}` so schema validation produces the error message.
+ */
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<{ ok: true; value: unknown } | { ok: false }> {
+  const read = await readCappedBody(req);
+  if (read.status === "too_large") {
+    respondError(
+      res,
+      413,
+      `request body exceeds the ${MAX_CONTROL_REQUEST_BYTES}-byte limit`,
+    );
+    return { ok: false };
+  }
+  if (read.status === "read_error") {
+    respondError(res, 400, "failed to read request body");
+    return { ok: false };
+  }
+  try {
+    return {
+      ok: true,
+      value: read.text.trim() === "" ? {} : JSON.parse(read.text),
+    };
+  } catch {
+    respondError(res, 400, "invalid JSON body");
+    return { ok: false };
+  }
+}
+
+/**
+ * A short, one-line summary of schema issues, instead of zod's
+ * multi-line pretty-printed `.message` (meant for a developer console, not
+ * a CLI user's terminal).
+ */
+function describeIssues(
+  issues: ReadonlyArray<{
+    path: ReadonlyArray<PropertyKey>;
+    message: string;
+  }>,
+): string {
+  return issues
+    .map((issue) => `${issue.path.join(".") || "(body)"}: ${issue.message}`)
+    .join("; ");
+}
+
+/**
  * Starts the control HTTP front. Resolves once bound; the returned handle
  * exposes the bound port and a clean `close()`.
  */
@@ -370,38 +446,20 @@ export async function startControlServer(
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    const read = await readCappedBody(req);
-    if (read.status === "too_large") {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) {
+      return;
+    }
+    const parsed = PairConnectRequestSchema.safeParse(body.value);
+    if (!parsed.success) {
+      // cli.ts's parsePairConnectArgs rejects an empty host client-side, so
+      // this path is normally unreachable from the CLI — but a future
+      // caller of this route should still get a clean message.
       respondError(
         res,
-        413,
-        `request body exceeds the ${MAX_CONTROL_REQUEST_BYTES}-byte limit`,
+        400,
+        `invalid pair/connect request: ${describeIssues(parsed.error.issues)}`,
       );
-      return;
-    }
-    if (read.status === "read_error") {
-      respondError(res, 400, "failed to read request body");
-      return;
-    }
-    let parsedJson: unknown;
-    try {
-      parsedJson = read.text.trim() === "" ? {} : JSON.parse(read.text);
-    } catch {
-      respondError(res, 400, "invalid JSON body");
-      return;
-    }
-    const parsed = PairConnectRequestSchema.safeParse(parsedJson);
-    if (!parsed.success) {
-      // Build a short human-readable message from the issues rather than
-      // forwarding zod's raw (multi-line, pretty-printed JSON) `.message` —
-      // that blob is meant for a developer console, not a CLI user's
-      // terminal (see cli.ts's parsePairConnectArgs, which also rejects an
-      // empty host client-side so this path is normally unreachable, but a
-      // future caller of this route should still get a clean message).
-      const issues = parsed.error.issues
-        .map((issue) => `${issue.path.join(".") || "(body)"}: ${issue.message}`)
-        .join("; ");
-      respondError(res, 400, `invalid pair/connect request: ${issues}`);
       return;
     }
     const input: PairConnectRequest = parsed.data;
@@ -413,7 +471,7 @@ export async function startControlServer(
       // `pairWith`, handled below as a normal 200 — reaching THIS catch means
       // the attempt itself failed (unreachable peer, fingerprint mismatch,
       // etc), which is a clean 4xx/5xx, never a leaked stack.
-      respondError(res, pairingErrorStatus(error), errorMessage(error));
+      respondError(res, errorStatus(error, 502), errorMessage(error));
       return;
     }
     respondJson(res, 200, summary);
@@ -430,6 +488,38 @@ export async function startControlServer(
 
   async function handleJobs(res: ServerResponse): Promise<void> {
     respondJson(res, 200, surface.listJobs());
+  }
+
+  async function handleUnpair(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) {
+      return;
+    }
+    const parsed = UnpairRequestSchema.safeParse(body.value);
+    if (!parsed.success) {
+      respondError(
+        res,
+        400,
+        `invalid unpair request: ${describeIssues(parsed.error.issues)}`,
+      );
+      return;
+    }
+    const { deviceId } = parsed.data;
+    let summary: UnpairSummary | undefined;
+    try {
+      summary = await surface.unpair(deviceId);
+    } catch (error) {
+      respondError(res, errorStatus(error, 500), errorMessage(error));
+      return;
+    }
+    if (summary === undefined) {
+      respondError(res, 404, `no paired node with deviceId ${deviceId}`);
+      return;
+    }
+    respondJson(res, 200, summary);
   }
 
   async function handle(
@@ -500,6 +590,10 @@ export async function startControlServer(
       }
       if (method === "POST" && pathname === "/control/pair/connect") {
         await handlePairConnect(req, res);
+        return;
+      }
+      if (method === "POST" && pathname === "/control/unpair") {
+        await handleUnpair(req, res);
         return;
       }
       if (method === "GET" && pathname === "/control/status") {

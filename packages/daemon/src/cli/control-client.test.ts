@@ -16,6 +16,7 @@ import {
   type PairConnectSummary,
   type RunningControlServer,
   startControlServer,
+  type UnpairSummary,
 } from "../control/control-server.js";
 import {
   ControlClient,
@@ -60,6 +61,10 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
     status: () => status,
     listNodes: async () => [],
     listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
+    unpair: async (deviceId: string): Promise<UnpairSummary | undefined> =>
+      deviceId === FAKE_PEER_DEVICE_ID
+        ? { deviceId, name: "peer-node", canceledJobs: 0 }
+        : undefined,
     ...overrides,
   };
 }

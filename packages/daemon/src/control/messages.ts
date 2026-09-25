@@ -4,6 +4,7 @@
  * focus on HTTP wiring; these are intentionally tiny — control bodies carry
  * a host, a port, and a human-relayed pairing code, nothing larger.
  */
+import { DeviceIdSchema } from "@homefleet/protocol";
 import { z } from "zod";
 
 /**
@@ -21,3 +22,15 @@ export const PairConnectRequestSchema = z.object({
   expectedDeviceId: z.string().min(1).optional(),
 });
 export type PairConnectRequest = z.infer<typeof PairConnectRequestSchema>;
+
+/**
+ * Body of `POST /control/unpair`: the FULL device ID to revoke (64 lowercase
+ * hex, the protocol's own DeviceIdSchema). Deliberately no name or prefix
+ * matching here — resolving a human-typed name is the CLI's job
+ * (../cli/unpair-target.ts); the route stays unambiguous so a future
+ * dashboard control can reuse it as-is.
+ */
+export const UnpairRequestSchema = z.object({
+  deviceId: DeviceIdSchema,
+});
+export type UnpairRequest = z.infer<typeof UnpairRequestSchema>;
