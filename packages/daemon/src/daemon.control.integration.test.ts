@@ -22,7 +22,7 @@
  * not the daemon's in-process getters.
  */
 import { expect, test } from "vitest";
-import { ControlClient } from "./cli/control-client.js";
+import { ControlClient, ControlRequestError } from "./cli/control-client.js";
 import type { Daemon } from "./daemon.js";
 import { JobResultOutputSchema } from "./mcp/tools.js";
 import {
@@ -226,4 +226,93 @@ test("the assembled daemon serves the dashboard and lists jobs on both sides of 
 
   // The data route still refuses a header-less request.
   expect((await controlGet(worker, "/control/jobs", false)).status).toBe(403);
+}, 90_000);
+
+test("unpair through the real control route: trust revoked live, the peer's job canceled, persisted across restart, other side untouched", async () => {
+  const src = await h.makeSrcRepo("unpair integration");
+  const workerConfig = {
+    executors: {
+      command: { allowlist: { node: { executable: process.execPath } } },
+    },
+    workspace: { allowedRepoIds: ["repo-x"] },
+  };
+  const { daemon: worker, dataDir: workerDataDir } = await h.startDaemon(
+    "worker",
+    workerConfig,
+  );
+  const { daemon: delegator } = await h.startDaemon(
+    "delegator",
+    delegatorOverrides(worker, src),
+  );
+  await h.pair(delegator, worker);
+
+  // A long-running job the delegator owns on the worker.
+  const mcp = await h.connectMcp(delegator);
+  const delegated = await mcp.callTool({
+    name: "delegate_task",
+    arguments: {
+      node: worker.deviceId,
+      task: {
+        type: "command",
+        workspace: { repoId: "repo-x" },
+        command: "node",
+        args: ["-e", "setTimeout(()=>{},30000)"],
+      },
+    },
+  });
+  expect(delegated.isError).toBeFalsy();
+  const { jobId } = (delegated.structuredContent ?? {}) as { jobId: string };
+  const workerJobStatus = () =>
+    worker.jobManager.list().find((job) => job.jobId === jobId)?.status;
+  await h.waitUntil(
+    () => workerJobStatus() === "running",
+    undefined,
+    "job running",
+  );
+
+  // The worker unpairs the delegator through its real control API.
+  const workerControl = controlClientFor(worker);
+  expect(await workerControl.unpair(delegator.deviceId)).toEqual({
+    deviceId: delegator.deviceId,
+    name: "delegator",
+    canceledJobs: 1,
+  });
+  await h.waitUntil(
+    () => workerJobStatus() === "canceled",
+    undefined,
+    "job canceled",
+  );
+
+  // Gone from the worker's live directory (what nodes/list_nodes/dashboard read).
+  expect(
+    (await workerControl.nodes()).map((node) => node.deviceId),
+  ).not.toContain(delegator.deviceId);
+
+  // Revocation is live: the delegator's next HFP call to the worker is refused.
+  const followUp = await mcp.callTool({
+    name: "job_status",
+    arguments: { jobId },
+  });
+  expect(followUp.isError).toBe(true);
+
+  // One-sided: the delegator still lists the worker, now unreachable (its
+  // hello gets 401).
+  const theirView = await controlClientFor(delegator).nodes();
+  expect(
+    theirView.find((node) => node.deviceId === worker.deviceId)?.reachable,
+  ).toBe(false);
+
+  // A second unpair is a clean 404.
+  const again = await workerControl.unpair(delegator.deviceId).catch((e) => e);
+  expect(again).toBeInstanceOf(ControlRequestError);
+  expect((again as ControlRequestError).status).toBe(404);
+
+  // Persisted: a daemon restarted over the same data dir still does not trust it.
+  await worker.stop();
+  const { daemon: restarted } = await h.startDaemon(
+    "worker",
+    workerConfig,
+    workerDataDir,
+  );
+  expect(restarted.trustStore.has(delegator.deviceId)).toBe(false);
 }, 90_000);
