@@ -11,7 +11,10 @@
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "pack:release": "tsx scripts/pack-release.ts"
+    "pack:release": "tsx scripts/pack-release.ts",
+    "sign:release": "tsx scripts/sign-release.ts",
+    "verify:release": "tsx scripts/verify-release.ts",
+    "release:keygen": "tsx scripts/release-keygen.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
