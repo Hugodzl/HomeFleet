@@ -97,6 +97,11 @@ function signatureValid(
         format: "der",
         type: "spki",
       });
+      // Pinned keys must be Ed25519: other key types verify with a null
+      // algorithm too (e.g. RSA-512 gives a 64-byte signature).
+      if (publicKey.asymmetricKeyType !== "ed25519") {
+        return false;
+      }
       return verify(null, bytes, publicKey, sig);
     } catch {
       return false;
