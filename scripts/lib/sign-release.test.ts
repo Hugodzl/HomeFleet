@@ -63,3 +63,17 @@ test("signRelease refuses a non-Ed25519 key", async () => {
     }),
   ).rejects.toThrow(/Ed25519/);
 });
+
+test("signRelease rejects an invalid hfpVersion before signing", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "hf-sign-"));
+  dirs.push(dir);
+  const tarballPath = path.join(dir, "homefleet-0.5.0.tgz");
+  await writeFile(tarballPath, "x");
+  await expect(
+    signRelease({
+      tarballPath,
+      privateKeyPem: generateReleaseKeyPair().privateKeyPem,
+      hfpVersion: "v1",
+    }),
+  ).rejects.toThrow();
+});

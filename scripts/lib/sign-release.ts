@@ -9,6 +9,7 @@ import path from "node:path";
 import {
   hashFile,
   manifestFileName,
+  ReleaseManifestSchema,
   releaseFileName,
   serializeManifest,
   signatureFileName,
@@ -51,16 +52,14 @@ export async function signRelease(options: {
     throw new Error("the release signing key must be an Ed25519 private key");
   }
   const { sha256, size } = await hashFile(options.tarballPath);
-  const manifestBytes = Buffer.from(
-    serializeManifest({
-      version,
-      file: releaseFileName(version),
-      sha256,
-      size,
-      hfpVersion: options.hfpVersion ?? HFP_PROTOCOL_VERSION,
-    }),
-    "utf8",
-  );
+  const manifest = ReleaseManifestSchema.parse({
+    version,
+    file: releaseFileName(version),
+    sha256,
+    size,
+    hfpVersion: options.hfpVersion ?? HFP_PROTOCOL_VERSION,
+  });
+  const manifestBytes = Buffer.from(serializeManifest(manifest), "utf8");
   const signature = sign(null, manifestBytes, key).toString("base64");
   const dir = path.dirname(options.tarballPath);
   const manifestPath = path.join(dir, manifestFileName(version));

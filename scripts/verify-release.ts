@@ -8,6 +8,7 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { parseArgs } from "node:util";
 import {
   manifestFileName,
   signatureFileName,
@@ -16,8 +17,9 @@ import {
 import { versionFromTarball } from "./lib/sign-release.js";
 
 async function main(): Promise<void> {
-  const tarballPath = process.argv[2];
-  if (tarballPath === undefined) {
+  const { positionals } = parseArgs({ allowPositionals: true, options: {} });
+  const tarballPath = positionals[0];
+  if (tarballPath === undefined || positionals.length !== 1) {
     throw new Error("usage: pnpm verify:release <tarball>");
   }
   const version = versionFromTarball(tarballPath);

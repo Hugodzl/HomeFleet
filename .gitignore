@@ -11,3 +11,6 @@ coverage/
 # Claude Code - personal / local, not shared
 CLAUDE.md
 .claude/settings.local.json
+
+# Release signing keys must never be committed
+*.pem
