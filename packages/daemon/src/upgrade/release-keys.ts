@@ -5,7 +5,8 @@
  * before signing with it. The matching private key lives only in the
  * `HOMEFLEET_RELEASE_KEY` GitHub secret (see docs/reference/releasing.md).
  *
- * Empty until the real key is generated (plan Task 4) — with no pinned key
- * every verification fails closed.
+ * The first key was generated 2026-10-18 (plan Task 4).
  */
-export const RELEASE_PUBLIC_KEYS: readonly string[] = [];
+export const RELEASE_PUBLIC_KEYS: readonly string[] = [
+  "MCowBQYDK2VwAyEAGDBUSlqhDcOtFkphquy+YEfyVr4/Gp9Qx/BI5+KXZ8I=",
+];
