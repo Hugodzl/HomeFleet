@@ -18,6 +18,11 @@ jobs:
   pack:
     needs: gate
     runs-on: ubuntu-latest
+    # The signing key is an ENVIRONMENT secret, not a repo secret: only runs
+    # from main or a v* tag may use this environment, and each one waits for
+    # a maintainer's approval, so a workflow edited on any other branch can
+    # never read the key (docs/reference/releasing.md).
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,10 +47,19 @@ jobs:
           else
             pnpm pack:release
           fi
+      # Signed manifest + detached Ed25519 signature (fleet-upgrade spec,
+      # Phase 1). Verified straight away against the key PINNED in the
+      # daemon source, so a secret/key mismatch fails here, before publish.
+      - name: Sign the tarball
+        env:
+          HOMEFLEET_RELEASE_KEY: ${{ secrets.HOMEFLEET_RELEASE_KEY }}
+        run: pnpm sign:release release/homefleet-*.tgz
+      - name: Verify the signature against the pinned public key
+        run: pnpm verify:release release/homefleet-*.tgz
       - uses: actions/upload-artifact@v4
         with:
           name: homefleet-tarball
-          path: release/*.tgz
+          path: release/homefleet-*
           if-no-files-found: error
 
   # Install the REAL artifact the way a user does: no checkout, no pnpm,
@@ -117,7 +131,7 @@ jobs:
         run: |
           notes="docs/releases/$GITHUB_REF_NAME.md"
           tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" release/*.tgz \
+          gh release create "$GITHUB_REF_NAME" release/homefleet-* \
             --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$(head -n 1 "$notes" | sed 's/^# //')" \
             --notes-file "$RUNNER_TEMP/notes.md"

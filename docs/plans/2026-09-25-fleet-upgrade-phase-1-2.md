@@ -23,6 +23,7 @@
   - The upgrade state doesn't record env vars. The detached updater and the relaunched daemon inherit the daemon's environment.
   - A new `not-installed` guard refuses upgrades for a daemon running from a git checkout, such as the rig's `hf-daemon.ps1`.
   - `ControlStatus.lastUpgrade` lands in Phase 2 because the CLI needs it; `NodeInfo.lastUpgrade` stays in Phase 3.
+  - `HOMEFLEET_RELEASE_KEY` is a secret on a `release` GitHub **environment**, not a repo secret (decided 2026-10-18, Task 4). The environment admits only `main` and `v*` tags and requires Hugo's approval, and the `pack` job declares `environment: release`. With a repo secret, a workflow edited on any pushed branch (including an agent's `claude/*` branch) could read the key.
 
 ## File map
 
