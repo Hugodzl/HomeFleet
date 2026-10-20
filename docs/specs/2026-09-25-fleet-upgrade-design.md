@@ -24,6 +24,7 @@ back automatically if the new daemon fails to come up.
 | How does a node replace and restart itself? | A **detached updater** script, copied out of the install dir, does install → restart → health check → rollback. It works however the daemon was started. |
 | Rollout order | **Sequential**, peers first, the node that started it last. The rollout stops at the first failure. |
 | Delivery | Four phases, each with its own implementation plan: (1) signed releases, (2) local upgrade, (3) fleet push, (4) dashboard trigger. |
+| Plan-time adjustments (Phase 1–2 plan) | Pre-publish verification runs in the `pack` job (the smoke runner has no source tree). The updater inherits the daemon's environment instead of recording env vars. A `not-installed` guard refuses daemons run from a git checkout. `ControlStatus.lastUpgrade` ships in Phase 2 for the CLI; `NodeInfo.lastUpgrade` stays in Phase 3. `HOMEFLEET_RELEASE_KEY` is a secret on a `release` GitHub environment (only `main` and `v*` tags, approval required), not a repo secret, so a workflow edited on another branch can't read it. |
 
 ## Architecture
 
@@ -89,20 +90,22 @@ All new code is in `packages/daemon/src/upgrade/` unless stated otherwise.
 ## Phase 1: Signed releases
 
 - **One-time setup** (documented in `docs/reference/releasing.md`): generate an
-  Ed25519 key pair with a small `scripts/release-keygen.mjs`. Store the private
-  key (PKCS#8 PEM) as the repo secret `HOMEFLEET_RELEASE_KEY`, and add the
-  public key to `release-keys.ts`.
-- **`release.yml`**: a new `sign` job after `smoke` (which needs `pack`) runs
-  `node scripts/sign-release.mjs release/homefleet-<v>.tgz`. It writes:
+  Ed25519 key pair with `pnpm release:keygen`. Store the private key
+  (PKCS#8 PEM) as `HOMEFLEET_RELEASE_KEY` on the `release` GitHub
+  environment, and add the public key to `release-keys.ts`.
+- **`release.yml`**: the `pack` job (which declares `environment: release`)
+  runs `pnpm sign:release release/homefleet-<v>.tgz` right after packing. It
+  writes:
   - `homefleet-<v>.manifest.json`:
     `{ version, file, sha256, size, hfpVersion }`, with keys in a fixed order;
   - `homefleet-<v>.manifest.sig`: a base64 detached Ed25519 signature over the
     exact manifest bytes.
 
-  The `release` job attaches all three files. The `sign` job fails the release
-  if the secret is missing.
-- **Smoke test addition:** verify the fresh signature with the package's own
-  `verifyRelease`, so a key mismatch is caught before publishing.
+  The `release` job attaches all three files. Signing fails the release if
+  the secret is missing.
+- **Pre-publish verification:** the `pack` job runs `pnpm verify:release`
+  against the key pinned in the source tree right after signing, so a key
+  mismatch fails the release before anything is published.
 - **Bootstrap:** releases ≤ v0.4.0 have no manifest, so they can never be
   targets. The first signed release is **v0.5.0**, which ships phases 1 and 2.
   Moving 0.4.0 → 0.5.0 is the last manual `npm i -g`.
@@ -128,7 +131,8 @@ All new code is in `packages/daemon/src/upgrade/` unless stated otherwise.
 2. **Prepare:** fetch and verify into `upgrades/<v>/`. If a verified copy is
    already cached, reuse it.
 3. **Run the guards.** If any fails, reply with the reason. Nothing has stopped
-   at this point.
+   at this point. This includes `not-installed`: the daemon's entry script
+   must live under `node_modules/homefleet/`.
 4. **Cache a rollback copy:** make sure `upgrades/<current>/` holds the running
    version's tarball. Use the existing copy if there is one; otherwise fetch it
    from GitHub (best effort). If it can't be cached, record
@@ -137,9 +141,8 @@ All new code is in `packages/daemon/src/upgrade/` unless stated otherwise.
    timestamp. A lock older than 10 minutes whose PID is dead counts as stale.
 6. **Write `upgrade-state.json`:**
    `{ from, to, tgz, rollbackTgz?, nodePath: process.execPath, argv:
-   process.argv.slice(1), env: { HOMEFLEET_DATA_DIR?, … }, controlPort,
-   startedAt }`. Only HomeFleet-relevant env vars are recorded; everything else
-   is inherited.
+   process.argv.slice(1), controlPort, startedAt }`. The updater and the
+   relaunched daemon inherit the daemon's environment.
 7. **Hand off:** spawn `node <dataDir>/upgrades/updater.mjs` detached
    (`detached: true, stdio: "ignore", windowsHide: true`, then `unref()`),
    reply `202`, and run the normal graceful `daemon.stop()`, then exit 0.

@@ -84,8 +84,13 @@ npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homef
 
 (the exact URL is on the [Releases page](https://github.com/Hugodzl/HomeFleet/releases)).
 That puts `homefleetd`, `homefleet` and `homefleet-mcp-stdio` on your PATH.
-To update, install the newer tarball the same way. Then scaffold the machine
-with `homefleet setup` (below).
+To update an installed node (v0.5.0 or later), run `homefleet upgrade`: it
+downloads the latest release, checks its signature, installs it, restarts
+the daemon in the background and rolls back automatically if the new
+version fails to start. `homefleet upgrade --check` only reports what is
+available. Upgrading *to* v0.5.0 is the last manual `npm i -g`.
+
+Then scaffold the machine with `homefleet setup` (below).
 
 Working on HomeFleet itself? See [Development](#development) for running from
 source.
