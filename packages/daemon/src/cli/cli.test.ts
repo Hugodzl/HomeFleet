@@ -86,6 +86,12 @@ function fakeControlClient(
       name: "peer-node",
       canceledJobs: 0,
     }),
+    checkUpgrade: async () => ({
+      current: "0.5.0",
+      latest: "0.5.0",
+      available: false,
+    }),
+    upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
     ...overrides,
   };
 }
