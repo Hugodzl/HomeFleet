@@ -16,8 +16,16 @@
  * daemon's control API (see ../control/control-server.ts) because pairing
  * state and live status/node data only exist in that running process.
  */
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DaemonConfig } from "../config/config.js";
+import type { UpgradeStarted } from "../upgrade/coordinator.js";
+import {
+  UPDATER_LOG,
+  type UpgradeResult,
+  upgradesDir,
+} from "../upgrade/files.js";
+import { isSemver } from "../upgrade/semver.js";
 import { DAEMON_VERSION } from "../version.js";
 import {
   type ControlClientLike,
@@ -78,6 +86,15 @@ export interface CliDeps {
    * Optional so tests never launch a browser; absent means print-only.
    */
   openUrl?: (url: string) => Promise<void>;
+  /** Clock for `upgrade`'s wait loop; defaults to `Date.now`. */
+  now?: () => number;
+  /** Sleep for `upgrade`'s wait loop; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Reads `<dataDir>/upgrade-result.json` (real: `readUpgradeResultSync`) —
+   * `upgrade`'s last resort when the daemon never came back to report it.
+   */
+  readUpgradeResult?: (dataDir: string) => UpgradeResult | undefined;
 }
 
 const USAGE = `homefleet - HomeFleet operator CLI
@@ -112,6 +129,13 @@ Usage:
   homefleet dashboard [--no-open]
       Print the running daemon's read-only dashboard URL and open it in
       the default browser (--no-open: print only).
+
+  homefleet upgrade [--to <version>] [--check] [--force]
+      Upgrade THIS node's running daemon to the latest signed release (or
+      --to <version>), restart it in the background, and wait until it is
+      back. Rolls back automatically if the new version fails to start.
+      --check only reports whether an upgrade is available; --force
+      upgrades even while jobs are running.
 
   homefleet --help
       Show this usage text.
@@ -522,6 +546,150 @@ async function runDashboard(args: string[], deps: CliDeps): Promise<number> {
   });
 }
 
+/** How long `upgrade` waits for the restarted daemon (spec: 3 minutes). */
+export const UPGRADE_WAIT_MS = 180_000;
+const UPGRADE_POLL_MS = 2_000;
+
+interface UpgradeArgs {
+  check: boolean;
+  force: boolean;
+  version?: string;
+}
+
+function parseUpgradeArgs(
+  args: string[],
+  deps: CliDeps,
+): UpgradeArgs | undefined {
+  const parsed: UpgradeArgs = { check: false, force: false };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--check") {
+      parsed.check = true;
+    } else if (arg === "--force") {
+      parsed.force = true;
+    } else if (arg === "--to") {
+      const version = args[++i];
+      if (version === undefined || !isSemver(version)) {
+        deps.stderr("upgrade: --to requires a version like 0.5.1");
+        return undefined;
+      }
+      parsed.version = version;
+    } else {
+      deps.stderr(`upgrade: unexpected argument "${arg}"`);
+      return undefined;
+    }
+  }
+  return parsed;
+}
+
+function reportUpgradeFailure(last: UpgradeResult, deps: CliDeps): number {
+  const reason = last.reason ?? "no reason recorded";
+  deps.stderr(
+    last.outcome === "rolled-back"
+      ? `Upgrade to ${last.to} failed and was rolled back to ${last.from}: ${reason}`
+      : `Upgrade to ${last.to} failed: ${reason}`,
+  );
+  return 1;
+}
+
+/**
+ * Polls status until the daemon answers on the new version (success), or
+ * reports a fresh failed/rolled-back result for this target. Unreachable
+ * while restarting is expected and simply retried.
+ */
+async function waitForUpgrade(
+  client: ControlClientLike,
+  started: UpgradeStarted,
+  deps: CliDeps,
+): Promise<number> {
+  const now = deps.now ?? Date.now;
+  const sleep =
+    deps.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const startedAt = now();
+  const isFresh = (last: UpgradeResult | undefined): last is UpgradeResult =>
+    last !== undefined && last.to === started.to && last.at >= startedAt;
+
+  while (now() - startedAt < UPGRADE_WAIT_MS) {
+    await sleep(UPGRADE_POLL_MS);
+    let status: Awaited<ReturnType<ControlClientLike["status"]>>;
+    try {
+      status = await client.status();
+    } catch (error) {
+      if (error instanceof DaemonUnreachableError) {
+        continue;
+      }
+      throw error;
+    }
+    if (
+      isFresh(status.lastUpgrade) &&
+      status.lastUpgrade.outcome !== "succeeded"
+    ) {
+      return reportUpgradeFailure(status.lastUpgrade, deps);
+    }
+    if (status.daemonVersion === started.to) {
+      deps.stdout(`Upgraded to ${started.to}.`);
+      return 0;
+    }
+  }
+  const last = deps.readUpgradeResult?.(deps.dataDir);
+  if (isFresh(last)) {
+    if (last.outcome === "succeeded") {
+      deps.stdout(`Upgraded to ${started.to}.`);
+      return 0;
+    }
+    return reportUpgradeFailure(last, deps);
+  }
+  deps.stderr(
+    `Timed out waiting for homefleetd to come back on ${started.to}. ` +
+      `See ${path.join(upgradesDir(deps.dataDir), UPDATER_LOG)}.`,
+  );
+  return 1;
+}
+
+/**
+ * `homefleet upgrade`: asks the running daemon to upgrade itself (see
+ * ../upgrade/coordinator.ts), then waits for it to come back on the new
+ * version. The daemon refuses BEFORE stopping anything, so a refusal here
+ * means the node is untouched.
+ */
+async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
+  const parsed = parseUpgradeArgs(args, deps);
+  if (parsed === undefined) {
+    return 2;
+  }
+  return withControlClient(deps, async (client) => {
+    if (parsed.check) {
+      const check = await client.checkUpgrade();
+      deps.stdout(
+        check.available
+          ? `Upgrade available: ${check.current} → ${check.latest}`
+          : `Up to date (${check.current}; latest release ${check.latest}).`,
+      );
+      return 0;
+    }
+    let started: UpgradeStarted;
+    try {
+      started = await client.upgrade({
+        targets: "self",
+        ...(parsed.version !== undefined ? { version: parsed.version } : {}),
+        ...(parsed.force ? { force: true } : {}),
+      });
+    } catch (error) {
+      if (error instanceof ControlRequestError) {
+        deps.stderr(`Upgrade refused: ${error.message}`);
+        return 1;
+      }
+      throw error;
+    }
+    deps.stdout(
+      `Upgrading ${started.from} → ${started.to}. homefleetd is restarting ` +
+        "and will come back in the background (not in this terminal).",
+    );
+    return waitForUpgrade(client, started, deps);
+  });
+}
+
 async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
   if (command === "--help" || command === "-h") {
@@ -557,6 +725,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       return runStatus(deps);
     case "dashboard":
       return runDashboard(rest, deps);
+    case "upgrade":
+      return runUpgrade(rest, deps);
     default:
       deps.stderr(USAGE);
       return 2;

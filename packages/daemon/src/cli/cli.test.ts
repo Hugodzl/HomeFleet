@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from "vitest";
 import type { DaemonConfig } from "../config/config.js";
+import type { ControlStatus } from "../control/control-server.js";
 import { DAEMON_VERSION } from "../version.js";
 import { type CliDeps, type CliIdentity, runCli } from "./cli.js";
 import type {
@@ -891,5 +892,186 @@ describe("unpair", () => {
     expect(h.stdoutLines.join("\n")).toMatch(
       /homefleet unpair <name\|deviceId> \[--yes\]/,
     );
+  });
+});
+
+describe("upgrade", () => {
+  function statusAt(
+    daemonVersion: string,
+    extra: Partial<ControlStatus> = {},
+  ): ControlStatus {
+    return {
+      deviceId: FAKE_DEVICE_ID,
+      name: "n",
+      platform: "win32",
+      daemonVersion,
+      protocolVersion: "0.3.0",
+      hfpPort: 1,
+      mcpPort: 2,
+      controlPort: 3,
+      roles: [],
+      executors: [],
+      models: [],
+      activeJobs: 0,
+      maxConcurrentJobs: 1,
+      ...extra,
+    };
+  }
+
+  /** Harness with a fake clock: every sleep advances it. */
+  function upgradeHarness(client: ControlClientLike) {
+    const h = makeHarness({ controlClient: client });
+    let clock = 1_000;
+    h.deps.now = () => clock;
+    h.deps.sleep = async (ms) => {
+      clock += ms;
+    };
+    return h;
+  }
+
+  test("--check reports an available upgrade", async () => {
+    const h = makeHarness({
+      controlClient: fakeControlClient({
+        checkUpgrade: async () => ({
+          current: "0.5.0",
+          latest: "0.5.1",
+          available: true,
+        }),
+      }),
+    });
+    expect(await runCli(["upgrade", "--check"], h.deps)).toBe(0);
+    expect(h.stdoutLines).toEqual(["Upgrade available: 0.5.0 → 0.5.1"]);
+  });
+
+  test("--check when up to date", async () => {
+    const h = makeHarness();
+    expect(await runCli(["upgrade", "--check"], h.deps)).toBe(0);
+    expect(h.stdoutLines[0]).toMatch(/^Up to date \(0\.5\.0/);
+  });
+
+  test("passes --to and --force, waits through the restart, reports success", async () => {
+    const calls: unknown[] = [];
+    const statuses = [
+      () =>
+        Promise.reject(
+          new DaemonUnreachableError("127.0.0.1", 56373, undefined),
+        ),
+      () => Promise.resolve(statusAt("0.5.1")),
+    ];
+    const h = upgradeHarness(
+      fakeControlClient({
+        upgrade: async (input) => {
+          calls.push(input);
+          return { from: "0.5.0", to: "0.5.1" };
+        },
+        status: () =>
+          (statuses.shift() ?? (() => Promise.resolve(statusAt("0.5.1"))))(),
+      }),
+    );
+    expect(await runCli(["upgrade", "--to", "0.5.1", "--force"], h.deps)).toBe(
+      0,
+    );
+    expect(calls).toEqual([{ targets: "self", version: "0.5.1", force: true }]);
+    expect(h.stdoutLines.at(-1)).toBe("Upgraded to 0.5.1.");
+  });
+
+  test("a rollback is reported with its reason and exit 1", async () => {
+    const h = upgradeHarness(
+      fakeControlClient({
+        status: async () =>
+          statusAt("0.5.0", {
+            lastUpgrade: {
+              from: "0.5.0",
+              to: "0.5.1",
+              outcome: "rolled-back",
+              reason: "health check failed",
+              at: 5_000,
+            },
+          }),
+      }),
+    );
+    expect(await runCli(["upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines.at(-1)).toBe(
+      "Upgrade to 0.5.1 failed and was rolled back to 0.5.0: health check failed",
+    );
+  });
+
+  test("an old lastUpgrade from a previous run is ignored", async () => {
+    const statuses = [
+      statusAt("0.5.0", {
+        lastUpgrade: { from: "0.4.9", to: "0.5.1", outcome: "failed", at: 10 },
+      }),
+      statusAt("0.5.1"),
+    ];
+    const h = upgradeHarness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.1"),
+      }),
+    );
+    expect(await runCli(["upgrade"], h.deps)).toBe(0);
+  });
+
+  test("a refusal prints the daemon's reason", async () => {
+    const h = makeHarness({
+      controlClient: fakeControlClient({
+        upgrade: async () => {
+          throw new ControlRequestError(
+            409,
+            "1 job(s) running; wait or pass --force",
+            "busy",
+          );
+        },
+      }),
+    });
+    expect(await runCli(["upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([
+      "Upgrade refused: 1 job(s) running; wait or pass --force",
+    ]);
+  });
+
+  test("times out when the daemon never comes back", async () => {
+    const h = upgradeHarness(
+      fakeControlClient({
+        status: () =>
+          Promise.reject(
+            new DaemonUnreachableError("127.0.0.1", 56373, undefined),
+          ),
+      }),
+    );
+    expect(await runCli(["upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines.at(-1)).toMatch(
+      /^Timed out waiting for homefleetd to come back on 0\.5\.1/,
+    );
+  });
+
+  test("the timeout path reads the result file when there is one", async () => {
+    const h = upgradeHarness(
+      fakeControlClient({
+        status: () =>
+          Promise.reject(
+            new DaemonUnreachableError("127.0.0.1", 56373, undefined),
+          ),
+      }),
+    );
+    h.deps.readUpgradeResult = () => ({
+      from: "0.5.0",
+      to: "0.5.1",
+      outcome: "failed",
+      reason: "rollback unavailable",
+      at: 999_999_999,
+    });
+    expect(await runCli(["upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines.at(-1)).toBe(
+      "Upgrade to 0.5.1 failed: rollback unavailable",
+    );
+  });
+
+  test.each([
+    [["--to"]],
+    [["--to", "latest"]],
+    [["--bogus"]],
+  ])("bad args %j → exit 2", async (args) => {
+    const h = makeHarness();
+    expect(await runCli(["upgrade", ...args], h.deps)).toBe(2);
   });
 });

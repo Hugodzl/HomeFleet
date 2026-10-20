@@ -20,6 +20,7 @@ import { openUrl } from "../cli/open-url.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
+import { readUpgradeResultSync } from "../upgrade/files.js";
 import { isInvokedDirectly } from "./invoked-directly.js";
 
 async function main(): Promise<number> {
@@ -33,6 +34,7 @@ async function main(): Promise<number> {
     stderr: (line) => process.stderr.write(`${line}\n`),
     fileExists: existsSync,
     openUrl,
+    readUpgradeResult: readUpgradeResultSync,
   };
   return runCli(process.argv.slice(2), deps);
 }
