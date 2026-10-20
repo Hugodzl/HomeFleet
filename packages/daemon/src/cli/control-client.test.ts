@@ -18,6 +18,7 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "../control/control-server.js";
+import { UpgradeError } from "../upgrade/errors.js";
 import {
   ControlClient,
   ControlRequestError,
@@ -65,6 +66,12 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       deviceId === FAKE_PEER_DEVICE_ID
         ? { deviceId, name: "peer-node", canceledJobs: 0 }
         : undefined,
+    checkUpgrade: async () => ({
+      current: "0.5.0",
+      latest: "0.5.1",
+      available: true,
+    }),
+    upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
     ...overrides,
   };
 }
@@ -305,4 +312,38 @@ test("unpair() of a device that is not paired throws ControlRequestError 404", a
   const failure = await client.unpair("c".repeat(64)).catch((e) => e);
   expect(failure).toBeInstanceOf(ControlRequestError);
   expect((failure as ControlRequestError).status).toBe(404);
+});
+
+test("checkUpgrade() and upgrade() round-trip over real HTTP", async () => {
+  const server = await start();
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  await expect(client.checkUpgrade()).resolves.toEqual({
+    current: "0.5.0",
+    latest: "0.5.1",
+    available: true,
+  });
+  await expect(client.upgrade({ targets: "self" })).resolves.toEqual({
+    from: "0.5.0",
+    to: "0.5.1",
+  });
+});
+
+test("an upgrade refusal surfaces as ControlRequestError with status + code", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        throw new UpgradeError("busy", "1 job(s) running");
+      },
+    }),
+  });
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const error = await client
+    .upgrade({ targets: "self" })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ControlRequestError);
+  expect(error).toMatchObject({
+    status: 409,
+    code: "busy",
+    message: "1 job(s) running",
+  });
 });

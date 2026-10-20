@@ -27,8 +27,34 @@ described from `docs/releases/<tag>.md`.
    has gone stale. `git grep -n "v<previous>"` catches leftovers.
 4. `pnpm lint && pnpm typecheck && pnpm test`, commit, push.
 5. Optional dry run: `gh workflow run release.yml --ref main` — everything
-   except the Release.
-6. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   except the Release. The `pack` job must print `verified homefleet-X.Y.Z.tgz`.
+6. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `pack` job waits for
+   approval on the `release` environment (see [Release signing](#release-signing)).
+
+## Release signing
+
+Every release publishes three assets: `homefleet-X.Y.Z.tgz`,
+`homefleet-X.Y.Z.manifest.json` (version, sha256, size, HFP version) and
+`homefleet-X.Y.Z.manifest.sig` (a detached Ed25519 signature over the
+manifest bytes). `homefleet upgrade` installs only a tarball whose manifest
+verifies under a key pinned in
+`packages/daemon/src/upgrade/release-keys.ts`.
+
+- The private key is the `HOMEFLEET_RELEASE_KEY` secret on the `release`
+  GitHub **environment**, not a repo secret. The environment admits only
+  `main` and `v*` tags and requires Hugo's approval, so a workflow edited on
+  any other branch (including an agent's `claude/*` branch) can never read
+  the key. An offline backup lives with Hugo.
+- The `pack` job signs, then verifies against the pinned key, before
+  anything is published.
+- To sign a local build by hand (for example the rig rollback test):
+  `pnpm sign:release <tgz> --key-file <pem>`, then
+  `pnpm verify:release <tgz>`.
+- **Rotating the key:** generate a new pair with `pnpm release:keygen`, ADD
+  the new public key to `RELEASE_PUBLIC_KEYS` (keep the old one), ship a
+  release still signed with the old key, and only then switch the secret.
+  Nodes that never installed a release pinning the new key must be upgraded
+  by hand.
 
 ## If the tag was wrong
 

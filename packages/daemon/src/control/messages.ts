@@ -34,3 +34,17 @@ export const UnpairRequestSchema = z.object({
   deviceId: DeviceIdSchema,
 });
 export type UnpairRequest = z.infer<typeof UnpairRequestSchema>;
+
+/**
+ * Body of `POST /control/upgrade` (fleet-upgrade spec). `targets` only
+ * accepts "self" until Phase 3 adds peer device IDs.
+ */
+export const UpgradeRequestSchema = z.strictObject({
+  targets: z.literal("self").default("self"),
+  version: z
+    .string()
+    .regex(/^\d+\.\d+\.\d+$/, "must be X.Y.Z")
+    .optional(),
+  force: z.boolean().optional(),
+});
+export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;

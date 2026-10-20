@@ -50,6 +50,12 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
+import { UpgradeCoordinator } from "./upgrade/coordinator.js";
+import { readUpgradeResultSync } from "./upgrade/files.js";
+import {
+  GitHubReleaseSource,
+  type ReleaseSource,
+} from "./upgrade/release-source.js";
 import { DAEMON_VERSION } from "./version.js";
 import { ArtifactStore } from "./workspace/artifact-store.js";
 import { registerWorkspaceRoutes } from "./workspace/routes.js";
@@ -88,6 +94,15 @@ export interface DaemonOptions {
    * renames, rename-budget exhaustion). Defaults to a no-op.
    */
   onDiagnostic?: (message: string) => void;
+  /**
+   * Asks the hosting process for its normal graceful shutdown — homefleetd
+   * passes its signal handler. The upgrade flow calls it after starting the
+   * detached updater. Absent (tests, embedders) → upgrades are refused with
+   * `unsupported`, since nothing would restart the daemon.
+   */
+  requestShutdown?: (reason: string) => void;
+  /** Where upgrades come from; defaults to GitHub Releases. Tests inject a fake. */
+  releaseSource?: ReleaseSource;
 }
 
 /**
@@ -342,6 +357,8 @@ export class Daemon {
   private readonly config: DaemonConfig;
   private readonly onError: (error: unknown) => void;
   private readonly onDiagnostic: (message: string) => void;
+  private readonly requestShutdown: ((reason: string) => void) | undefined;
+  private readonly releaseSource: ReleaseSource | undefined;
 
   private state: "new" | "started" | "stopped" = "new";
   private runtime: DaemonRuntime | null = null;
@@ -359,6 +376,8 @@ export class Daemon {
     this.config = options.config;
     this.onError = options.onError ?? (() => {});
     this.onDiagnostic = options.onDiagnostic ?? (() => {});
+    this.requestShutdown = options.requestShutdown;
+    this.releaseSource = options.releaseSource;
   }
 
   /**
@@ -591,6 +610,17 @@ export class Daemon {
     // closure) never observes a stale 0 once the server can actually be
     // reached.
     let controlPort = 0;
+    const upgrades = new UpgradeCoordinator({
+      dataDir,
+      currentVersion: DAEMON_VERSION,
+      localHfpVersion: HFP_PROTOCOL_VERSION,
+      source: this.releaseSource ?? new GitHubReleaseSource(),
+      activeJobs: () => jobManager.activeJobs,
+      controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
+      ...(this.requestShutdown !== undefined
+        ? { requestShutdown: this.requestShutdown }
+        : {}),
+    });
     const controlSurface: ControlSurface = {
       beginPairing: () => pairingManager.beginPairing(),
       pairWith: (input) =>
@@ -617,6 +647,10 @@ export class Daemon {
           models: info.models,
           activeJobs: info.activeJobs,
           maxConcurrentJobs: info.maxConcurrentJobs,
+          ...(() => {
+            const lastUpgrade = readUpgradeResultSync(dataDir);
+            return lastUpgrade !== undefined ? { lastUpgrade } : {};
+          })(),
         };
       },
       listNodes: () => nodeDirectory.list(),
@@ -648,6 +682,12 @@ export class Daemon {
       },
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
+      checkUpgrade: () => upgrades.check(),
+      upgrade: (input) =>
+        upgrades.upgradeSelf({
+          ...(input.version !== undefined ? { version: input.version } : {}),
+          ...(input.force !== undefined ? { force: input.force } : {}),
+        }),
     };
     const controlServer = await startControlServer({
       surface: controlSurface,

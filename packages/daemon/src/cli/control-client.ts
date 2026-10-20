@@ -24,7 +24,9 @@ import {
   type PairConnectSummary,
   type UnpairSummary,
 } from "../control/control-server.js";
+import type { UpgradeRequest } from "../control/messages.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
+import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
 
 /**
  * Thrown when the client could not even reach the daemon process — connection
@@ -66,11 +68,16 @@ export class DaemonUnreachableError extends Error {
  */
 export class ControlRequestError extends Error {
   readonly status: number;
+  /** The daemon's machine-readable `code`, when the error body carried one (upgrade routes). */
+  readonly code?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.name = "ControlRequestError";
     this.status = status;
+    if (code !== undefined) {
+      this.code = code;
+    }
   }
 }
 
@@ -105,6 +112,8 @@ export interface ControlClientLike {
   status(): Promise<ControlStatus>;
   nodes(): Promise<NodeDirectoryEntry[]>;
   unpair(deviceId: string): Promise<UnpairSummary>;
+  checkUpgrade(): Promise<UpgradeCheck>;
+  upgrade(input: UpgradeRequest): Promise<UpgradeStarted>;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +222,25 @@ function validateControlStatus(json: unknown): ControlStatus {
   assertArray(json.models, "models", "status");
   assertNumber(json.activeJobs, "activeJobs", "status");
   assertNumber(json.maxConcurrentJobs, "maxConcurrentJobs", "status");
+  if (json.lastUpgrade !== undefined) {
+    assertIsObject(json.lastUpgrade, "status.lastUpgrade");
+  }
   return json as unknown as ControlStatus;
+}
+
+function validateUpgradeCheck(json: unknown): UpgradeCheck {
+  assertIsObject(json, "upgrade/check");
+  assertString(json.current, "current", "upgrade/check");
+  assertString(json.latest, "latest", "upgrade/check");
+  assertBoolean(json.available, "available", "upgrade/check");
+  return json as unknown as UpgradeCheck;
+}
+
+function validateUpgradeStarted(json: unknown): UpgradeStarted {
+  assertIsObject(json, "upgrade");
+  assertString(json.from, "from", "upgrade");
+  assertString(json.to, "to", "upgrade");
+  return json as unknown as UpgradeStarted;
 }
 
 function validateNodeDirectoryEntry(
@@ -307,14 +334,19 @@ async function controlRequest(
   }
 
   if (!response.ok) {
+    const body =
+      json !== null && typeof json === "object"
+        ? (json as Record<string, unknown>)
+        : {};
     const message =
-      json !== null &&
-      typeof json === "object" &&
-      "error" in json &&
-      typeof (json as { error: unknown }).error === "string"
-        ? (json as { error: string }).error
+      typeof body.error === "string"
+        ? body.error
         : `control API request failed with status ${response.status}`;
-    throw new ControlRequestError(response.status, message);
+    throw new ControlRequestError(
+      response.status,
+      message,
+      typeof body.code === "string" ? body.code : undefined,
+    );
   }
 
   return json;
@@ -367,5 +399,24 @@ export class ControlClient implements ControlClientLike {
       deviceId,
     });
     return validateUnpairSummary(json);
+  }
+
+  async checkUpgrade(): Promise<UpgradeCheck> {
+    const json = await controlRequest(
+      this.options,
+      "GET",
+      "/control/upgrade/check",
+    );
+    return validateUpgradeCheck(json);
+  }
+
+  async upgrade(input: UpgradeRequest): Promise<UpgradeStarted> {
+    const json = await controlRequest(
+      this.options,
+      "POST",
+      "/control/upgrade",
+      input,
+    );
+    return validateUpgradeStarted(json);
   }
 }

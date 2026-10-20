@@ -83,9 +83,43 @@ release nodes will install":
   local file it verified, from a directory only the daemon writes to. That
   is a constraint on the later prepare/updater tasks.
 
+## Tasks 6–7: fetching and caching a release (2026-10-19)
+
+Tasks 4–5 landed first: the real key is pinned, and `release.yml` signs and
+verifies in the `pack` job. That job is behind the `release` environment, so
+it needs Hugo's approval. Tasks 6–7 are the daemon side of the download:
+
+- **`GitHubReleaseSource`** reads the latest tag from the releases API and
+  downloads the tarball, manifest and signature from the release's download
+  URLs. Every network or HTTP failure becomes a `ReleaseFetchError` that
+  names the host or URL. Each asset is capped at 100 MB, checked against both
+  the declared `content-length` and the bytes actually received, so a
+  hostile or broken server can't make the daemon buffer without limit.
+  `fetch` is injected, so the tests never touch the network.
+- **`prepareRelease`** is the only way into `upgrades/<v>/`. It reuses a
+  cached copy only if that copy verifies again *now*. Otherwise it wipes the
+  directory, downloads, verifies, and deletes anything that fails. The cache
+  therefore only ever holds files that passed `verifyRelease`. That covers
+  half of the time-of-check/time-of-use constraint above. The updater
+  (Task 10) still has to install that exact file.
+- **`UpgradeError`** gives the whole flow one set of machine-readable codes.
+  Only `fetch-failed` and `verify-failed` are used so far. The guards and
+  coordinator add the rest.
+
+Tests use generated test keys and a fake source. The real key is never
+involved.
+
+The approval gate got tighter at the same time. Claude sessions on the dev
+machine now use a fine-grained token scoped to this repo, without the
+Deployments, Environments or Administration permissions. Approving a
+pending deployment needs Deployments: write, so a session can no longer
+approve its own signing run with one `gh api` call. The environment's
+"administrators can bypass" option is also off now. This is a guardrail,
+not a hard boundary: anything that runs as the same OS user could still dig
+out a stronger credential, so the approval remains a human review.
+
 ## Follow-ups
 
-- Task 4: generate the real release key and pin it. Blocked on key custody:
-  where the private key and its offline backup live.
-- Task 5: sign and verify in `release.yml` before publishing, and publish
-  the manifest and signature as release assets.
+- Tasks 8–17: guards, upgrade files, the detached updater, the coordinator,
+  the control API and client, daemon wiring, `homefleet upgrade`, docs, and
+  full verification.

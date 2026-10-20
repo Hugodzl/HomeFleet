@@ -11,6 +11,7 @@ import {
   request,
 } from "node:http";
 import { afterEach, expect, test } from "vitest";
+import { UpgradeError } from "../upgrade/errors.js";
 import {
   CONTROL_HEADER,
   type ControlJobs,
@@ -66,6 +67,12 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       deviceId === FAKE_PEER_DEVICE_ID
         ? { deviceId, name: "peer-node", canceledJobs: 0 }
         : undefined,
+    checkUpgrade: async () => ({
+      current: "0.5.0",
+      latest: "0.5.1",
+      available: true,
+    }),
+    upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
     ...overrides,
   };
 }
@@ -800,4 +807,84 @@ test("an oversized body on POST /control/unpair is rejected with 413, surface ne
   });
   expect(res.status).toBe(413);
   expect(called).toBe(false);
+});
+
+test("GET /control/upgrade/check returns the surface's answer", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "GET",
+    path: "/control/upgrade/check",
+  });
+  expect(response.status).toBe(200);
+  expect(response.json).toEqual({
+    current: "0.5.0",
+    latest: "0.5.1",
+    available: true,
+  });
+});
+
+test("POST /control/upgrade starts an upgrade and returns 202", async () => {
+  const calls: unknown[] = [];
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async (input) => {
+        calls.push(input);
+        return { from: "0.5.0", to: "0.5.2" };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ version: "0.5.2", force: true }),
+  });
+  expect(response.status).toBe(202);
+  expect(response.json).toEqual({ from: "0.5.0", to: "0.5.2" });
+  expect(calls).toEqual([{ targets: "self", version: "0.5.2", force: true }]);
+});
+
+test("POST /control/upgrade rejects a bad version with 400", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ version: "latest" }),
+  });
+  expect(response.status).toBe(400);
+});
+
+test.each([
+  ["busy", 409],
+  ["not-newer", 409],
+  ["verify-failed", 422],
+  ["fetch-failed", 502],
+] as const)("an UpgradeError %s maps to %i with its code", async (code, status) => {
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        throw new UpgradeError(code, `refused: ${code}`);
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  expect(response.status).toBe(status);
+  expect(response.json).toEqual({ error: `refused: ${code}`, code });
+});
+
+test("POST /control/upgrade still requires the control header", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { [CONTROL_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
 });
