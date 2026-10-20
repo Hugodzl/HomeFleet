@@ -321,3 +321,17 @@ test("unpair through the real control route: trust revoked live, the peer's job 
   );
   expect(restarted.trustStore.has(delegator.deviceId)).toBe(false);
 }, 90_000);
+
+test("a daemon without a shutdown hook refuses upgrades cleanly (409 unsupported) and reports no lastUpgrade", async () => {
+  const { daemon } = await h.startDaemon("solo");
+  const control = controlClientFor(daemon);
+
+  const error = await control
+    .upgrade({ targets: "self" })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ControlRequestError);
+  expect(error).toMatchObject({ status: 409, code: "unsupported" });
+
+  const status = await control.status();
+  expect(status.lastUpgrade).toBeUndefined();
+});

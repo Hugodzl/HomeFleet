@@ -44,6 +44,31 @@ export function versionOutput(argv: string[]): string | undefined {
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
   const config = await loadDaemonConfig(dataDir);
+  // Graceful shutdown: the first request stops once and exits 0; a second
+  // one while teardown is still running force-exits 1 (the operator's
+  // escape hatch from a hung stop). Signals AND the upgrade flow use it —
+  // declared first so the Daemon can be handed it.
+  let stopping = false;
+  const shutdown = (reason: string): void => {
+    if (stopping) {
+      writeStderrLine("homefleetd: forced exit");
+      process.exit(1);
+    }
+    stopping = true;
+    writeStderrLine(`homefleetd: ${reason}, shutting down`);
+    daemon.stop().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        writeStderrLine(
+          `homefleetd: shutdown failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        process.exit(1);
+      },
+    );
+  };
+
   const daemon = new Daemon({
     dataDir,
     config,
@@ -60,7 +85,10 @@ async function main(): Promise<void> {
     onDiagnostic: (message) => {
       writeStderrLine(`homefleetd: ${message}`);
     },
+    requestShutdown: shutdown,
   });
+  process.on("SIGINT", () => shutdown("SIGINT received"));
+  process.on("SIGTERM", () => shutdown("SIGTERM received"));
   await daemon.start();
 
   const info = daemon.nodeInfo();
@@ -71,32 +99,6 @@ async function main(): Promise<void> {
       `control http://${config.control.host}:${daemon.controlPort} ` +
       `data ${dataDir}`,
   );
-
-  // Graceful shutdown: the first signal stops once and exits 0; a second
-  // signal while teardown is still running force-exits 1 (the operator's
-  // escape hatch from a hung stop).
-  let stopping = false;
-  const shutdown = (signal: string): void => {
-    if (stopping) {
-      writeStderrLine("homefleetd: forced exit");
-      process.exit(1);
-    }
-    stopping = true;
-    writeStderrLine(`homefleetd: ${signal} received, shutting down`);
-    daemon.stop().then(
-      () => process.exit(0),
-      (error: unknown) => {
-        writeStderrLine(
-          `homefleetd: shutdown failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        process.exit(1);
-      },
-    );
-  };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 // Only run when invoked directly (bare node, tsx, or an npm -g symlink/shim),
