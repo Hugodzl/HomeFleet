@@ -1,7 +1,9 @@
 /**
  * The daemon's CONTROL API (M9 Unit 7): a loopback HTTP server the
  * `homefleet` CLI uses to drive pairing and unpairing, list nodes, read status, list
- * recent jobs, and serve the read-only dashboard against the RUNNING daemon.
+ * recent jobs, check for and start a self-upgrade (`GET /control/upgrade/check`,
+ * `POST /control/upgrade`), and serve the read-only dashboard against the
+ * RUNNING daemon.
  *
  * Why this exists: pairing is server-side state — the RESPONDER's live
  * `PairingManager` owns the currently-active pairing code, and the RUNNING
@@ -81,6 +83,12 @@
  * place of the static header value — not a rewrite of the network/browser
  * defenses above, which hold independently.
  *
+ * `POST /control/upgrade` joins that same same-OS-user trust boundary: it
+ * can only install a release whose manifest verifies under a PINNED key
+ * (../upgrade/manifest.ts), never caller-supplied bytes. Phase 4 of the
+ * fleet-upgrade spec adds the per-boot token before a browser page may
+ * trigger it.
+ *
  * `unpair` (the inverse trust-store write) is covered by the same sign-off:
  * a same-OS-user co-resident process can call it just as it can call
  * `pair/connect`. The worst it can do is REVOKE trust (a local denial of
@@ -108,10 +116,15 @@ import {
 } from "../dashboard/static.js";
 import { LOOPBACK_HOSTS } from "../mcp/http-transport.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
+import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
+import { UpgradeError } from "../upgrade/errors.js";
+import type { UpgradeResult } from "../upgrade/files.js";
 import {
   type PairConnectRequest,
   PairConnectRequestSchema,
   UnpairRequestSchema,
+  type UpgradeRequest,
+  UpgradeRequestSchema,
 } from "./messages.js";
 
 /**
@@ -143,6 +156,8 @@ export interface ControlStatus {
   models: ModelInfo[];
   activeJobs: number;
   maxConcurrentJobs: number;
+  /** The last upgrade's outcome on this node, if one ever ran (upgrade-result.json). */
+  lastUpgrade?: UpgradeResult;
 }
 
 /** One worker-side job (this node ran it for a peer), as `/control/jobs` reports it. */
@@ -230,6 +245,14 @@ export interface ControlSurface {
    * is NOT owner-scoped (see JobManager.list).
    */
   listJobs(): ControlJobs;
+  /** Compares the running version with the latest published release. */
+  checkUpgrade(): Promise<UpgradeCheck>;
+  /**
+   * Starts an upgrade of THIS node (see ../upgrade/coordinator.ts). Resolves
+   * once the updater has been started — the daemon shuts down right after.
+   * Refusals throw {@link UpgradeError}.
+   */
+  upgrade(input: UpgradeRequest): Promise<UpgradeStarted>;
   /**
    * Revokes a pairing on the LIVE daemon: removes `deviceId` from the trust
    * store (authoritative — every later HFP request from it gets 401), cancels
@@ -413,6 +436,26 @@ function describeIssues(
     .join("; ");
 }
 
+/** Refusals are conflicts with the node's state; upstream failures are not. */
+function upgradeErrorStatus(error: UpgradeError): number {
+  switch (error.code) {
+    case "fetch-failed":
+      return 502;
+    case "verify-failed":
+      return 422;
+    default:
+      return 409;
+  }
+}
+
+/** `{ error, code }`: the code lets the CLI tell refusals apart (e.g. busy → --force). */
+function respondUpgradeError(res: ServerResponse, error: UpgradeError): void {
+  respondJson(res, upgradeErrorStatus(error), {
+    error: error.message,
+    code: error.code,
+  });
+}
+
 /**
  * Starts the control HTTP front. Resolves once bound; the returned handle
  * exposes the bound port and a clean `close()`.
@@ -488,6 +531,46 @@ export async function startControlServer(
 
   async function handleJobs(res: ServerResponse): Promise<void> {
     respondJson(res, 200, surface.listJobs());
+  }
+
+  async function handleUpgradeCheck(res: ServerResponse): Promise<void> {
+    try {
+      respondJson(res, 200, await surface.checkUpgrade());
+    } catch (error) {
+      if (error instanceof UpgradeError) {
+        respondUpgradeError(res, error);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function handleUpgrade(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) {
+      return;
+    }
+    const parsed = UpgradeRequestSchema.safeParse(body.value);
+    if (!parsed.success) {
+      respondError(
+        res,
+        400,
+        `invalid upgrade request: ${describeIssues(parsed.error.issues)}`,
+      );
+      return;
+    }
+    try {
+      respondJson(res, 202, await surface.upgrade(parsed.data));
+    } catch (error) {
+      if (error instanceof UpgradeError) {
+        respondUpgradeError(res, error);
+        return;
+      }
+      throw error;
+    }
   }
 
   async function handleUnpair(
@@ -606,6 +689,14 @@ export async function startControlServer(
       }
       if (method === "GET" && pathname === "/control/jobs") {
         await handleJobs(res);
+        return;
+      }
+      if (method === "GET" && pathname === "/control/upgrade/check") {
+        await handleUpgradeCheck(res);
+        return;
+      }
+      if (method === "POST" && pathname === "/control/upgrade") {
+        await handleUpgrade(req, res);
         return;
       }
       respondError(res, 404, "not found");
