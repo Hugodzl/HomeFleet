@@ -18,6 +18,7 @@
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ModelInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "../config/config.js";
 import type { UpgradeStarted } from "../upgrade/coordinator.js";
 import {
@@ -364,6 +365,27 @@ async function runPair(args: string[], deps: CliDeps): Promise<number> {
   return 2;
 }
 
+/**
+ * `id (status)` per model — the startup probe's verdict is what tells an
+ * operator WHY a node refuses model jobs (e.g. `not_served`: the model
+ * server is up but serves a different id), without a control-API curl.
+ */
+function formatModels(models: ModelInfo[], separator: string): string {
+  return models
+    .map((model) =>
+      model.status !== undefined ? `${model.id} (${model.status})` : model.id,
+    )
+    .join(separator);
+}
+
+function formatLastUpgrade(last: UpgradeResult | undefined): string {
+  if (last === undefined) {
+    return "(none)";
+  }
+  const line = `${last.from} → ${last.to} ${last.outcome} at ${new Date(last.at).toISOString()}`;
+  return last.reason !== undefined ? `${line} (${last.reason})` : line;
+}
+
 async function runNodes(deps: CliDeps): Promise<number> {
   return withControlClient(deps, async (client) => {
     const nodes = await client.nodes();
@@ -375,6 +397,7 @@ async function runNodes(deps: CliDeps): Promise<number> {
       "NAME",
       "DEVICE ID",
       "REACHABLE",
+      "VERSION",
       "ROLES",
       "EXECUTORS",
       "MODELS",
@@ -383,12 +406,13 @@ async function runNodes(deps: CliDeps): Promise<number> {
       node.name,
       shortId(node.deviceId),
       node.reachable ? "yes" : "no",
+      node.nodeInfo?.daemonVersion ?? "-",
       node.nodeInfo !== undefined ? node.nodeInfo.roles.join(",") || "-" : "-",
       node.nodeInfo !== undefined
         ? node.nodeInfo.executors.join(",") || "-"
         : "-",
       node.nodeInfo !== undefined && node.nodeInfo.models.length > 0
-        ? node.nodeInfo.models.map((model) => model.id).join(",")
+        ? formatModels(node.nodeInfo.models, ",")
         : "-",
     ]);
     const widths = headers.map((header, columnIndex) =>
@@ -494,11 +518,10 @@ async function runStatus(deps: CliDeps): Promise<number> {
     deps.stdout(`controlPort: ${status.controlPort}`);
     deps.stdout(`roles: ${status.roles.join(", ") || "(none)"}`);
     deps.stdout(`executors: ${status.executors.join(", ") || "(none)"}`);
-    deps.stdout(
-      `models: ${status.models.map((model) => model.id).join(", ") || "(none)"}`,
-    );
+    deps.stdout(`models: ${formatModels(status.models, ", ") || "(none)"}`);
     deps.stdout(`activeJobs: ${status.activeJobs}`);
     deps.stdout(`maxConcurrentJobs: ${status.maxConcurrentJobs}`);
+    deps.stdout(`lastUpgrade: ${formatLastUpgrade(status.lastUpgrade)}`);
     return 0;
   });
 }

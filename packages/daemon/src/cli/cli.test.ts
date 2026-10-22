@@ -1075,3 +1075,118 @@ describe("upgrade", () => {
     expect(await runCli(["upgrade", ...args], h.deps)).toBe(2);
   });
 });
+
+describe("upgrade visibility (v0.5.1)", () => {
+  const baseStatus: ControlStatus = {
+    deviceId: FAKE_DEVICE_ID,
+    name: "test-node",
+    platform: "win32",
+    daemonVersion: "0.5.1",
+    protocolVersion: "0.3.0",
+    hfpPort: 56370,
+    mcpPort: 56372,
+    controlPort: 56373,
+    roles: ["execution"],
+    executors: ["command"],
+    models: [],
+    activeJobs: 0,
+    maxConcurrentJobs: 2,
+  };
+
+  function statusOutput(status: ControlStatus): Promise<string[]> {
+    const h = makeHarness({
+      controlClient: fakeControlClient({ status: async () => status }),
+    });
+    return runCli(["status"], h.deps).then((code) => {
+      expect(code).toBe(0);
+      return h.stdoutLines;
+    });
+  }
+
+  test("nodes shows each peer's VERSION and per-model status", async () => {
+    const h = makeHarness({
+      controlClient: fakeControlClient({
+        nodes: async () => [
+          {
+            deviceId: FAKE_PEER_DEVICE_ID,
+            name: "tower",
+            host: "192.168.68.73",
+            port: 56370,
+            reachable: true,
+            nodeInfo: {
+              deviceId: FAKE_PEER_DEVICE_ID,
+              name: "tower",
+              daemonVersion: "0.5.1",
+              protocolVersion: "0.3.0",
+              platform: "win32",
+              roles: ["inference"],
+              executors: ["write"],
+              models: [{ id: "qwen", status: "not_served" }, { id: "plain" }],
+              hardware: { cpu: "x", ramBytes: 1, gpus: [] },
+              maxConcurrentJobs: 2,
+              activeJobs: 0,
+            },
+          },
+          { deviceId: "c".repeat(64), name: "sleepy", reachable: false },
+        ],
+      }),
+    });
+    expect(await runCli(["nodes"], h.deps)).toBe(0);
+    const [header, tower, sleepy] = h.stdoutLines;
+    expect(header).toMatch(
+      /^NAME\s+DEVICE ID\s+REACHABLE\s+VERSION\s+ROLES\s+EXECUTORS\s+MODELS$/,
+    );
+    expect(tower).toMatch(/\byes\s+0\.5\.1\s+inference\b/);
+    expect(tower).toMatch(/qwen \(not_served\),plain$/);
+    expect(sleepy).toMatch(/\bno\s+-\s+-/);
+  });
+
+  test("status shows per-model status", async () => {
+    const lines = await statusOutput({
+      ...baseStatus,
+      models: [
+        { id: "a", status: "ok" },
+        { id: "b", status: "unreachable" },
+        { id: "c" },
+      ],
+    });
+    expect(lines).toContain("models: a (ok), b (unreachable), c");
+  });
+
+  test("status reports no upgrade when none ever ran", async () => {
+    expect(await statusOutput(baseStatus)).toContain("lastUpgrade: (none)");
+  });
+
+  test("status reports a successful last upgrade", async () => {
+    const lines = await statusOutput({
+      ...baseStatus,
+      lastUpgrade: {
+        from: "0.5.0",
+        to: "0.5.1",
+        outcome: "succeeded",
+        at: Date.UTC(2026, 9, 22, 10, 0, 0),
+      },
+    });
+    expect(lines).toContain(
+      "lastUpgrade: 0.5.0 → 0.5.1 succeeded at 2026-10-22T10:00:00.000Z",
+    );
+  });
+
+  test("status reports a rolled-back upgrade with its reason", async () => {
+    const lines = await statusOutput({
+      ...baseStatus,
+      daemonVersion: "0.5.1",
+      lastUpgrade: {
+        from: "0.5.1",
+        to: "0.5.2",
+        outcome: "rolled-back",
+        reason: "the 0.5.2 daemon did not report its version within 60000 ms",
+        at: Date.UTC(2026, 9, 22, 11, 0, 0),
+      },
+    });
+    expect(lines).toContain(
+      "lastUpgrade: 0.5.1 → 0.5.2 rolled-back at 2026-10-22T11:00:00.000Z " +
+        "(the 0.5.2 daemon did not report its version within 60000 ms)",
+    );
+  });
+});
