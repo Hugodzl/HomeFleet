@@ -77,6 +77,47 @@ add-a-new-machine a one-step flow on both ends (install on the new box,
 approve from an existing one — the fleet GUI above is the natural surface
 for the approval side).
 
+### Node lifecycle automation (daemon + model server)
+
+Keeping a node running is still hand work. The v0.5.0 rig rollout
+(2026-10-22) hit every step:
+
+- `npm i -g` replaces the files but not the running daemon; the tower kept
+  serving nothing on 56370 until homefleetd was found and restarted by hand.
+- Starting the installed daemon detached means a long `Start-Process node
+  "<npm root -g>\homefleet\dist\bin\homefleetd.js" …` line, and finding the
+  live process means a `Get-CimInstance` query (`daemon.pid` goes stale
+  across reboots). `homefleet setup` prints an at-logon Task Scheduler
+  command, but nothing applies or checks it.
+- llama-server doesn't come back after a reboot, and it must be up BEFORE
+  homefleetd: model status is probed once at startup, so a model server that
+  starts late stays `unreachable` until the daemon restarts.
+- Checking any of this needs the control API: `homefleet nodes` and
+  `homefleet status` don't show peer versions or per-model status.
+
+Brainstorm threads, roughly from cheapest to largest:
+
+- **`homefleet daemon start|stop|restart|status`** for the installed bin:
+  detached launch, log file, live-process lookup. The shipped equivalent of
+  the rig's `hf-daemon.ps1`, and the same launch the updater already does.
+- **Re-probe models periodically** (and on demand) so a late model server
+  turns `ok` without a daemon restart.
+- **Show versions and model status in the CLI** (`nodes`, `status`).
+- **Install the autostart for real:** `homefleet setup --apply` registers
+  the at-logon task (or a proper Windows service) and verifies it.
+- **Supervise the model server:** an optional per-model `launch` command the
+  daemon starts, health-checks and restarts (llama-server first; Ollama
+  already restarts itself). It runs a local process from config, so it
+  needs the same fail-closed treatment as `executors.*`.
+- **Restart a peer remotely** from the central node. It rides on fleet
+  upgrade Phase 3 (HFP push) and the A1 mutation story, and is a privileged
+  operation like A3.
+
+Overlaps B1 (painless install) and the fleet-upgrade spec
+(`specs/2026-09-25-fleet-upgrade-design.md`): `homefleet upgrade` already
+does the stop → install → relaunch → health-check for upgrades; this item is
+the same lifecycle for everything else.
+
 ### Coordination ideas
 
 Patterns borrowed from multi-agent products; the analysis is in
