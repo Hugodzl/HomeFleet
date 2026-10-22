@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.5.0 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.5.1 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
 > `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
@@ -80,7 +80,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.0) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.1) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
