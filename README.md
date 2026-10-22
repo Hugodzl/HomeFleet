@@ -20,16 +20,17 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > existing loopback control port, polling every 3 s with no mutating request.
 > v0.5 added **signed releases and self-upgrade** — `homefleet upgrade`
 > verifies a release against a pinned Ed25519 key, installs it, restarts the
-> daemon and rolls back if the new version fails — plus `homefleet unpair`
-> (self-upgrade's first real-hardware run is v0.5.0 → v0.5.1).
-> Everything through v0.4 has run on real hardware, laptop ↔ tower against a local
+> daemon and rolls back if the new version fails — plus `homefleet unpair`.
+> All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
 > wrote a new test file that landed and passed in ~169 s
 > ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)), both
 > rig machines installed v0.3 from its public release URL and passed delegation
 > in both directions, and the dashboard showed a live delegated job reach
-> `succeeded` against the tower ([dashboard devlog](devlog/2026-09-24-read-only-dashboard.md)).
+> `succeeded` against the tower ([dashboard devlog](devlog/2026-09-24-read-only-dashboard.md)),
+> and both machines self-upgraded 0.5.0 → 0.5.1 and rolled back a
+> deliberately broken build ([self-upgrade devlog](devlog/2026-10-22-first-self-upgrade.md)).
 > Windows-first; not on the npm registry yet. The
 > [Quickstart](#quickstart) runs today on a single machine; pairing two real
 > machines is the [two-machine demo](#two-machine-demo).
