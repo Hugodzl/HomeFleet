@@ -79,7 +79,7 @@ for the approval side).
 
 ### Fleet rollout: keep the final status across the requester's restart
 
-**Fixed (2026-10-23), unreleased:** the rollout saves its final status to
+**Fixed in v0.5.4 (2026-10-23)** — takes effect once the *requesting* node already runs v0.5.4 (the 0.5.3 → 0.5.4 rig push still showed the old behavior, since it ran in a 0.5.3 daemon and CLI; devlog 023 addendum). The rollout saves its final status to
 `<dataDir>/upgrades/rollout-status.json` (on every final step and at the self
 hand-off), the restarted daemon serves it from `GET /control/upgrades` with
 the self step settled, and the CLI re-reads it after the restart.
@@ -191,6 +191,18 @@ Workers cache recon summaries per repo, keyed by commit, and seed later jobs
 with them so repeat recon starts warm. Lowest priority: staleness is the
 real risk — the brainstorm is invalidation (commit distance, touched paths)
 and making reuse visible in the job result so it's never silent.
+
+### Flaky Windows test: oversized-body 413 in `mcp/http-transport.test.ts`
+
+"rejects an oversized body via an honest large content-length (413), stays
+up" occasionally fails on the Windows CI runner with `expected 'errored' to
+be 413`. The server answers 413 and closes the socket, and the client sees
+the reset before it reads the response. Seen on the v0.5.4 release-prep PR
+(passed on re-run) and probably the one-off failure during Phase 3; the test
+and the transport are unchanged since M9. Fix: let the client finish reading
+the 413 before the server destroys the socket (e.g. `res.end()` then destroy
+on `finish`, or read with `Connection: close`), or assert "413 or a reset
+after the 413 was written" in the test.
 
 ## Known technical debt (from v0.1)
 
