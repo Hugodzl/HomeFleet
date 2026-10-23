@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.5.1 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.5.2 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
 > `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
@@ -21,6 +21,10 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > v0.5 added **signed releases and self-upgrade** — `homefleet upgrade`
 > verifies a release against a pinned Ed25519 key, installs it, restarts the
 > daemon and rolls back if the new version fails — plus `homefleet unpair`.
+> v0.5.2 adds **fleet push** (HFP 0.4.0) — `homefleet fleet upgrade` rolls a
+> release across your paired nodes from one terminal. Peers opt in with
+> `"upgrade": { "allowRemote": true }`; its first real-hardware run is after
+> publishing.
 > All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
@@ -81,7 +85,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.1) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.2) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
@@ -94,6 +98,14 @@ downloads the latest release, checks its signature, installs it, restarts
 the daemon in the background and rolls back automatically if the new
 version fails to start. `homefleet upgrade --check` only reports what is
 available. Upgrading *to* v0.5.0 is the last manual `npm i -g`.
+
+To upgrade the whole fleet from one node, run `homefleet fleet upgrade`
+(optionally `--to <version>`, or `--nodes <name|id>…` to pick peers). The
+daemon rolls the release out sequentially, peers first and this node last,
+and stops at the first rollback, failure or timeout; a peer that refuses or
+is too old is reported and skipped. A peer takes the push only if its config
+has `"upgrade": { "allowRemote": true }` (off by default) and it already runs
+v0.5.2 or later, so older nodes make that hop with a local `homefleet upgrade`.
 
 Then scaffold the machine with `homefleet setup` (below).
 
@@ -275,7 +287,7 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → unpair a node ([A1's first mutation](docs/specs/2026-09-25-unpair-node-design.md) — done, v0.5) → fleet upgrade ([spec](docs/specs/2026-09-25-fleet-upgrade-design.md) — signed releases + local `homefleet upgrade` done, v0.5; fleet push and dashboard trigger next) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → unpair a node ([A1's first mutation](docs/specs/2026-09-25-unpair-node-design.md) — done, v0.5) → fleet upgrade ([spec](docs/specs/2026-09-25-fleet-upgrade-design.md) — signed releases + local `homefleet upgrade` done, v0.5; fleet push `homefleet fleet upgrade` done, v0.5.2; dashboard trigger next) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
 
 Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
 
