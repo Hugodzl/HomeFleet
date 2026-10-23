@@ -1,12 +1,27 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { NodeInfo } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
+import { HfpRequestError } from "../transport/client.js";
 import { UpgradeError } from "./errors.js";
-import { createFleetUpgradeSurface } from "./fleet-upgrade.js";
+import {
+  readRolloutStatusSync,
+  readUpgradeResultSync,
+  writeRolloutStatus,
+} from "./files.js";
+import {
+  createFleetUpgradeSurface,
+  type FleetUpgradeSurfaceOptions,
+} from "./fleet-upgrade.js";
 import { manifestFileName, signatureFileName } from "./manifest.js";
 import type { PreparedRelease } from "./prepare.js";
-import type { RolloutStartInput, RolloutStatus } from "./rollout.js";
+import {
+  FleetRollout,
+  type RolloutStartInput,
+  type RolloutStatus,
+  restoreRolloutStatus,
+} from "./rollout.js";
 
 const PEER = "b".repeat(64);
 const dirs: string[] = [];
@@ -29,7 +44,11 @@ function status(state: RolloutStatus["state"]): RolloutStatus {
 }
 
 async function harness(
-  opts: { running?: boolean; prepare?: () => Promise<PreparedRelease> } = {},
+  opts: {
+    running?: boolean;
+    prepare?: () => Promise<PreparedRelease>;
+    rollout?: FleetUpgradeSurfaceOptions["rollout"];
+  } = {},
 ) {
   const upgradesDir = await mkdtemp(path.join(tmpdir(), "hf-fleet-"));
   dirs.push(upgradesDir);
@@ -47,7 +66,7 @@ async function harness(
     ? status("running")
     : undefined;
   const surface = createFleetUpgradeSurface({
-    rollout: {
+    rollout: opts.rollout ?? {
       start: async (input) => {
         calls.start.push(input);
         current = status("running");
@@ -196,4 +215,75 @@ test("a prepare failure surfaces as its UpgradeError and frees the lock", async 
   fail = false;
   await surface.upgrade({ targets: "fleet" });
   expect(calls.start).toHaveLength(1);
+});
+
+test("the final rollout survives this node's restart: written at handoff, served (settled) after", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hf-fleet-data-"));
+  dirs.push(dataDir);
+  const peerEntry = {
+    deviceId: PEER,
+    name: "tower",
+    host: "127.0.0.1",
+    port: 1,
+    reachable: true,
+    nodeInfo: { daemonVersion: "0.5.0" } as NodeInfo,
+  };
+  const makeRollout = (currentVersion: string) =>
+    new FleetRollout({
+      peers: {
+        list: async () => [peerEntry],
+        push: async () => {
+          throw new HfpRequestError(
+            403,
+            { code: "UPGRADE_DISABLED", message: "remote upgrades are off" },
+            "forbidden",
+          );
+        },
+        hello: async () => undefined,
+      },
+      currentVersion,
+      upgradeSelf: async () => ({ from: "0.5.0", to: "0.5.2" }),
+      persist: (s) => writeRolloutStatus(dataDir, s),
+      previous: () => {
+        const saved = readRolloutStatusSync(dataDir);
+        return (
+          saved &&
+          restoreRolloutStatus(saved, {
+            daemonVersion: currentVersion,
+            lastUpgrade: readUpgradeResultSync(dataDir),
+          })
+        );
+      },
+    });
+
+  // Before the restart: the peer refuses fast, self hands off.
+  const before = makeRollout("0.5.0");
+  await before.start({
+    prepared: { version: "0.5.2" } as PreparedRelease,
+    manifestBytes: Buffer.from("m"),
+    signature: "s",
+  });
+  for (
+    let i = 0;
+    i < 200 && readRolloutStatusSync(dataDir) === undefined;
+    i++
+  ) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  expect(readRolloutStatusSync(dataDir)?.self.state).toBe("restarting");
+
+  // After it: a fresh daemon on 0.5.2 serves the saved rollout, settled.
+  const after = makeRollout("0.5.2");
+  const { surface, calls } = await harness({ rollout: after });
+  expect(surface.upgrades()).toMatchObject({
+    state: "done",
+    peers: [
+      { name: "tower", state: "refused", reason: "remote upgrades are off" },
+    ],
+    self: { state: "succeeded" },
+  });
+  // ...and it does not count as a running rollout.
+  await expect(surface.upgrade({ targets: "fleet" })).resolves.toBeDefined();
+  expect(calls.prepare).toEqual(["0.5.2"]);
+  await after.abort(); // let the new loop's save land before the temp dir goes
 });

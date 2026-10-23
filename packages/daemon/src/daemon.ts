@@ -14,11 +14,7 @@ import {
   type FinalizeWriteFn,
   WriteExecutor,
 } from "@homefleet/executors";
-import {
-  HFP_PROTOCOL_VERSION,
-  type NodeInfo,
-  UpgradeAcceptedSchema,
-} from "@homefleet/protocol";
+import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
 import {
   type ControlJobs,
@@ -59,9 +55,11 @@ import {
   type UpgradeCoordinatorOptions,
 } from "./upgrade/coordinator.js";
 import {
+  readRolloutStatusSync,
   readUpgradeResultSync,
   toLastUpgrade,
   upgradesDir,
+  writeRolloutStatus,
 } from "./upgrade/files.js";
 import { createFleetUpgradeSurface } from "./upgrade/fleet-upgrade.js";
 import { prepareRelease } from "./upgrade/prepare.js";
@@ -69,7 +67,8 @@ import {
   GitHubReleaseSource,
   type ReleaseSource,
 } from "./upgrade/release-source.js";
-import { FleetRollout } from "./upgrade/rollout.js";
+import { FleetRollout, restoreRolloutStatus } from "./upgrade/rollout.js";
+import { createRolloutPeers } from "./upgrade/rollout-peers.js";
 import { registerUpgradeRoutes } from "./upgrade/routes.js";
 import { DAEMON_VERSION } from "./version.js";
 import { ArtifactStore } from "./workspace/artifact-store.js";
@@ -680,45 +679,29 @@ export class Daemon {
         : {}),
     });
     const rollout = new FleetRollout({
-      peers: {
-        list: () => nodeDirectory.list(),
-        push: async (entry, request) => {
-          if (entry.host === undefined || entry.port === undefined) {
-            throw new Error("no known address for this node");
-          }
-          await hfpClient.request({
-            host: entry.host,
-            port: entry.port,
-            expectedDeviceId: entry.deviceId,
-            method: "POST",
-            path: "/upgrade",
-            body: request,
-            responseSchema: UpgradeAcceptedSchema,
-          });
-        },
-        hello: async (entry) => {
-          if (entry.host === undefined || entry.port === undefined) {
-            return undefined;
-          }
-          try {
-            const { nodeInfo } = await hfpClient.hello(
-              {
-                host: entry.host,
-                port: entry.port,
-                expectedDeviceId: entry.deviceId,
-                timeoutMs: 2000,
-              },
-              nodeInfoProvider(),
-            );
-            return nodeInfo;
-          } catch {
-            return undefined;
-          }
-        },
-      },
+      peers: createRolloutPeers({
+        nodeDirectory,
+        client: hfpClient,
+        ourNodeInfo: nodeInfoProvider,
+      }),
       currentVersion: this.daemonVersion,
       upgradeSelf: (input) => upgrades.upgradeSelf(input),
+      // Saved on every final step and when this node's own upgrade hands
+      // off: that restart would lose the status the CLI is still reading.
+      persist: (status) => writeRolloutStatus(dataDir, status),
+      previous: () => {
+        const saved = readRolloutStatusSync(dataDir);
+        return (
+          saved &&
+          restoreRolloutStatus(saved, {
+            daemonVersion: this.daemonVersion,
+            lastUpgrade: readUpgradeResultSync(dataDir),
+          })
+        );
+      },
     });
+    // A rollout still polling a peer must not outlive the daemon.
+    this.teardown.push(() => rollout.abort());
     const fleetUpgrades = createFleetUpgradeSurface({
       rollout,
       coordinator: upgrades,

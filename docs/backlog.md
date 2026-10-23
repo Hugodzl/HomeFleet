@@ -79,6 +79,11 @@ for the approval side).
 
 ### Fleet rollout: keep the final status across the requester's restart
 
+**Fixed (2026-10-23), unreleased:** the rollout saves its final status to
+`<dataDir>/upgrades/rollout-status.json` (on every final step and at the self
+hand-off), the restarted daemon serves it from `GET /control/upgrades` with
+the self step settled, and the CLI re-reads it after the restart.
+
 Found in the v0.5.3 rig run (devlog 023). When the requesting node upgrades
 itself as the last step of `homefleet fleet upgrade`, its daemon restarts and
 the in-memory rollout status is lost. If peers settle between two CLI polls,

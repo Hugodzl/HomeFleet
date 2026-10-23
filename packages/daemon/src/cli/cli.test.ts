@@ -1327,6 +1327,56 @@ describe("fleet upgrade", () => {
     ]);
   });
 
+  test("a peer refused between polls, then self restarts: the summary re-reads the saved rollout", async () => {
+    const statuses = [statusAt("0.5.0"), statusAt("0.5.2")];
+    const refused = peer(PEER_A, "tower", "refused", {
+      reason: "UPGRADE_DISABLED: remote upgrades are disabled on this node",
+    });
+    const h = harness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.2"),
+        upgrade: async () =>
+          rollout([peer(PEER_A, "tower", "pending")], { state: "pending" }),
+        upgrades: replay([
+          // The last poll before this node's restart: tower still pushing.
+          rollout([peer(PEER_A, "tower", "pushing")], { state: "pending" }),
+          // The daemon went down: tower was refused, self handed off.
+          new DaemonUnreachableError("127.0.0.1", 1, new Error("down")),
+          // The restarted daemon serves the rollout it saved.
+          rollout([refused], { state: "succeeded" }, "done"),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stdoutLines).toContain("Upgraded to 0.5.2.");
+    expect(h.stderrLines).toContain(
+      "Rollout finished with problems: 1 upgraded.",
+    );
+    expect(h.stderrLines).toContain(
+      "tower: refused (UPGRADE_DISABLED: remote upgrades are disabled on this node)",
+    );
+    expect(h.stderrLines.join("\n")).not.toContain("pushing");
+  });
+
+  test("after the restart, a daemon without the saved rollout falls back to the last poll", async () => {
+    const statuses = [statusAt("0.5.0"), statusAt("0.5.2")];
+    const h = harness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.2"),
+        upgrade: async () =>
+          rollout([peer(PEER_A, "alpha", "pending")], { state: "pending" }),
+        upgrades: replay([
+          rollout([peer(PEER_A, "alpha", "succeeded")], {
+            state: "restarting",
+          }),
+          null,
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
+    expect(h.stdoutLines.at(-1)).toBe("Rollout complete: 2 upgraded.");
+  });
+
   test("stops and exits 1 when a peer rolls back", async () => {
     const h = harness(
       fakeControlClient({

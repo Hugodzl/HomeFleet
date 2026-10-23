@@ -139,12 +139,27 @@ describe("FallbackReleaseSource", () => {
     ]);
   });
 
-  test("rejects with the last error when every source fails", async () => {
+  test("rejects with every source's reason, in order, when all fail", async () => {
     const { root } = await origin();
-    const source = new FallbackReleaseSource([failing("one"), failing("two")]);
+    const source = new FallbackReleaseSource([
+      failing("peer: connection refused"),
+      failing("GitHub: 404"),
+    ]);
+    const error = await source
+      .fetchRelease("0.5.1", path.join(root, "dest"))
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ReleaseFetchError);
+    expect((error as Error).message).toBe(
+      "peer: connection refused; then GitHub: 404",
+    );
+  });
+
+  test("a single source's error passes through unchanged", async () => {
+    const { root } = await origin();
+    const source = new FallbackReleaseSource([failing("only")]);
     await expect(
       source.fetchRelease("0.5.1", path.join(root, "dest")),
-    ).rejects.toThrow("two");
+    ).rejects.toThrow(/^only$/);
   });
 
   test("latestVersion delegates to the last source", async () => {

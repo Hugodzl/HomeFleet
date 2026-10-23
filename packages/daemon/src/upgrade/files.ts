@@ -9,11 +9,13 @@
  *   <dataDir>/upgrades/upgrade-state.json  the updater's only input
  *   <dataDir>/upgrades/upgrade.lock        one upgrade at a time
  *   <dataDir>/upgrades/updater.log         the updater's own log
+ *   <dataDir>/upgrades/rollout-status.json the last fleet rollout (daemon only)
  */
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { LastUpgrade } from "@homefleet/protocol";
+import type { RolloutStatus } from "./rollout.js";
 import { isSemver } from "./semver.js";
 
 export const UPGRADES_DIRNAME = "upgrades";
@@ -22,6 +24,7 @@ export const LOCK_FILE = "upgrade.lock";
 export const RESULT_FILE = "upgrade-result.json";
 export const UPDATER_FILE = "updater.mjs";
 export const UPDATER_LOG = "updater.log";
+export const ROLLOUT_STATUS_FILE = "rollout-status.json";
 export const STALE_LOCK_MS = 10 * 60_000;
 
 export function upgradesDir(dataDir: string): string {
@@ -211,6 +214,54 @@ export function readUpgradeResultSync(
       ...(typeof json.reason === "string" ? { reason: json.reason } : {}),
       at: json.at,
     };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Saves the last fleet rollout's status so it survives this daemon's own
+ * restart (the rollout upgrades the requesting node last).
+ */
+export async function writeRolloutStatus(
+  dataDir: string,
+  status: RolloutStatus,
+): Promise<void> {
+  const dir = upgradesDir(dataDir);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, ROLLOUT_STATUS_FILE),
+    `${JSON.stringify(status, null, 2)}
+`,
+  );
+}
+
+/** Sync on purpose: read from the synchronous control `upgrades()`. Absent/corrupt → undefined. */
+export function readRolloutStatusSync(
+  dataDir: string,
+): RolloutStatus | undefined {
+  try {
+    const json = JSON.parse(
+      readFileSync(
+        path.join(upgradesDir(dataDir), ROLLOUT_STATUS_FILE),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    const self = json.self as Record<string, unknown> | null | undefined;
+    if (
+      typeof json.id !== "string" ||
+      typeof json.target !== "string" ||
+      !isSemver(json.target) ||
+      typeof json.startedAt !== "string" ||
+      typeof json.state !== "string" ||
+      !Array.isArray(json.peers) ||
+      typeof self !== "object" ||
+      self === null ||
+      typeof self.state !== "string"
+    ) {
+      return undefined;
+    }
+    return json as unknown as RolloutStatus;
   } catch {
     return undefined;
   }
