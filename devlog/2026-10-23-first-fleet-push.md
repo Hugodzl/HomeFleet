@@ -114,3 +114,26 @@ applies once the requesting node already runs 0.5.4, so the next push
 Also seen while cutting v0.5.4: a pre-existing Windows CI flake in
 `mcp/http-transport.test.ts` (oversized body → 413, the client sees the reset
 first). It passed on re-run and is now a backlog item.
+
+## Addendum: v0.5.5, the saved rollout status proven (2026-10-23 evening)
+
+v0.5.5 re-probes the model catalog every 60 s, so a late llama-server turns
+`ok` without a daemon restart. It also fixes two flaky tests:
+
+- the Windows 413 test, which now sends headers only;
+- a concurrent-push test that assumed the first of two simultaneous pushes
+  always wins. Either may win, and the coordinator always accepted exactly
+  one; it failed about 1 run in 8.
+
+The third fleet push (`homefleet fleet upgrade` on the laptop, 0.5.4 → 0.5.5)
+was the first run with a requester that already had v0.5.4's saved rollout
+status. It recreated exactly the situation that misreported twice before:
+the CLI's last poll saw `tower: restarting`, and then the laptop restarted
+to upgrade itself. This time the CLI read the saved status back and printed
+**"Rollout complete: 2 upgraded."**, exit 0, 39 s. Afterwards the restarted
+laptop daemon served `GET /control/upgrades` with
+`{state: "done", peers: [tower: succeeded], self: {state: "succeeded"}}`.
+Both nodes are on 0.5.5, with the tower's model `ok`.
+
+Fleet upgrade Phases 1–3 are now proven end to end on the rig. Next is
+Phase 4: the dashboard trigger and the per-boot control token.
