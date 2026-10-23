@@ -1,4 +1,12 @@
-import { copyFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { UpgradeRequest as HfpUpgradeRequest } from "@homefleet/protocol";
@@ -307,7 +315,7 @@ test("acceptRemote rejects a manifest for a different version than requested", a
 });
 
 test("acceptRemote downloads from the requester first", async () => {
-  const { origin, keys, coordinator, spawned, source } = await setup({
+  const { root, origin, keys, coordinator, spawned, source } = await setup({
     allowRemote: true,
     resolvePeer: () => PEER,
   });
@@ -321,9 +329,15 @@ test("acceptRemote downloads from the requester first", async () => {
     }),
   ).resolves.toEqual({ version: "0.5.1" });
   await vi.waitFor(() => expect(spawned).toHaveLength(1));
-  expect(peer.fetched).toContain("0.5.1");
-  // The peer serves both the target and the rollback copy here.
-  expect(source.fetchCount).toBe(0);
+  expect(peer.fetched).toEqual(["0.5.1"]);
+  // Target from the peer; the rollback copy (0.5.0) from the fake GitHub.
+  expect(source.fetchCount).toBe(1);
+  const state = JSON.parse(
+    await readFile(path.join(upgradesDir(root), STATE_FILE), "utf8"),
+  ) as UpgradeState;
+  expect(state.rollbackTarballPath).toBe(
+    path.join(upgradesDir(root), "0.5.0", "homefleet-0.5.0.tgz"),
+  );
 });
 
 test("acceptRemote falls back to GitHub when the requester is unknown", async () => {
@@ -363,4 +377,57 @@ test("a background failure is recorded as a failed lastUpgrade", async () => {
     }),
   );
   expect(spawned).toEqual([]);
+});
+
+test("two back-to-back acceptRemote calls: the second is refused with locked", async () => {
+  const { origin, keys, coordinator, spawned } = await setup({
+    allowRemote: true,
+  });
+  const request = await pushOf(origin, keys, "0.5.1");
+  const args = {
+    request,
+    requesterDeviceId: "peer-1",
+    client: fakeClient(origin).client,
+  };
+  const first = coordinator.acceptRemote(args);
+  const second = coordinator.acceptRemote(args);
+  await expect(first).resolves.toEqual({ version: "0.5.1" });
+  await expect(codeOf(second)).resolves.toBe("locked");
+  await vi.waitFor(() => expect(spawned).toHaveLength(1));
+});
+
+test("acceptRemote while a live lock file exists → locked", async () => {
+  const { root, origin, keys, coordinator } = await setup({
+    allowRemote: true,
+  });
+  const dir = upgradesDir(root);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "upgrade.lock"),
+    JSON.stringify({ pid: process.pid, at: Date.now() }),
+  );
+  const request = await pushOf(origin, keys, "0.5.1");
+  await expect(
+    codeOf(
+      coordinator.acceptRemote({
+        request,
+        requesterDeviceId: "peer-1",
+        client: fakeClient(origin).client,
+      }),
+    ),
+  ).resolves.toBe("locked");
+});
+
+test("upgradeSelf during a pending remote run → locked", async () => {
+  const { origin, keys, coordinator, spawned } = await setup({
+    allowRemote: true,
+  });
+  const request = await pushOf(origin, keys, "0.5.1");
+  await coordinator.acceptRemote({
+    request,
+    requesterDeviceId: "peer-1",
+    client: fakeClient(origin).client,
+  });
+  await expect(codeOf(coordinator.upgradeSelf({}))).resolves.toBe("locked");
+  await vi.waitFor(() => expect(spawned).toHaveLength(1));
 });

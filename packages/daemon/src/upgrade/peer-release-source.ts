@@ -32,6 +32,15 @@ export class PeerReleaseSource implements ReleaseSource {
     },
   ) {}
 
+  private pushedVersion(): string | undefined {
+    try {
+      const parsed = JSON.parse(this.options.manifestBytes.toString("utf8"));
+      return typeof parsed?.version === "string" ? parsed.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   latestVersion(): Promise<string> {
     return Promise.reject(
       new ReleaseFetchError("a peer source has no latest version"),
@@ -42,6 +51,14 @@ export class PeerReleaseSource implements ReleaseSource {
     version: string,
     destDir: string,
   ): Promise<FetchedRelease> {
+    // The push covers exactly one version. Serving the manifest under another
+    // name (e.g. the rollback copy) would fail verification and, worse, stop
+    // the fallback from trying the next source.
+    if (version !== this.pushedVersion()) {
+      throw new ReleaseFetchError(
+        `the requester only serves ${this.pushedVersion()}, not ${version}`,
+      );
+    }
     await mkdir(destDir, { recursive: true });
     const { client, target, manifestBytes, signature } = this.options;
     await writeFile(

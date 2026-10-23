@@ -82,3 +82,28 @@ test("latestVersion throws: a peer source has no latest version", async () => {
   });
   await expect(source.latestVersion()).rejects.toThrow(ReleaseFetchError);
 });
+
+test("fetchRelease for a version other than the pushed one rejects without touching the client", async () => {
+  const keys = makeTestKeys();
+  const origin = await writeSignedRelease(
+    path.join(root, "origin"),
+    "1.2.3",
+    keys,
+  );
+  let calls = 0;
+  const client: Pick<HfpClient, "fetchUpgradeTarball"> = {
+    async fetchUpgradeTarball() {
+      calls++;
+    },
+  };
+  const source = new PeerReleaseSource({
+    client,
+    target: TARGET,
+    manifestBytes: origin.manifestBytes,
+    signature: origin.signature,
+  });
+  await expect(
+    source.fetchRelease("1.2.2", path.join(root, "dest")),
+  ).rejects.toBeInstanceOf(ReleaseFetchError);
+  expect(calls).toBe(0);
+});

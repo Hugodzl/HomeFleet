@@ -122,6 +122,25 @@ export async function acquireLock(
   return false;
 }
 
+/** True when a non-stale lock exists (same staleness rule as acquireLock); never takes it over. */
+export async function isLockHeld(dir: string, now: number): Promise<boolean> {
+  let held: { pid: number; at: number } | undefined;
+  try {
+    held = JSON.parse(await readFile(path.join(dir, LOCK_FILE), "utf8")) as {
+      pid: number;
+      at: number;
+    };
+  } catch (error) {
+    // Absent: free. Present but unreadable/corrupt: acquireLock takes it over.
+    void error;
+    return false;
+  }
+  if (typeof held?.pid !== "number" || typeof held.at !== "number") {
+    return false;
+  }
+  return !(now - held.at > STALE_LOCK_MS && !isPidAlive(held.pid));
+}
+
 export async function releaseLock(dir: string): Promise<void> {
   await rm(path.join(dir, LOCK_FILE), { force: true });
 }

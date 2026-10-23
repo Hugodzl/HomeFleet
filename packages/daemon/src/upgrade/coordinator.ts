@@ -18,6 +18,7 @@ import type { HfpClient, HfpTarget } from "../transport/client.js";
 import { UpgradeError } from "./errors.js";
 import {
   acquireLock,
+  isLockHeld,
   releaseLock,
   UPDATER_FILE,
   upgradesDir,
@@ -94,6 +95,8 @@ export function defaultInstallCommand(platform: NodeJS.Platform): string[] {
 
 export class UpgradeCoordinator {
   private inProgress = false;
+  /** A remote push was accepted and its background run has not finished starting. */
+  private pendingRemote = false;
 
   constructor(private readonly options: UpgradeCoordinatorOptions) {}
 
@@ -104,6 +107,13 @@ export class UpgradeCoordinator {
   }
 
   async upgradeSelf(input: UpgradeSelfInput): Promise<UpgradeStarted> {
+    if (this.pendingRemote) {
+      throw new UpgradeError("locked", "an upgrade is already in progress");
+    }
+    return this.runUpgrade(input);
+  }
+
+  private async runUpgrade(input: UpgradeSelfInput): Promise<UpgradeStarted> {
     const { requestShutdown } = this.options;
     if (requestShutdown === undefined) {
       throw new UpgradeError(
@@ -217,10 +227,21 @@ export class UpgradeCoordinator {
         "this daemon was not started by homefleetd, so it cannot restart itself",
       );
     }
-    // In-memory flag only: a held lock file is re-checked by upgradeSelf
-    // (acquireLock) and surfaces as a failed lastUpgrade instead.
-    if (this.inProgress) {
-      throw new UpgradeError("locked", "an upgrade is already in progress");
+    const busy = () =>
+      new UpgradeError("locked", "an upgrade is already in progress");
+    if (this.inProgress || this.pendingRemote) {
+      throw busy();
+    }
+    if (await isLockHeld(upgradesDir(this.options.dataDir), Date.now())) {
+      throw new UpgradeError(
+        "locked",
+        "another upgrade holds upgrades/upgrade.lock",
+      );
+    }
+    // Re-check: another push may have been accepted while we read the lock.
+    // Nothing below awaits until pendingRemote is set.
+    if (this.inProgress || this.pendingRemote) {
+      throw busy();
     }
     const manifestBytes = Buffer.from(request.manifest, "base64");
     const verified = verifyManifestSignature({
@@ -269,15 +290,21 @@ export class UpgradeCoordinator {
     const source = new FallbackReleaseSource(
       peer !== undefined ? [peer, this.options.source] : [this.options.source],
     );
-    void this.upgradeSelf({ version, source }).catch(async (error: unknown) => {
-      await writeUpgradeResult(this.options.dataDir, {
-        from,
-        to: version,
-        outcome: "failed",
-        reason: error instanceof Error ? error.message : String(error),
-        at: Date.now(),
-      }).catch(() => undefined);
-    });
+    this.pendingRemote = true;
+    void this.runUpgrade({ version, source })
+      .catch(async (error: unknown) => {
+        await writeUpgradeResult(this.options.dataDir, {
+          from,
+          to: version,
+          outcome: "failed",
+          reason: error instanceof Error ? error.message : String(error),
+          at: Date.now(),
+        }).catch(() => undefined);
+      })
+      .finally(() => {
+        // Success: inProgress now holds the node. Failure: free again.
+        this.pendingRemote = false;
+      });
     return { version };
   }
 
