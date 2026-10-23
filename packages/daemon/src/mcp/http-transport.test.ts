@@ -246,10 +246,47 @@ test("allow-lists are populated (non-empty) once started (fail-closed by constru
   expect(server.allowedOrigins).toContain(`http://127.0.0.1:${server.port}`);
 });
 
+/**
+ * POST only the HEADERS of a request that declares `declaredLength` bytes,
+ * then read the response. The content-length fast path refuses on the
+ * declared size alone, so no body is needed. Sending one would race the
+ * server's close: on Windows, closing with unread bytes in the receive
+ * buffer sends an RST that can discard the 413 before the client reads it.
+ */
+function rawPostDeclaredLength(
+  port: number,
+  declaredLength: number,
+): Promise<number | "errored"> {
+  return new Promise((resolve) => {
+    const req = request({
+      host: "127.0.0.1",
+      port,
+      method: "POST",
+      path: "/mcp",
+      agent: false,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        host: `127.0.0.1:${port}`,
+        "content-length": String(declaredLength),
+      },
+    });
+    req.on("response", (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+      req.destroy();
+    });
+    req.on("error", () => resolve("errored"));
+    req.flushHeaders();
+  });
+}
+
 test("rejects an oversized body via an honest large content-length (413), stays up", async () => {
   const server = await start();
-  const oversized = Buffer.alloc(MAX_MCP_REQUEST_BYTES + 1024, 0x20); // spaces
-  const status = await rawPostBody(server.port, oversized);
+  const status = await rawPostDeclaredLength(
+    server.port,
+    MAX_MCP_REQUEST_BYTES + 1024,
+  );
   expect(status).toBe(413);
 
   // The daemon survived and still serves a normal request.
