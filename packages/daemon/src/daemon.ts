@@ -51,7 +51,7 @@ import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
 import { UpgradeCoordinator } from "./upgrade/coordinator.js";
-import { readUpgradeResultSync } from "./upgrade/files.js";
+import { readUpgradeResultSync, toLastUpgrade } from "./upgrade/files.js";
 import {
   GitHubReleaseSource,
   type ReleaseSource,
@@ -520,6 +520,10 @@ export class Daemon {
       config,
       daemonVersion: DAEMON_VERSION,
       jobs: jobManager,
+      lastUpgrade: () => {
+        const result = readUpgradeResultSync(dataDir);
+        return result && toLastUpgrade(result);
+      },
       models: advertisedModels(catalog, modelStatuses),
     });
     const pairingManager = new PairingManager({

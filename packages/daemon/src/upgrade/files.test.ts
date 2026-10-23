@@ -9,6 +9,7 @@ import {
   readUpgradeResultSync,
   releaseLock,
   STALE_LOCK_MS,
+  toLastUpgrade,
 } from "./files.js";
 
 const dirs: string[] = [];
@@ -85,4 +86,29 @@ test("readUpgradeResultSync: absent, valid, corrupt", async () => {
   });
   await writeFile(path.join(dataDir, RESULT_FILE), "{");
   expect(readUpgradeResultSync(dataDir)).toBeUndefined();
+});
+
+test("toLastUpgrade maps to -> version and epoch ms -> ISO string", () => {
+  const at = Date.UTC(2026, 9, 22, 18);
+  expect(
+    toLastUpgrade({
+      from: "0.5.1",
+      to: "0.5.2",
+      outcome: "rolled-back",
+      reason: "r",
+      at,
+    }),
+  ).toEqual({
+    version: "0.5.2",
+    outcome: "rolled-back",
+    reason: "r",
+    at: "2026-10-22T18:00:00.000Z",
+  });
+  const noReason = toLastUpgrade({
+    from: "0.5.1",
+    to: "0.5.2",
+    outcome: "succeeded",
+    at,
+  });
+  expect("reason" in noReason).toBe(false);
 });

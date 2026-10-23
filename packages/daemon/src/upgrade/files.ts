@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { LastUpgrade } from "@homefleet/protocol";
 
 export const UPGRADES_DIRNAME = "upgrades";
 export const STATE_FILE = "upgrade-state.json";
@@ -55,6 +56,20 @@ export interface UpgradeResult {
   reason?: string;
   /** Epoch ms when the updater finished. */
   at: number;
+}
+
+/**
+ * Maps the on-disk result (epoch ms, from/to) to its wire shape for
+ * NodeInfo: `to` becomes `version` and `at` an ISO 8601 UTC string. `reason`
+ * is omitted (not undefined) when absent.
+ */
+export function toLastUpgrade(result: UpgradeResult): LastUpgrade {
+  return {
+    version: result.to,
+    outcome: result.outcome,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+    at: new Date(result.at).toISOString(),
+  };
 }
 
 export function isPidAlive(pid: number): boolean {
