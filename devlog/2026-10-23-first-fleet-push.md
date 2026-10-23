@@ -95,3 +95,22 @@ directory just before the self-upgrade hands off, and serve it from
   (backlog, under fleet upgrade).
 - Hardening follow-ups from the Phase 3 final review (separate session).
 - Fleet upgrade Phase 4: the dashboard trigger and the per-boot control token.
+
+## Addendum: v0.5.4, the second fleet push (2026-10-23)
+
+v0.5.4 ships the Phase 3 hardening (Hugodzl/HomeFleet#8), including the fix
+for the stale CLI summary above: the final rollout status now survives the
+requester's restart. The second fleet push (`homefleet fleet upgrade` on the
+laptop, 0.5.3 → 0.5.4) took 55 s and left both nodes on 0.5.4: the tower
+first (`lastUpgrade` succeeded, model `ok`), then the laptop itself last
+(`0.5.3 → 0.5.4 succeeded`, daemon restarted under its Task Scheduler task).
+
+The CLI still printed a stale `tower: restarting` and exited 1. **That run
+couldn't show the fix:** the rollout ran in the laptop's 0.5.3 daemon and was
+watched by the 0.5.3 CLI, and both predate the persisted status. The fix only
+applies once the requesting node already runs 0.5.4, so the next push
+(0.5.4 → 0.5.5) is the one that proves it on hardware.
+
+Also seen while cutting v0.5.4: a pre-existing Windows CI flake in
+`mcp/http-transport.test.ts` (oversized body → 413, the client sees the reset
+first). It passed on re-run and is now a backlog item.
