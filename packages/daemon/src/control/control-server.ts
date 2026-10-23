@@ -119,6 +119,7 @@ import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
 import { UpgradeError } from "../upgrade/errors.js";
 import type { UpgradeResult } from "../upgrade/files.js";
+import type { RolloutStatus } from "../upgrade/rollout.js";
 import {
   type PairConnectRequest,
   PairConnectRequestSchema,
@@ -252,7 +253,9 @@ export interface ControlSurface {
    * once the updater has been started — the daemon shuts down right after.
    * Refusals throw {@link UpgradeError}.
    */
-  upgrade(input: UpgradeRequest): Promise<UpgradeStarted>;
+  upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
+  /** The latest fleet rollout this daemon ran or is running, if any. */
+  upgrades(): RolloutStatus | undefined;
   /**
    * Revokes a pairing on the LIVE daemon: removes `deviceId` from the trust
    * store (authoritative — every later HFP request from it gets 401), cancels
@@ -443,6 +446,8 @@ function upgradeErrorStatus(error: UpgradeError): number {
       return 502;
     case "verify-failed":
       return 422;
+    case "unknown-node":
+      return 400;
     default:
       return 409;
   }
@@ -543,6 +548,10 @@ export async function startControlServer(
       }
       throw error;
     }
+  }
+
+  function handleUpgrades(res: ServerResponse): void {
+    respondJson(res, 200, { rollout: surface.upgrades() ?? null });
   }
 
   async function handleUpgrade(
@@ -693,6 +702,10 @@ export async function startControlServer(
       }
       if (method === "GET" && pathname === "/control/upgrade/check") {
         await handleUpgradeCheck(res);
+        return;
+      }
+      if (method === "GET" && pathname === "/control/upgrades") {
+        handleUpgrades(res);
         return;
       }
       if (method === "POST" && pathname === "/control/upgrade") {

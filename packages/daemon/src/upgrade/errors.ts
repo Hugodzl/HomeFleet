@@ -12,7 +12,8 @@ export type UpgradeErrorCode =
   | "unsupported"
   | "fetch-failed"
   | "verify-failed"
-  | "disabled";
+  | "disabled"
+  | "unknown-node";
 
 export class UpgradeError extends Error {
   readonly code: UpgradeErrorCode;

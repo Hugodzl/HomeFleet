@@ -701,11 +701,17 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
     }
     let started: UpgradeStarted;
     try {
-      started = await client.upgrade({
+      const response = await client.upgrade({
         targets: "self",
         ...(parsed.version !== undefined ? { version: parsed.version } : {}),
         ...(parsed.force ? { force: true } : {}),
       });
+      // A "self" request never yields a rollout status (that is the fleet
+      // path, wired into the CLI in the next task); narrow for the types.
+      if ("peers" in response) {
+        throw new Error("daemon answered a self upgrade with a fleet rollout");
+      }
+      started = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
         deps.stderr(`Upgrade refused: ${error.message}`);

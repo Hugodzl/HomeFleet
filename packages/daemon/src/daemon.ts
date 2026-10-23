@@ -14,7 +14,11 @@ import {
   type FinalizeWriteFn,
   WriteExecutor,
 } from "@homefleet/executors";
-import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
+import {
+  HFP_PROTOCOL_VERSION,
+  type NodeInfo,
+  UpgradeAcceptedSchema,
+} from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
 import {
   type ControlJobs,
@@ -59,10 +63,13 @@ import {
   toLastUpgrade,
   upgradesDir,
 } from "./upgrade/files.js";
+import { createFleetUpgradeSurface } from "./upgrade/fleet-upgrade.js";
+import { prepareRelease } from "./upgrade/prepare.js";
 import {
   GitHubReleaseSource,
   type ReleaseSource,
 } from "./upgrade/release-source.js";
+import { FleetRollout } from "./upgrade/rollout.js";
 import { registerUpgradeRoutes } from "./upgrade/routes.js";
 import { DAEMON_VERSION } from "./version.js";
 import { ArtifactStore } from "./workspace/artifact-store.js";
@@ -642,11 +649,12 @@ export class Daemon {
     // closure) never observes a stale 0 once the server can actually be
     // reached.
     let controlPort = 0;
+    const releaseSource = this.releaseSource ?? new GitHubReleaseSource();
     const upgrades = new UpgradeCoordinator({
       dataDir,
       currentVersion: this.daemonVersion,
       localHfpVersion: HFP_PROTOCOL_VERSION,
-      source: this.releaseSource ?? new GitHubReleaseSource(),
+      source: releaseSource,
       activeJobs: () => jobManager.activeJobs,
       controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
       ...(this.requestShutdown !== undefined
@@ -670,6 +678,61 @@ export class Daemon {
       ...(this.upgradeSeams?.publicKeys !== undefined
         ? { publicKeys: this.upgradeSeams.publicKeys }
         : {}),
+    });
+    const rollout = new FleetRollout({
+      peers: {
+        list: () => nodeDirectory.list(),
+        push: async (entry, request) => {
+          if (entry.host === undefined || entry.port === undefined) {
+            throw new Error("no known address for this node");
+          }
+          await hfpClient.request({
+            host: entry.host,
+            port: entry.port,
+            expectedDeviceId: entry.deviceId,
+            method: "POST",
+            path: "/upgrade",
+            body: request,
+            responseSchema: UpgradeAcceptedSchema,
+          });
+        },
+        hello: async (entry) => {
+          if (entry.host === undefined || entry.port === undefined) {
+            return undefined;
+          }
+          try {
+            const { nodeInfo } = await hfpClient.hello(
+              {
+                host: entry.host,
+                port: entry.port,
+                expectedDeviceId: entry.deviceId,
+                timeoutMs: 2000,
+              },
+              nodeInfoProvider(),
+            );
+            return nodeInfo;
+          } catch {
+            return undefined;
+          }
+        },
+      },
+      currentVersion: this.daemonVersion,
+      upgradeSelf: (input) => upgrades.upgradeSelf(input),
+    });
+    const fleetUpgrades = createFleetUpgradeSurface({
+      rollout,
+      coordinator: upgrades,
+      pairedDeviceIds: () => trustStore.list().map((d) => d.deviceId),
+      prepare: (version) =>
+        prepareRelease({
+          source: releaseSource,
+          upgradesDir: upgradesDir(dataDir),
+          version,
+          ...(this.upgradeSeams?.publicKeys !== undefined
+            ? { publicKeys: this.upgradeSeams.publicKeys }
+            : {}),
+        }),
+      upgradesDir: upgradesDir(dataDir),
     });
     const controlSurface: ControlSurface = {
       beginPairing: () => pairingManager.beginPairing(),
@@ -733,11 +796,8 @@ export class Daemon {
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
       checkUpgrade: () => upgrades.check(),
-      upgrade: (input) =>
-        upgrades.upgradeSelf({
-          ...(input.version !== undefined ? { version: input.version } : {}),
-          ...(input.force !== undefined ? { force: input.force } : {}),
-        }),
+      upgrade: (input) => fleetUpgrades.upgrade(input),
+      upgrades: () => fleetUpgrades.upgrades(),
     };
     const controlServer = await startControlServer({
       surface: controlSurface,
