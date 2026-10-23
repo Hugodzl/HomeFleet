@@ -379,7 +379,7 @@ test("a background failure is recorded as a failed lastUpgrade", async () => {
   expect(spawned).toEqual([]);
 });
 
-test("two back-to-back acceptRemote calls: the second is refused with locked", async () => {
+test("two back-to-back acceptRemote calls: exactly one is accepted, the other is refused with locked", async () => {
   const { origin, keys, coordinator, spawned } = await setup({
     allowRemote: true,
   });
@@ -389,10 +389,23 @@ test("two back-to-back acceptRemote calls: the second is refused with locked", a
     requesterDeviceId: "peer-1",
     client: fakeClient(origin).client,
   };
-  const first = coordinator.acceptRemote(args);
-  const second = coordinator.acceptRemote(args);
-  await expect(first).resolves.toEqual({ version: "0.5.1" });
-  await expect(codeOf(second)).resolves.toBe("locked");
+  // Both calls await the lock-file read, and Node doesn't finish two fs
+  // reads in start order, so EITHER call may win. The guarantee is that
+  // exactly one does.
+  const results = await Promise.allSettled([
+    coordinator.acceptRemote(args),
+    coordinator.acceptRemote(args),
+  ]);
+  const accepted = results.filter((r) => r.status === "fulfilled");
+  const refused = results.filter((r) => r.status === "rejected");
+  expect(accepted).toHaveLength(1);
+  expect((accepted[0] as PromiseFulfilledResult<unknown>).value).toEqual({
+    version: "0.5.1",
+  });
+  expect(refused).toHaveLength(1);
+  const reason = (refused[0] as PromiseRejectedResult).reason;
+  expect(reason).toBeInstanceOf(UpgradeError);
+  expect((reason as UpgradeError).code).toBe("locked");
   await vi.waitFor(() => expect(spawned).toHaveLength(1));
 });
 
