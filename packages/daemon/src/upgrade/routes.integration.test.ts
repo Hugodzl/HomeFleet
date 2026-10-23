@@ -60,6 +60,7 @@ async function startNode(
   originDir: string,
   overrides: Record<string, unknown> = {},
   existing: { dataDir: string; version: string } | undefined = undefined,
+  entryPath = "/usr/lib/node_modules/homefleet/dist/bin/homefleetd.js",
 ): Promise<Node> {
   const dataDir =
     existing?.dataDir ??
@@ -82,10 +83,7 @@ async function startNode(
       runtime: {
         pid: 4242,
         execPath: process.execPath,
-        argv: [
-          process.execPath,
-          "/usr/lib/node_modules/homefleet/dist/bin/homefleetd.js",
-        ],
+        argv: [process.execPath, entryPath],
         platform: process.platform,
       },
     },
@@ -99,11 +97,18 @@ async function startNode(
 /** A requester A with 0.5.1 cached, and a peer B; paired A -> B. */
 async function setup(
   peerOverrides: Record<string, unknown> = { upgrade: { allowRemote: true } },
+  peerEntryPath?: string,
 ) {
   const originDir = await h.tempDir("homefleet-upgrade-routes-origin-");
   await writeSignedRelease(originDir, VERSION, keys);
   const a = await startNode("requester", originDir);
-  const b = await startNode("peer", originDir, peerOverrides);
+  const b = await startNode(
+    "peer",
+    originDir,
+    peerOverrides,
+    undefined,
+    peerEntryPath,
+  );
   await h.pair(a.daemon, b.daemon);
   await prepareRelease({
     source: new FakeReleaseSource(originDir, VERSION),
@@ -173,6 +178,55 @@ test("push with a tampered manifest -> 422 UPGRADE_REJECTED verify-failed", asyn
   });
 });
 
+test("a second push while the first upgrade is underway -> 409 UPGRADE_BUSY", async () => {
+  const { a, b } = await setup();
+  const body = await pushBody(a);
+  expect(await push(a, b, body)).toEqual({ accepted: true, version: VERSION });
+  const error = await push(a, b, body).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(HfpRequestError);
+  expect((error as HfpRequestError).status).toBe(409);
+  expect((error as HfpRequestError).hfpError?.code).toBe("UPGRADE_BUSY");
+});
+
+test("a peer running from a checkout refuses without leaking its local path", async () => {
+  const checkout =
+    "/home/me/secret-src/HomeFleet/packages/daemon/dist/bin/homefleetd.js";
+  const { a, b } = await setup({ upgrade: { allowRemote: true } }, checkout);
+  const error = await push(a, b, await pushBody(a)).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(HfpRequestError);
+  const hfpError = (error as HfpRequestError).hfpError;
+  expect(hfpError?.details).toEqual({ reason: "not-installed" });
+  expect(hfpError?.message).not.toContain("secret-src");
+  expect(hfpError?.message).toMatch(/checkout/);
+});
+
+test("an unpaired client gets 401 on both upgrade routes", async () => {
+  const { a, b } = await setup();
+  const stranger = await startNode("stranger", "");
+  const error = await push(stranger, b, await pushBody(a)).catch(
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(HfpRequestError);
+  expect((error as HfpRequestError).status).toBe(401);
+  expect(b.spawned).toEqual([]);
+
+  const dest = path.join(await h.tempDir("homefleet-upgrade-routes-dl-"), "t");
+  const tarball = await stranger.daemon.hfpClient
+    .fetchUpgradeTarball(
+      {
+        host: HOST,
+        port: a.daemon.hfpPort,
+        expectedDeviceId: a.daemon.deviceId,
+      },
+      VERSION,
+      dest,
+      { maxBytes: 1_000_000 },
+    )
+    .catch((e: unknown) => e);
+  expect(tarball).toBeInstanceOf(HfpRequestError);
+  expect((tarball as HfpRequestError).status).toBe(401);
+});
+
 test("push -> 202, the peer pulls the tarball from the requester, writes state and spawns the updater", async () => {
   const { a, b } = await setup();
   await seedRequesterEndpoint(a, b);
@@ -216,6 +270,10 @@ test("the tarball route refuses unverified or non-semver versions and serves ver
 
   expect(await status("latest")).toBe(404);
   expect(await status("0.9.9")).toBe(404);
+  // The client percent-encodes: these go out as ..%2F..%2Fx and ..%252F..
+  expect(await status("../../x")).toBe(404);
+  expect(await status("..%2F..%2Fx")).toBe(404);
+  expect(await status(`../${VERSION}`)).toBe(404);
   expect(await status(VERSION)).toBe(200);
   expect(await readFile(dest, "utf8")).toBe(`fake tarball ${VERSION}`);
 

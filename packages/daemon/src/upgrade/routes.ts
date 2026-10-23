@@ -41,6 +41,15 @@ function wireCode(code: UpgradeErrorCode): HfpErrorCode {
   }
 }
 
+/**
+ * What a refused push tells the requesting peer: the guards word some
+ * refusals for this node's own operator (its local paths, `--force`), which
+ * mean nothing — or too much — over there.
+ */
+export function peerFacingMessage(error: UpgradeError): string {
+  return error.peerMessage ?? error.message;
+}
+
 export function registerUpgradeRoutes(
   server: NodeServer,
   deps: UpgradeRouteDeps,
@@ -71,7 +80,7 @@ export function registerUpgradeRoutes(
           status: statusForCode(code),
           body: {
             code,
-            message: error.message,
+            message: peerFacingMessage(error),
             ...(code === "UPGRADE_REJECTED"
               ? { details: { reason: error.code } }
               : {}),

@@ -6,12 +6,16 @@ import {
   acquireLock,
   LOCK_FILE,
   RESULT_FILE,
+  ROLLOUT_STATUS_FILE,
+  readRolloutStatusSync,
   readUpgradeResultSync,
   releaseLock,
   STALE_LOCK_MS,
   toLastUpgrade,
+  writeRolloutStatus,
   writeUpgradeResult,
 } from "./files.js";
+import type { RolloutStatus } from "./rollout.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -147,5 +151,43 @@ describe("readUpgradeResultSync rejects shape-valid but unusable files", () => {
     const dataDir = await tempDir();
     await writeFile(path.join(dataDir, RESULT_FILE), JSON.stringify(base));
     expect(readUpgradeResultSync(dataDir)).toEqual(base);
+  });
+});
+
+describe("rollout status store", () => {
+  const status: RolloutStatus = {
+    id: "r1",
+    target: "0.5.3",
+    startedAt: "2026-10-23T10:00:00.000Z",
+    state: "running",
+    peers: [{ deviceId: "t", name: "tower", state: "refused", reason: "off" }],
+    self: { state: "restarting" },
+  };
+
+  test("absent -> undefined; written -> read back from upgrades/", async () => {
+    const dataDir = await tempDir();
+    expect(readRolloutStatusSync(dataDir)).toBeUndefined();
+    await writeRolloutStatus(dataDir, status);
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(dataDir, "upgrades", ROLLOUT_STATUS_FILE),
+          "utf8",
+        ),
+      ),
+    ).toEqual(status);
+    expect(readRolloutStatusSync(dataDir)).toEqual(status);
+  });
+
+  test("corrupt or wrongly shaped -> undefined", async () => {
+    const dataDir = await tempDir();
+    await writeRolloutStatus(dataDir, status);
+    const file = path.join(dataDir, "upgrades", ROLLOUT_STATUS_FILE);
+    await writeFile(file, "{nope");
+    expect(readRolloutStatusSync(dataDir)).toBeUndefined();
+    await writeFile(file, JSON.stringify({ ...status, peers: "x" }));
+    expect(readRolloutStatusSync(dataDir)).toBeUndefined();
+    await writeFile(file, JSON.stringify({ ...status, self: null }));
+    expect(readRolloutStatusSync(dataDir)).toBeUndefined();
   });
 });

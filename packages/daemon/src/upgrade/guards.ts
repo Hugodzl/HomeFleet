@@ -59,12 +59,20 @@ export function checkUpgradeGuards(
       "not-installed",
       `this daemon runs from ${input.entryPath}, not an npm-installed HomeFleet; ` +
         "update a checkout with git + pnpm build instead",
+      {
+        peerMessage:
+          "this node runs HomeFleet from a source checkout, not an npm install; " +
+          "update it there with git + pnpm build",
+      },
     );
   }
   if (input.activeJobs > 0 && !input.force) {
     return new UpgradeError(
       "busy",
       `${input.activeJobs} job(s) running; wait for them to finish or pass --force`,
+      {
+        peerMessage: `${input.activeJobs} job(s) running on this node; push again once they finish`,
+      },
     );
   }
   return undefined;

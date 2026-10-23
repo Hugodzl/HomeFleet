@@ -17,10 +17,20 @@ export type UpgradeErrorCode =
 
 export class UpgradeError extends Error {
   readonly code: UpgradeErrorCode;
+  /**
+   * The wording for a peer that pushed the upgrade, when `message` speaks to
+   * this node's own operator (local paths, CLI flags); see routes.ts.
+   */
+  readonly peerMessage: string | undefined;
 
-  constructor(code: UpgradeErrorCode, message: string) {
+  constructor(
+    code: UpgradeErrorCode,
+    message: string,
+    options: { peerMessage?: string } = {},
+  ) {
     super(message);
     this.name = "UpgradeError";
     this.code = code;
+    this.peerMessage = options.peerMessage;
   }
 }

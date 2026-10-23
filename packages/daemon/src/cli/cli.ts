@@ -957,15 +957,21 @@ async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
     };
     render(rollout);
 
-    // Waits out this node's own restart, then summarizes with the last status
-    // we saw (the restarted daemon no longer remembers the rollout).
+    // Waits out this node's own restart, then summarizes the rollout the
+    // daemon saved as it handed off: a peer may have settled after our last
+    // poll (e.g. a fast refusal). A daemon without it (older, or the save
+    // failed) leaves us with the last status we saw.
     const finishWithSelf = async (last: RolloutStatus): Promise<number> => {
       const waited = await waitForUpgrade(
         client,
         { from: current, to: target },
         deps,
       );
-      return waited !== 0 ? waited : summarizeRollout(last, true, deps);
+      if (waited !== 0) {
+        return waited;
+      }
+      const saved = await client.upgrades().catch(() => null);
+      return summarizeRollout(saved?.id === last.id ? saved : last, true, deps);
     };
 
     let last = rollout;

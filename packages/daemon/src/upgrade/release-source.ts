@@ -153,16 +153,27 @@ export class FallbackReleaseSource implements ReleaseSource {
     version: string,
     destDir: string,
   ): Promise<FetchedRelease> {
-    let lastError: unknown;
+    const errors: unknown[] = [];
     for (const source of this.sources) {
       await rm(destDir, { recursive: true, force: true });
       try {
         return await source.fetchRelease(version, destDir);
       } catch (error) {
-        lastError = error;
+        errors.push(error);
       }
     }
     await rm(destDir, { recursive: true, force: true });
-    throw lastError;
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    // Every reason, so a peer + GitHub double failure records both in
+    // lastUpgrade.reason rather than only GitHub's.
+    throw new ReleaseFetchError(
+      errors
+        .map((error) =>
+          error instanceof Error ? error.message : String(error),
+        )
+        .join("; then "),
+    );
   }
 }

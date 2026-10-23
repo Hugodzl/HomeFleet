@@ -16,8 +16,14 @@
  * A failure is recognized without comparing clocks: the peer's `lastUpgrade`
  * from the selection snapshot is remembered before the push, and only a
  * target-version failure record that differs from it counts as fresh.
+ *
+ * The final status is handed to `persist` (the data directory) whenever the
+ * run ends AND right after this node's own upgrade hands off, because that
+ * restart loses the in-memory status; the restarted daemon serves it back via
+ * `previous` + {@link restoreRolloutStatus}.
  */
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   UpgradeRequest as HfpUpgradeRequest,
   NodeInfo,
@@ -25,6 +31,7 @@ import type {
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import { HfpRequestError } from "../transport/client.js";
 import type { UpgradeSelfInput, UpgradeStarted } from "./coordinator.js";
+import type { UpgradeResult } from "./files.js";
 import type { PreparedRelease } from "./prepare.js";
 import { compareSemver, isSemver } from "./semver.js";
 
@@ -59,7 +66,15 @@ export interface RolloutStatus {
   state: "running" | "stopped" | "done";
   peers: PeerRolloutStatus[];
   self: {
-    state: "pending" | "skipped" | "restarting" | "refused";
+    /** succeeded / rolled-back / failed only appear once restored after the restart. */
+    state:
+      | "pending"
+      | "skipped"
+      | "restarting"
+      | "refused"
+      | "succeeded"
+      | "rolled-back"
+      | "failed";
     reason?: string;
   };
 }
@@ -81,6 +96,10 @@ export interface FleetRolloutOptions {
   sleep?: (ms: number) => Promise<void>;
   pollMs?: number;
   waitMs?: number;
+  /** Saves a final status (best effort); see the module comment. */
+  persist?: (status: RolloutStatus) => Promise<void>;
+  /** The status saved before this daemon's last restart, served until a new rollout starts. */
+  previous?: () => RolloutStatus | undefined;
 }
 
 export interface RolloutStartInput {
@@ -108,6 +127,46 @@ function sameRecord(a: LastUpgrade, b: LastUpgrade | undefined): boolean {
   );
 }
 
+const ABORTED_REASON = "the daemon stopped during the rollout";
+
+/**
+ * Turns a status saved before this node's own restart into what the
+ * restarted daemon reports: nothing runs it any more, so it is never
+ * "running", and a self step still `restarting` is settled from what the
+ * restart left behind — the version now running, or a failure record for
+ * the target written after the rollout started (same machine, same clock).
+ */
+export function restoreRolloutStatus(
+  saved: RolloutStatus,
+  now: { daemonVersion: string; lastUpgrade?: UpgradeResult | undefined },
+): RolloutStatus {
+  const status = structuredClone(saved);
+  if (status.state === "running") {
+    status.state = "done";
+  }
+  if (status.self.state !== "restarting") {
+    return status;
+  }
+  const last = now.lastUpgrade;
+  if (
+    isSemver(now.daemonVersion) &&
+    compareSemver(now.daemonVersion, status.target) >= 0
+  ) {
+    status.self = { state: "succeeded" };
+  } else if (
+    last !== undefined &&
+    last.to === status.target &&
+    last.outcome !== "succeeded" &&
+    last.at >= Date.parse(status.startedAt)
+  ) {
+    status.self = {
+      state: last.outcome,
+      ...(last.reason !== undefined ? { reason: last.reason } : {}),
+    };
+  }
+  return status;
+}
+
 export class FleetRollout {
   private readonly peers: RolloutPeers;
   private readonly currentVersion: string;
@@ -116,18 +175,43 @@ export class FleetRollout {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly pollMs: number;
   private readonly waitMs: number;
+  private readonly persist: FleetRolloutOptions["persist"];
+  private readonly previous: FleetRolloutOptions["previous"];
+  private readonly abortController = new AbortController();
   private current: RolloutStatus | undefined;
+  private running: Promise<void> | undefined;
 
   constructor(options: FleetRolloutOptions) {
     this.peers = options.peers;
     this.currentVersion = options.currentVersion;
     this.upgradeSelf = options.upgradeSelf;
     this.now = options.now ?? Date.now;
+    // The default sleep ends early on abort, so a stopping daemon is neither
+    // held up by nor left with a pending poll timer.
     this.sleep =
       options.sleep ??
-      ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+      ((ms) =>
+        delay(ms, undefined, { signal: this.abortController.signal }).catch(
+          () => undefined,
+        ));
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     this.waitMs = options.waitMs ?? UPGRADE_WAIT_MS;
+    this.persist = options.persist;
+    this.previous = options.previous;
+  }
+
+  /**
+   * Stops a running loop at its next step (the daemon is stopping) and
+   * resolves once it has exited with its stopped status saved. A no-op when
+   * nothing runs. Permanent: the loop never resumes.
+   */
+  async abort(): Promise<void> {
+    this.abortController.abort();
+    await this.running;
+  }
+
+  private get aborted(): boolean {
+    return this.abortController.signal.aborted;
   }
 
   /** Selects peers and returns the initial status; the loop continues in the background. */
@@ -167,8 +251,13 @@ export class FleetRollout {
       manifest: input.manifestBytes.toString("base64"),
       signature: input.signature,
     };
-    void this.run(status, selected, request, input.forceLocal === true).catch(
-      (error) => {
+    this.running = this.run(
+      status,
+      selected,
+      request,
+      input.forceLocal === true,
+    )
+      .catch((error) => {
         // A bug must never become an unhandled rejection in the daemon.
         status.state = "stopped";
         const peer = status.peers.find(
@@ -180,15 +269,28 @@ export class FleetRollout {
         } else {
           status.self.reason = messageOf(error);
         }
-      },
-    );
+      })
+      .then(() => this.save(status));
     return structuredClone(status);
   }
 
   status(): RolloutStatus | undefined {
     return this.current === undefined
-      ? undefined
+      ? this.previous?.()
       : structuredClone(this.current);
+  }
+
+  private async save(status: RolloutStatus): Promise<void> {
+    try {
+      await this.persist?.(structuredClone(status));
+    } catch {
+      // Best effort: losing it only degrades the CLI's closing summary.
+    }
+  }
+
+  private stopAborted(status: RolloutStatus): void {
+    status.state = "stopped";
+    status.self.reason = ABORTED_REASON;
   }
 
   private select(
@@ -218,6 +320,10 @@ export class FleetRollout {
     for (const [index, entry] of selected.entries()) {
       const peer = status.peers[index];
       if (peer === undefined || peer.state === "unreachable") continue;
+      if (this.aborted) {
+        this.stopAborted(status);
+        return;
+      }
       const proceed = await this.rolloutPeer(
         entry,
         peer,
@@ -226,10 +332,15 @@ export class FleetRollout {
       );
       if (!proceed) {
         status.state = "stopped";
+        if (this.aborted) this.stopAborted(status);
         return;
       }
     }
 
+    if (this.aborted) {
+      this.stopAborted(status);
+      return;
+    }
     if (status.self.state !== "pending") {
       status.state = "done";
       return;
@@ -253,7 +364,12 @@ export class FleetRollout {
   ): Promise<boolean> {
     peer.state = "pushing";
     // What the peer reported before this push; a record equal to it is stale.
-    const before = entry.nodeInfo?.lastUpgrade;
+    // A --nodes peer may have been selected without a hello (no nodeInfo):
+    // ask now, or an old failure for the same target would look fresh.
+    const before =
+      entry.nodeInfo !== undefined
+        ? entry.nodeInfo.lastUpgrade
+        : (await this.peers.hello(entry).catch(() => undefined))?.lastUpgrade;
     const pushedAt = this.now(); // our clock only: the wait deadline
     try {
       await this.peers.push(entry, request);
@@ -277,6 +393,9 @@ export class FleetRollout {
     peer.state = "restarting";
     while (this.now() - pushedAt < this.waitMs) {
       await this.sleep(this.pollMs);
+      if (this.aborted) {
+        return false; // run() marks the rollout stopped
+      }
       const info = await this.peers.hello(entry).catch(() => undefined);
       const version = info?.daemonVersion;
       if (

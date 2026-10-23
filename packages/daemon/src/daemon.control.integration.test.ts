@@ -30,6 +30,7 @@ import {
   delegatorOverrides,
   HOST,
 } from "./test-fixtures.js";
+import { writeRolloutStatus } from "./upgrade/files.js";
 
 const h = createDaemonHarness({ tempPrefix: "homefleet-daemon-control" });
 
@@ -334,4 +335,41 @@ test("a daemon without a shutdown hook refuses upgrades cleanly (409 unsupported
 
   const status = await control.status();
   expect(status.lastUpgrade).toBeUndefined();
+});
+
+test("a rollout saved before this node's own restart is served back by the restarted daemon", async () => {
+  const { daemon, dataDir } = await h.startDaemon("requester");
+  expect(await controlClientFor(daemon).upgrades()).toBeNull();
+  const version = daemon.nodeInfo().daemonVersion;
+  await daemon.stop();
+
+  // What the rollout saved as it handed off to this node's own upgrade.
+  await writeRolloutStatus(dataDir, {
+    id: "r1",
+    target: version,
+    startedAt: new Date().toISOString(),
+    state: "running",
+    peers: [
+      {
+        deviceId: "t",
+        name: "tower",
+        from: "0.0.1",
+        state: "refused",
+        reason: "remote upgrades are disabled on this node",
+      },
+    ],
+    self: { state: "restarting" },
+  });
+  const { daemon: restarted } = await h.startDaemon(
+    "requester",
+    undefined,
+    dataDir,
+  );
+  const rollout = await controlClientFor(restarted).upgrades();
+  expect(rollout).toMatchObject({
+    id: "r1",
+    state: "done",
+    self: { state: "succeeded" },
+    peers: [{ name: "tower", state: "refused" }],
+  });
 });
