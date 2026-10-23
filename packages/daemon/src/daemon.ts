@@ -45,6 +45,7 @@ import {
   makeModelResolver,
   validateCatalog,
 } from "./node/catalog.js";
+import { startModelReprobe } from "./node/model-reprobe.js";
 import { createNodeInfoProvider } from "./node/node-info.js";
 import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
@@ -558,8 +559,15 @@ export class Daemon {
         const result = readUpgradeResultSync(dataDir);
         return result && toLastUpgrade(result);
       },
-      models: advertisedModels(catalog, modelStatuses),
+      // A getter: the re-probe below refreshes modelStatuses in place, and
+      // each NodeInfo build advertises the current statuses.
+      models: () => advertisedModels(catalog, modelStatuses),
     });
+    const modelReprobe = startModelReprobe({
+      catalog,
+      statuses: modelStatuses,
+    });
+    this.teardown.push(async () => modelReprobe.stop());
     const pairingManager = new PairingManager({
       trustStore,
       nodeInfoProvider,

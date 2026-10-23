@@ -48,7 +48,7 @@ function makeProvider(options: {
   lastUpgrade?: () => LastUpgrade | undefined;
   hostname?: string;
   daemonVersion?: string;
-  models?: ModelInfo[];
+  models?: ModelInfo[] | (() => ModelInfo[]);
 }) {
   return createNodeInfoProvider({
     deviceId: DEVICE_ID,
@@ -292,4 +292,16 @@ test("lastUpgrade is absent without a source, and re-read on every call", () => 
   expect(provider().lastUpgrade).toEqual(current);
   current = { ...current, outcome: "rolled-back", reason: "unhealthy" };
   expect(provider().lastUpgrade).toEqual(current);
+});
+
+test("a models getter is re-read on every build, so re-probed statuses show up", () => {
+  let status: "unreachable" | "ok" = "unreachable";
+  const provider = makeProvider({
+    models: () => [{ id: "qwen", contextWindow: 32768, status }],
+  });
+  expect(provider().models).toEqual([
+    { id: "qwen", contextWindow: 32768, status: "unreachable" },
+  ]);
+  status = "ok";
+  expect(provider().models[0]?.status).toBe("ok");
 });
