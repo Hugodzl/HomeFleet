@@ -523,6 +523,59 @@ export class HfpClient {
     destPath: string,
     options: { maxBytes: number; idleTimeoutMs?: number },
   ): Promise<{ headCommit: string }> {
+    let headCommit = "";
+    await this.downloadToFile(
+      target,
+      `${HFP_PATH_PREFIX}/jobs/${encodeURIComponent(jobId)}/artifact`,
+      destPath,
+      options,
+      (response) => {
+        const claimed = firstHeaderValue(response.headers[HEAD_COMMIT_HEADER]);
+        if (claimed === undefined || !COMMIT_HASH_RE.test(claimed)) {
+          throw new ArtifactHeadCommitError(claimed);
+        }
+        headCommit = claimed;
+      },
+    );
+    return { headCommit };
+  }
+
+  /**
+   * `GET /hfp/v0/upgrade/tarball/{version}` — download a release tarball the
+   * peer has cached AND verified (fleet-upgrade Phase 3). Same streaming,
+   * size-cap and cleanup semantics as {@link fetchJobArtifact}, minus the
+   * head-commit header: the tarball's integrity is proven by the signed
+   * manifest the pushed node already holds, not by anything this response
+   * claims. Non-2xx throws {@link HfpRequestError} (404 = the peer does not
+   * have that version, or is too old to serve it).
+   */
+  async fetchUpgradeTarball(
+    target: HfpTarget,
+    version: string,
+    destPath: string,
+    options: { maxBytes: number; idleTimeoutMs?: number },
+  ): Promise<void> {
+    await this.downloadToFile(
+      target,
+      `${HFP_PATH_PREFIX}/upgrade/tarball/${encodeURIComponent(version)}`,
+      destPath,
+      options,
+    );
+  }
+
+  /**
+   * Pinned GET streamed straight to `destPath` (shared by the artifact and
+   * tarball downloads). `onSuccessResponse` may inspect a 2xx response's
+   * headers before any byte is written and throw to refuse it. The socket is
+   * always destroyed, and `destPath` never survives a failure.
+   */
+  private async downloadToFile(
+    target: HfpTarget,
+    requestPath: string,
+    destPath: string,
+    options: { maxBytes: number; idleTimeoutMs?: number },
+    onSuccessResponse?: (response: IncomingMessage) => void,
+  ): Promise<void> {
     const connectTimeoutMs = target.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     const idleTimeoutMs =
       options.idleTimeoutMs ?? BUNDLE_UPLOAD_IDLE_TIMEOUT_MS;
@@ -535,7 +588,7 @@ export class HfpClient {
     let fileStarted = false;
     try {
       // Re-arm the inactivity timer for the (possibly long) download; a large
-      // bundle on a slow link must not be mistaken for a stall.
+      // body on a slow link must not be mistaken for a stall.
       socket.removeAllListeners("timeout");
       socket.setTimeout(idleTimeoutMs, () => {
         socket.destroy(
@@ -548,7 +601,7 @@ export class HfpClient {
           {
             createConnection: () => socket,
             method: "GET",
-            path: `${HFP_PATH_PREFIX}/jobs/${encodeURIComponent(jobId)}/artifact`,
+            path: requestPath,
             headers: { host: `${target.host}:${target.port}` },
           },
           resolve,
@@ -566,10 +619,7 @@ export class HfpClient {
         throw buildRequestError(status, bodyText);
       }
 
-      const headCommit = firstHeaderValue(response.headers[HEAD_COMMIT_HEADER]);
-      if (headCommit === undefined || !COMMIT_HASH_RE.test(headCommit)) {
-        throw new ArtifactHeadCommitError(headCommit);
-      }
+      onSuccessResponse?.(response);
 
       fileStarted = true;
       const outcome = await streamResponseToFileCapped(
@@ -580,7 +630,6 @@ export class HfpClient {
       if (outcome === "too-large") {
         throw new HfpResponseTooLargeError(options.maxBytes);
       }
-      return { headCommit };
     } catch (error) {
       if (fileStarted) {
         // Never leave a partial (or oversized) download behind. The socket

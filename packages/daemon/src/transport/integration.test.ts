@@ -3,6 +3,8 @@
  * store, pairing, server, client) on 127.0.0.1 ephemeral ports.
  */
 import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { createServer, request as httpsRequest } from "node:https";
 import {
   type AddressInfo,
@@ -10,6 +12,8 @@ import {
   createServer as netCreateServer,
   type Socket,
 } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { HelloResponseSchema, type NodeInfo } from "@homefleet/protocol";
 import { afterEach, expect, test } from "vitest";
 import { resolveDataDir } from "../config/paths.js";
@@ -25,6 +29,7 @@ import {
   FingerprintMismatchError,
   HfpClient,
   HfpRequestError,
+  HfpResponseTooLargeError,
   HfpTimeoutError,
 } from "./client.js";
 import { MAX_BODY_BYTES } from "./limits.js";
@@ -471,4 +476,85 @@ test("the client times out against a server that accepts TCP but never responds"
   const timeout = error as HfpTimeoutError;
   expect(timeout.timeoutMs).toBe(250);
   expect(timeout.port).toBe(port);
+});
+
+async function pairedUpgradePair(): Promise<{
+  a: Daemon;
+  b: Daemon;
+  target: { host: string; port: number; expectedDeviceId: string };
+  destPath: string;
+}> {
+  const a = await createDaemon("alpha");
+  const b = await createDaemon("bravo");
+  const { code } = b.pairing.beginPairing();
+  const { response, serverDeviceId } = await a.client.pair(
+    { host: HOST, port: b.port },
+    code,
+    a.nodeInfo(),
+  );
+  expect(response.accepted).toBe(true);
+  await a.trustStore.add({
+    deviceId: serverDeviceId,
+    name: "bravo",
+    addedAt: new Date().toISOString(),
+  });
+  const dir = await mkdtemp(path.join(tmpdir(), "homefleet-tarball-"));
+  cleanups.push(() => removeTempDataDir(dir));
+  return {
+    a,
+    b,
+    target: { host: HOST, port: b.port, expectedDeviceId: b.identity.deviceId },
+    destPath: path.join(dir, "homefleet-1.2.3.tgz"),
+  };
+}
+
+test("fetchUpgradeTarball writes the served bytes to destPath", async () => {
+  const { a, b, target, destPath } = await pairedUpgradePair();
+  const bytes = Buffer.from("tarball bytes  ÿ".repeat(500));
+  let askedVersion = "";
+  b.server.routeStream("GET", "/upgrade/tarball/:version", {}, (ctx) => {
+    askedVersion = ctx.params.version ?? "";
+    ctx.res.writeHead(200, { "content-type": "application/octet-stream" });
+    ctx.res.end(bytes);
+  });
+  await a.client.fetchUpgradeTarball(target, "1.2.3", destPath, {
+    maxBytes: 1024 * 1024,
+  });
+  expect(askedVersion).toBe("1.2.3");
+  expect((await readFile(destPath)).equals(bytes)).toBe(true);
+});
+
+test("fetchUpgradeTarball: a 404 is an HfpRequestError and leaves no file", async () => {
+  const { a, b, target, destPath } = await pairedUpgradePair();
+  b.server.routeStream("GET", "/upgrade/tarball/:version", {}, (ctx) => {
+    ctx.res.writeHead(404, { "content-type": "application/json" });
+    ctx.res.end(
+      JSON.stringify({ code: "NOT_FOUND", message: "no such release" }),
+    );
+  });
+  const thrown = await a.client
+    .fetchUpgradeTarball(target, "1.2.3", destPath, { maxBytes: 1024 })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  expect(thrown).toBeInstanceOf(HfpRequestError);
+  expect((thrown as HfpRequestError).status).toBe(404);
+  expect(existsSync(destPath)).toBe(false);
+});
+
+test("fetchUpgradeTarball: a body over maxBytes is HfpResponseTooLargeError and leaves no file", async () => {
+  const { a, b, target, destPath } = await pairedUpgradePair();
+  b.server.routeStream("GET", "/upgrade/tarball/:version", {}, (ctx) => {
+    ctx.res.writeHead(200, { "content-type": "application/octet-stream" });
+    ctx.res.end(Buffer.alloc(64 * 1024, 7));
+  });
+  const thrown = await a.client
+    .fetchUpgradeTarball(target, "1.2.3", destPath, { maxBytes: 1000 })
+    .then(
+      () => null,
+      (e: unknown) => e,
+    );
+  expect(thrown).toBeInstanceOf(HfpResponseTooLargeError);
+  expect(existsSync(destPath)).toBe(false);
 });
