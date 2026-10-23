@@ -2,7 +2,7 @@
  * Where upgrade tarballs come from (fleet-upgrade spec, Phase 2). Phase 3
  * adds a peer source; everything downstream only sees this interface.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DAEMON_VERSION } from "../version.js";
 import {
@@ -127,5 +127,42 @@ export class GitHubReleaseSource implements ReleaseSource {
       );
     }
     return bytes;
+  }
+}
+
+/**
+ * Tries each source in order (peer first, GitHub last) and returns the first
+ * that fetches. destDir is emptied between attempts so a failed source's
+ * partial files never mix into the next one's. Verification is the caller's.
+ */
+export class FallbackReleaseSource implements ReleaseSource {
+  constructor(private readonly sources: readonly ReleaseSource[]) {
+    if (sources.length === 0) {
+      throw new Error("FallbackReleaseSource needs at least one source");
+    }
+  }
+
+  /** The last source is the authority on what is newest (GitHub). */
+  latestVersion(): Promise<string> {
+    return (
+      this.sources[this.sources.length - 1] as ReleaseSource
+    ).latestVersion();
+  }
+
+  async fetchRelease(
+    version: string,
+    destDir: string,
+  ): Promise<FetchedRelease> {
+    let lastError: unknown;
+    for (const source of this.sources) {
+      await rm(destDir, { recursive: true, force: true });
+      try {
+        return await source.fetchRelease(version, destDir);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    await rm(destDir, { recursive: true, force: true });
+    throw lastError;
   }
 }

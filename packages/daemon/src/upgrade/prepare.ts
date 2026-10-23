@@ -29,11 +29,17 @@ export interface PrepareOptions {
   publicKeys?: readonly string[];
 }
 
-async function verifyCached(
-  dir: string,
+/**
+ * The cached copy of `version` under `<upgradesDir>/<version>/`, or undefined
+ * unless all three files are present and fully verify (the tarball is
+ * re-hashed every call). Phase 3's tarball route serves only what this returns.
+ */
+export async function readVerifiedCache(
+  upgradesDir: string,
   version: string,
-  publicKeys: readonly string[] | undefined,
+  publicKeys?: readonly string[],
 ): Promise<PreparedRelease | undefined> {
+  const dir = path.join(upgradesDir, version);
   let manifestBytes: Buffer;
   let signature: string;
   try {
@@ -63,7 +69,7 @@ export async function prepareRelease(
 ): Promise<PreparedRelease> {
   const { source, upgradesDir, version, publicKeys } = options;
   const dir = path.join(upgradesDir, version);
-  const cached = await verifyCached(dir, version, publicKeys);
+  const cached = await readVerifiedCache(upgradesDir, version, publicKeys);
   if (cached !== undefined) {
     return cached;
   }

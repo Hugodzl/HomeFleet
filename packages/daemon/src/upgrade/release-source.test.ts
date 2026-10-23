@@ -1,8 +1,26 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { GitHubReleaseSource, ReleaseFetchError } from "./release-source.js";
+import { releaseFileName } from "./manifest.js";
+import {
+  FallbackReleaseSource,
+  GitHubReleaseSource,
+  ReleaseFetchError,
+  type ReleaseSource,
+} from "./release-source.js";
+import {
+  FakeReleaseSource,
+  makeTestKeys,
+  writeSignedRelease,
+} from "./test-release.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -81,5 +99,60 @@ describe("GitHubReleaseSource", () => {
     await expect(
       new GitHubReleaseSource({ fetch }).latestVersion(),
     ).rejects.toThrow(/could not reach api.github.com/);
+  });
+});
+
+describe("FallbackReleaseSource", () => {
+  function failing(message: string): ReleaseSource {
+    return {
+      latestVersion: async () => "0.0.1",
+      fetchRelease: async (_version, destDir) => {
+        // Leave debris, as a half-finished download would.
+        await mkdir(destDir, { recursive: true });
+        await writeFile(path.join(destDir, "partial.tmp"), "junk");
+        throw new ReleaseFetchError(message);
+      },
+    };
+  }
+
+  async function origin() {
+    const root = await mkdtemp(path.join(tmpdir(), "hf-fallback-"));
+    dirs.push(root);
+    const originDir = path.join(root, "origin");
+    await writeSignedRelease(originDir, "0.5.1", makeTestKeys());
+    return { root, originDir };
+  }
+
+  test("falls through to the next source and clears destDir between attempts", async () => {
+    const { root, originDir } = await origin();
+    const dest = path.join(root, "dest");
+    const source = new FallbackReleaseSource([
+      failing("peer down"),
+      new FakeReleaseSource(originDir, "0.5.1"),
+    ]);
+    const fetched = await source.fetchRelease("0.5.1", dest);
+    expect(fetched.tarballPath).toBe(path.join(dest, releaseFileName("0.5.1")));
+    expect((await readdir(dest)).sort()).toEqual([
+      "homefleet-0.5.1.manifest.json",
+      "homefleet-0.5.1.manifest.sig",
+      "homefleet-0.5.1.tgz",
+    ]);
+  });
+
+  test("rejects with the last error when every source fails", async () => {
+    const { root } = await origin();
+    const source = new FallbackReleaseSource([failing("one"), failing("two")]);
+    await expect(
+      source.fetchRelease("0.5.1", path.join(root, "dest")),
+    ).rejects.toThrow("two");
+  });
+
+  test("latestVersion delegates to the last source", async () => {
+    const { originDir } = await origin();
+    const source = new FallbackReleaseSource([
+      failing("x"),
+      new FakeReleaseSource(originDir, "0.7.0"),
+    ]);
+    expect(await source.latestVersion()).toBe("0.7.0");
   });
 });

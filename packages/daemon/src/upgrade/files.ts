@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { LastUpgrade } from "@homefleet/protocol";
+import { isSemver } from "./semver.js";
 
 export const UPGRADES_DIRNAME = "upgrades";
 export const STATE_FILE = "upgrade-state.json";
@@ -136,6 +137,35 @@ export async function writeUpgradeState(
   return statePath;
 }
 
+/**
+ * Records a failure that happens BEFORE the updater runs (e.g. a pushed
+ * upgrade that fails verification); same shape the updater itself writes.
+ */
+export async function writeUpgradeResult(
+  dataDir: string,
+  result: UpgradeResult,
+): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(
+    path.join(dataDir, RESULT_FILE),
+    `${JSON.stringify(result)}
+`,
+  );
+}
+
+/** True when `at` converts to a valid ISO string (toLastUpgrade must not throw). */
+function isUsableEpochMs(at: number): boolean {
+  if (!Number.isFinite(at)) {
+    return false;
+  }
+  try {
+    new Date(at).toISOString();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Sync on purpose: read from the synchronous control `status()`. Absent/corrupt → undefined. */
 export function readUpgradeResultSync(
   dataDir: string,
@@ -146,8 +176,11 @@ export function readUpgradeResultSync(
     ) as Record<string, unknown>;
     if (
       typeof json.from !== "string" ||
+      !isSemver(json.from) ||
       typeof json.to !== "string" ||
+      !isSemver(json.to) ||
       typeof json.at !== "number" ||
+      !isUsableEpochMs(json.at) ||
       !["succeeded", "rolled-back", "failed"].includes(json.outcome as string)
     ) {
       return undefined;
