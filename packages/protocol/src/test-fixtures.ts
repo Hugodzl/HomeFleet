@@ -3,6 +3,7 @@
  */
 import type { JobResult, WorkspaceRef } from "./job.js";
 import type { NodeInfo } from "./node.js";
+import { HFP_PROTOCOL_VERSION } from "./version.js";
 
 /** 64-char lowercase hex — a syntactically valid device ID. */
 export const validDeviceId = "0123456789abcdef".repeat(4);
@@ -22,7 +23,7 @@ export const validNodeInfo: NodeInfo = {
   deviceId: validDeviceId,
   name: "tower",
   daemonVersion: "0.1.0",
-  protocolVersion: "0.3.0",
+  protocolVersion: HFP_PROTOCOL_VERSION,
   platform: "win32",
   roles: ["inference", "execution"],
   executors: ["command", "agent"],

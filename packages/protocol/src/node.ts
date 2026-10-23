@@ -3,6 +3,12 @@
  * during `hello` and pairing.
  */
 import { z } from "zod";
+import { SemverSchema } from "./semver.js";
+import { LastUpgradeSchema, UpgradeInfoSchema } from "./upgrade.js";
+
+// Defined in semver.ts so upgrade.ts can use it without an import cycle;
+// re-exported here to keep the public path stable.
+export { SemverSchema };
 
 /** SHA-256 fingerprint of the node's self-signed certificate (ADR-0004). */
 export const DeviceIdSchema = z
@@ -12,11 +18,6 @@ export const DeviceIdSchema = z
     "device ID must be 64 lowercase hex chars (SHA-256 cert fingerprint)",
   );
 export type DeviceId = z.infer<typeof DeviceIdSchema>;
-
-/** Light semver check — enough for v0 version strings like "0.1.0". */
-export const SemverSchema = z
-  .string()
-  .regex(/^\d+\.\d+\.\d+$/, "must be a semver string (X.Y.Z)");
 
 /** No C0 control characters (U+0000-U+001F) and no DEL (U+007F). */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the range is deliberate - this pattern REJECTS control characters in names.
@@ -80,5 +81,9 @@ export const NodeInfoSchema = z.object({
   }),
   maxConcurrentJobs: z.int().min(1),
   activeJobs: z.int().min(0),
+  /** Remote-upgrade policy; absent on pre-0.4 peers. */
+  upgrade: UpgradeInfoSchema.optional(),
+  /** Outcome of the latest self-upgrade; absent if none or pre-0.4. */
+  lastUpgrade: LastUpgradeSchema.optional(),
 });
 export type NodeInfo = z.infer<typeof NodeInfoSchema>;
