@@ -118,7 +118,7 @@ Brainstorm threads, roughly from cheapest to largest:
 - **`homefleet daemon start|stop|restart|status`** for the installed bin:
   detached launch, log file, live-process lookup. The shipped equivalent of
   the rig's `hf-daemon.ps1`, and the same launch the updater already does.
-- **Re-probe models periodically** (and on demand) so a late model server
+- ~~**Re-probe models periodically**~~ **shipped in v0.5.5** (every 60 s; on-demand probing not done) so a late model server
   turns `ok` without a daemon restart.
 - **Show versions and model status in the CLI** (`nodes`, `status`).
 - **Install the autostart for real:** `homefleet setup --apply` registers
@@ -193,6 +193,8 @@ real risk — the brainstorm is invalidation (commit distance, touched paths)
 and making reuse visible in the job result so it's never silent.
 
 ### Flaky Windows test: oversized-body 413 in `mcp/http-transport.test.ts`
+
+**Fixed in v0.5.5:** the test now sends only the headers of the oversized request (the content-length fast path refuses on the declared size), so there is no unread body for the server's close to reset.
 
 "rejects an oversized body via an honest large content-length (413), stays
 up" occasionally fails on the Windows CI runner with `expected 'errored' to

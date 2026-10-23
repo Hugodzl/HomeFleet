@@ -62,8 +62,12 @@ export interface NodeInfoProviderOptions {
    * reports the upgrade that just ran).
    */
   lastUpgrade?: () => LastUpgrade | undefined;
-  /** The status-stamped catalog to advertise (built by the daemon). */
-  models: ModelInfo[];
+  /**
+   * The status-stamped catalog to advertise (built by the daemon). A function
+   * is re-read on every profile build, so periodic re-probes (see
+   * ./model-reprobe.ts) show up without rebuilding the provider.
+   */
+  models: ModelInfo[] | (() => ModelInfo[]);
 }
 
 /** Node's platform coerced into the protocol's supported set. */
@@ -171,7 +175,7 @@ export function createNodeInfoProvider(
       platform,
       roles,
       executors,
-      models,
+      models: typeof models === "function" ? models() : models,
       hardware,
       // See {@link NodeInfoProviderOptions.jobs} for the 1/0 default.
       maxConcurrentJobs: jobs?.maxConcurrent ?? 1,
