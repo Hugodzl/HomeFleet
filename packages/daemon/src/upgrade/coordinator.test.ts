@@ -431,3 +431,74 @@ test("upgradeSelf during a pending remote run → locked", async () => {
   await expect(codeOf(coordinator.upgradeSelf({}))).resolves.toBe("locked");
   await vi.waitFor(() => expect(spawned).toHaveLength(1));
 });
+
+/** Wraps a source so its first `fetchRelease` waits on a gate (a slow download). */
+function gatedSource(inner: FakeReleaseSource) {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  let entered!: () => void;
+  const downloading = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let gated = false;
+  return {
+    open,
+    downloading,
+    source: {
+      latestVersion: () => inner.latestVersion(),
+      async fetchRelease(version: string, destDir: string) {
+        if (!gated) {
+          gated = true;
+          entered();
+          await gate;
+        }
+        return inner.fetchRelease(version, destDir);
+      },
+    },
+  };
+}
+
+test("remote push during a local upgrade mid-download → locked", async () => {
+  const { origin, keys, source, coordinator, spawned } = await setup({
+    allowRemote: true,
+  });
+  const gated = gatedSource(source);
+  const local = coordinator.upgradeSelf({ source: gated.source });
+  await gated.downloading;
+  const request = await pushOf(origin, keys, "0.5.1");
+  await expect(
+    codeOf(
+      coordinator.acceptRemote({
+        request,
+        requesterDeviceId: "peer-1",
+        client: fakeClient(origin).client,
+      }),
+    ),
+  ).resolves.toBe("locked");
+  gated.open();
+  await expect(local).resolves.toEqual({ from: "0.5.0", to: "0.5.1" });
+  expect(spawned).toHaveLength(1);
+});
+
+test("two overlapping upgradeSelf calls → second locked", async () => {
+  const { source, coordinator, spawned } = await setup();
+  const gated = gatedSource(source);
+  const first = coordinator.upgradeSelf({ source: gated.source });
+  await gated.downloading;
+  await expect(codeOf(coordinator.upgradeSelf({}))).resolves.toBe("locked");
+  gated.open();
+  await expect(first).resolves.toEqual({ from: "0.5.0", to: "0.5.1" });
+  expect(spawned).toHaveLength(1);
+});
+
+test("a failed local upgrade frees the node for the next one", async () => {
+  const { coordinator, source } = await setup();
+  source.latest = "0.5.0";
+  expect(await codeOf(coordinator.upgradeSelf({}))).toBe("not-newer");
+  source.latest = "0.5.1";
+  await expect(coordinator.upgradeSelf({})).resolves.toMatchObject({
+    to: "0.5.1",
+  });
+});

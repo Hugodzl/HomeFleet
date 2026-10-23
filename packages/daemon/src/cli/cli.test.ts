@@ -1356,6 +1356,24 @@ describe("fleet upgrade", () => {
     expect(h.stderrLines).toContain("Rollout stopped at alpha: rolled-back.");
   });
 
+  test("a rollout stopped with only a self reason prints that reason", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () =>
+          rollout([peer(PEER_A, "alpha", "pending")], { state: "pending" }),
+        upgrades: replay([
+          rollout(
+            [peer(PEER_A, "alpha", "succeeded")],
+            { state: "pending", reason: "peer list failed: boom" },
+            "stopped",
+          ),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toContain("Rollout stopped: peer list failed: boom");
+  });
+
   test("a refused peer does not stop the rollout but makes the exit 1", async () => {
     const h = harness(
       fakeControlClient({

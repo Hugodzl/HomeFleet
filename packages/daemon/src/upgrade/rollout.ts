@@ -12,6 +12,10 @@
  * back, failed, or never came back STOPS it, because the same release is
  * likely to hurt the next node too. Self goes last so the coordinating daemon
  * is never down while peers are still being watched.
+ *
+ * A failure is recognized without comparing clocks: the peer's `lastUpgrade`
+ * from the selection snapshot is remembered before the push, and only a
+ * target-version failure record that differs from it counts as fresh.
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -22,7 +26,7 @@ import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import { HfpRequestError } from "../transport/client.js";
 import type { UpgradeSelfInput, UpgradeStarted } from "./coordinator.js";
 import type { PreparedRelease } from "./prepare.js";
-import { compareSemver } from "./semver.js";
+import { compareSemver, isSemver } from "./semver.js";
 
 /** How long a pushed peer gets to come back on the new version (spec: 3 minutes). */
 export const UPGRADE_WAIT_MS = 180_000;
@@ -90,6 +94,18 @@ export interface RolloutStartInput {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+type LastUpgrade = NonNullable<NodeInfo["lastUpgrade"]>;
+
+function sameRecord(a: LastUpgrade, b: LastUpgrade | undefined): boolean {
+  return (
+    b !== undefined &&
+    a.at === b.at &&
+    a.outcome === b.outcome &&
+    a.version === b.version &&
+    a.reason === b.reason
+  );
 }
 
 export class FleetRollout {
@@ -236,14 +252,17 @@ export class FleetRollout {
     request: HfpUpgradeRequest,
   ): Promise<boolean> {
     peer.state = "pushing";
-    const pushedAt = this.now();
+    // What the peer reported before this push; a record equal to it is stale.
+    const before = entry.nodeInfo?.lastUpgrade;
+    const pushedAt = this.now(); // our clock only: the wait deadline
     try {
       await this.peers.push(entry, request);
     } catch (error) {
       if (error instanceof HfpRequestError) {
         if (error.status === 404) {
           peer.state = "too-old";
-          peer.reason = "too old for remote upgrade; run npm i -g there";
+          peer.reason =
+            'too old for remote upgrade; run "homefleet upgrade" there (npm i -g on v0.4 or older)';
         } else {
           peer.state = "refused";
           peer.reason = error.hfpError?.message ?? error.message;
@@ -259,7 +278,12 @@ export class FleetRollout {
     while (this.now() - pushedAt < this.waitMs) {
       await this.sleep(this.pollMs);
       const info = await this.peers.hello(entry).catch(() => undefined);
-      if (info?.daemonVersion === target) {
+      const version = info?.daemonVersion;
+      if (
+        version !== undefined &&
+        isSemver(version) &&
+        compareSemver(version, target) >= 0
+      ) {
         peer.state = "succeeded";
         return true;
       }
@@ -267,8 +291,8 @@ export class FleetRollout {
       if (
         last !== undefined &&
         last.version === target &&
-        Date.parse(last.at) >= pushedAt &&
-        (last.outcome === "rolled-back" || last.outcome === "failed")
+        (last.outcome === "rolled-back" || last.outcome === "failed") &&
+        !sameRecord(last, before)
       ) {
         peer.state = last.outcome;
         if (last.reason !== undefined) peer.reason = last.reason;

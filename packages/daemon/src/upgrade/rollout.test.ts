@@ -183,7 +183,7 @@ describe("FleetRollout", () => {
     ]);
     expect(s.peers[0]?.reason).toBe("busy now");
     expect(s.peers[1]?.reason).toBe(
-      "too old for remote upgrade; run npm i -g there",
+      'too old for remote upgrade; run "homefleet upgrade" there (npm i -g on v0.4 or older)',
     );
     expect(h.calls.at(-1)).toBe("upgradeSelf");
   });
@@ -228,28 +228,67 @@ describe("FleetRollout", () => {
     expect(h.calls).not.toContain("push(p2)");
   });
 
-  it("ignores a lastUpgrade older than the push", async () => {
-    const h = setup([entry("p1", "0.5.0")]);
+  it("ignores a lastUpgrade unchanged from before the push", async () => {
+    const old = {
+      version: TARGET,
+      outcome: "failed" as const,
+      reason: "old",
+      at: new Date(1_000_000 - 60_000).toISOString(),
+    };
+    const h = setup([entry("p1", "0.5.0", { nodeInfo: info("0.5.0", old) })]);
     let polls = 0;
     h.helloHook.set("p1", () => {
       polls += 1;
-      if (polls === 1) {
-        h.versions.set(
-          "p1",
-          info("0.5.0", {
-            version: TARGET,
-            outcome: "failed",
-            reason: "old",
-            at: new Date(h.clock.t - 60_000).toISOString(),
-          }),
-        );
-      } else {
-        h.versions.set("p1", info(TARGET));
-      }
+      h.versions.set("p1", polls === 1 ? info("0.5.0", old) : info(TARGET));
     });
     const s = await run(h);
     expect(s.peers[0]?.state).toBe("succeeded");
     expect(s.state).toBe("running");
+  });
+
+  it("peer clock skew: a pre-existing failed record with a future `at` is still ignored", async () => {
+    const old = {
+      version: TARGET,
+      outcome: "failed" as const,
+      reason: "old",
+      at: new Date(1_000_000 + 3_600_000).toISOString(), // peer clock an hour ahead
+    };
+    const h = setup([entry("p1", "0.5.0", { nodeInfo: info("0.5.0", old) })]);
+    let polls = 0;
+    h.helloHook.set("p1", () => {
+      polls += 1;
+      h.versions.set("p1", polls === 1 ? info("0.5.0", old) : info(TARGET));
+    });
+    const s = await run(h);
+    expect(s.peers[0]?.state).toBe("succeeded");
+    expect(s.state).toBe("running");
+  });
+
+  it("a fresh failed record with an `at` in the requester's past (peer clock behind) still stops", async () => {
+    const h = setup([entry("p1", "0.5.0"), entry("p2", "0.5.0")]);
+    h.helloHook.set("p1", () => {
+      h.versions.set(
+        "p1",
+        info("0.5.0", {
+          version: TARGET,
+          outcome: "failed",
+          reason: "disk full",
+          at: new Date(h.clock.t - 3_600_000).toISOString(),
+        }),
+      );
+    });
+    const s = await run(h);
+    expect(s.peers[0]).toMatchObject({ state: "failed", reason: "disk full" });
+    expect(s.state).toBe("stopped");
+    expect(h.calls).not.toContain("push(p2)");
+  });
+
+  it("a peer that comes back newer than the target counts as succeeded", async () => {
+    const h = setup([entry("p1", "0.5.0")]);
+    h.helloHook.set("p1", () => h.versions.set("p1", info("0.5.3")));
+    const s = await run(h);
+    expect(s.peers[0]?.state).toBe("succeeded");
+    expect(h.calls.at(-1)).toBe("upgradeSelf");
   });
 
   it("unreachable selected peer is skipped", async () => {

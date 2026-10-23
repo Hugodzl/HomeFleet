@@ -851,6 +851,13 @@ function summarizeRollout(
   }
   if (stopped !== undefined) {
     deps.stderr(`Rollout stopped at ${stopped.name}: ${stopped.state}.`);
+  } else if (
+    rollout.state === "stopped" &&
+    !selfRefused &&
+    rollout.self.reason !== undefined
+  ) {
+    // The background run failed with no peer in flight.
+    deps.stderr(`Rollout stopped: ${rollout.self.reason}`);
   } else {
     deps.stderr(`Rollout finished with problems: ${upgraded} upgraded.`);
   }

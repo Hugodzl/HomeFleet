@@ -9,6 +9,12 @@
  *
  * Phase 3 (fleet push over HFP) and Phase 4 (dashboard) call the same
  * method; they add peers, not a second code path.
+ *
+ * Only one run may be in flight per process: the download alone can take
+ * tens of seconds, and two runs would race on upgrades/<v>/ (prepareRelease
+ * clears it per attempt) before either reaches the lock file. So every run —
+ * local or pushed — claims `pending` synchronously before its first await,
+ * and on success hands over to `inProgress` before letting go of it.
  */
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
@@ -94,9 +100,10 @@ export function defaultInstallCommand(platform: NodeJS.Platform): string[] {
 }
 
 export class UpgradeCoordinator {
+  /** A run succeeded: the updater owns the node and this daemon is exiting. */
   private inProgress = false;
-  /** A remote push was accepted and its background run has not finished starting. */
-  private pendingRemote = false;
+  /** A run (local or pushed) has claimed the node and has not finished starting. */
+  private pending = false;
 
   constructor(private readonly options: UpgradeCoordinatorOptions) {}
 
@@ -107,12 +114,24 @@ export class UpgradeCoordinator {
   }
 
   async upgradeSelf(input: UpgradeSelfInput): Promise<UpgradeStarted> {
-    if (this.pendingRemote) {
-      throw new UpgradeError("locked", "an upgrade is already in progress");
+    this.claim(); // synchronous: before the first await
+    try {
+      return await this.runUpgrade(input);
+    } finally {
+      // Success: runUpgrade already set inProgress, so there is no gap.
+      this.pending = false;
     }
-    return this.runUpgrade(input);
   }
 
+  /** Marks a run as started, or refuses if one already is. Never awaits. */
+  private claim(): void {
+    if (this.inProgress || this.pending) {
+      throw new UpgradeError("locked", "an upgrade is already in progress");
+    }
+    this.pending = true;
+  }
+
+  /** The upgrade itself; the caller must hold the {@link claim}. */
   private async runUpgrade(input: UpgradeSelfInput): Promise<UpgradeStarted> {
     const { requestShutdown } = this.options;
     if (requestShutdown === undefined) {
@@ -120,9 +139,6 @@ export class UpgradeCoordinator {
         "unsupported",
         "this daemon was not started by homefleetd, so it cannot restart itself",
       );
-    }
-    if (this.inProgress) {
-      throw new UpgradeError("locked", "an upgrade is already in progress");
     }
     const runtime = this.runtime();
     const source = input.source ?? this.options.source;
@@ -229,7 +245,7 @@ export class UpgradeCoordinator {
     }
     const busy = () =>
       new UpgradeError("locked", "an upgrade is already in progress");
-    if (this.inProgress || this.pendingRemote) {
+    if (this.inProgress || this.pending) {
       throw busy();
     }
     if (await isLockHeld(upgradesDir(this.options.dataDir), Date.now())) {
@@ -238,9 +254,9 @@ export class UpgradeCoordinator {
         "another upgrade holds upgrades/upgrade.lock",
       );
     }
-    // Re-check: another push may have been accepted while we read the lock.
-    // Nothing below awaits until pendingRemote is set.
-    if (this.inProgress || this.pendingRemote) {
+    // Re-check: another run may have started while we read the lock.
+    // Nothing below awaits until the claim is taken.
+    if (this.inProgress || this.pending) {
       throw busy();
     }
     const manifestBytes = Buffer.from(request.manifest, "base64");
@@ -290,7 +306,7 @@ export class UpgradeCoordinator {
     const source = new FallbackReleaseSource(
       peer !== undefined ? [peer, this.options.source] : [this.options.source],
     );
-    this.pendingRemote = true;
+    this.claim();
     void this.runUpgrade({ version, source })
       .catch(async (error: unknown) => {
         await writeUpgradeResult(this.options.dataDir, {
@@ -302,8 +318,9 @@ export class UpgradeCoordinator {
         }).catch(() => undefined);
       })
       .finally(() => {
-        // Success: inProgress now holds the node. Failure: free again.
-        this.pendingRemote = false;
+        // Success: inProgress now holds the node. Failure: free again, only
+        // after the failure is recorded so a new push never races its write.
+        this.pending = false;
       });
     return { version };
   }

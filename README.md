@@ -25,7 +25,7 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > release across your paired nodes from one terminal. Peers opt in with
 > `"upgrade": { "allowRemote": true }`; its first real-hardware run is after
 > publishing.
-> All of it has run on real hardware, laptop ↔ tower against a local
+> Everything through v0.5.1 has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
 > wrote a new test file that landed and passed in ~169 s

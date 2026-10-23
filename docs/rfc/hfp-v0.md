@@ -545,7 +545,7 @@ one of:
 | `NO_MODEL_SPECIFIED`    | Job needs a model and none was given or defaulted           |
 | `UPGRADE_DISABLED`      | Node does not accept remote upgrades (`allowRemote` false)  |
 | `UPGRADE_REJECTED`      | Signature or guard check failed; `details: { reason }`      |
-| `UPGRADE_BUSY`          | An upgrade is already in progress on this node              |
+| `UPGRADE_BUSY`          | An upgrade is already in progress, or jobs are running      |
 | `INTERNAL`              | Unexpected worker-side failure                              |
 
 ```json
@@ -657,7 +657,7 @@ Refusals use `HfpError`:
 | ---- | ------------------ | ------------------------------------------------------------ |
 | 403  | `UPGRADE_DISABLED` | `NodeInfo.upgrade.allowRemote` is false (the default)        |
 | 422  | `UPGRADE_REJECTED` | Bad signature or a failed guard; `details: { reason }` names the upgrade error code |
-| 409  | `UPGRADE_BUSY`     | An upgrade is already running                                |
+| 409  | `UPGRADE_BUSY`     | An upgrade is already in progress, or jobs are running       |
 
 A 0.3.x peer does not know the route and answers 404 `INVALID_REQUEST`
 ("unknown endpoint") to `POST /upgrade`; a sender SHOULD report such a peer as
