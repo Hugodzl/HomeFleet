@@ -13,17 +13,22 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { UpgradeRequest as HfpUpgradeRequest } from "@homefleet/protocol";
+import type { HfpClient, HfpTarget } from "../transport/client.js";
 import { UpgradeError } from "./errors.js";
 import {
   acquireLock,
   releaseLock,
   UPDATER_FILE,
   upgradesDir,
+  writeUpgradeResult,
   writeUpgradeState,
 } from "./files.js";
 import { checkNewer, checkUpgradeGuards } from "./guards.js";
+import { verifyManifestSignature } from "./manifest.js";
+import { PeerReleaseSource } from "./peer-release-source.js";
 import { type PreparedRelease, prepareRelease } from "./prepare.js";
-import type { ReleaseSource } from "./release-source.js";
+import { FallbackReleaseSource, type ReleaseSource } from "./release-source.js";
 import { compareSemver } from "./semver.js";
 import UPDATER_SOURCE from "./updater.mjs?raw";
 
@@ -41,6 +46,8 @@ export interface UpgradeStarted {
 export interface UpgradeSelfInput {
   version?: string;
   force?: boolean;
+  /** Overrides the coordinator's source for this call (target AND rollback copy). */
+  source?: ReleaseSource;
 }
 
 export interface UpgradeRuntime {
@@ -72,6 +79,10 @@ export interface UpgradeCoordinatorOptions {
   publicKeys?: readonly string[];
   /** Delay before shutdown so the 202 reaches the caller. Default 250 ms. */
   shutdownDelayMs?: number;
+  /** `upgrade.allowRemote`: whether a paired peer may push an upgrade. Default false (fail closed). */
+  allowRemote?: boolean;
+  /** Maps a paired peer's device id to where to reach it; undefined when unknown. */
+  resolvePeer?: (deviceId: string) => HfpTarget | undefined;
 }
 
 const EXIT_TIMEOUT_MS = 30_000;
@@ -103,21 +114,17 @@ export class UpgradeCoordinator {
     if (this.inProgress) {
       throw new UpgradeError("locked", "an upgrade is already in progress");
     }
-    const runtime = this.options.runtime ?? {
-      pid: process.pid,
-      execPath: process.execPath,
-      argv: process.argv,
-      platform: process.platform,
-    };
+    const runtime = this.runtime();
+    const source = input.source ?? this.options.source;
     const from = this.options.currentVersion;
-    const to = await this.resolveTarget(input.version);
+    const to = await this.resolveTarget(input.version, source);
     const notNewer = checkNewer(from, to);
     if (notNewer !== undefined) {
       throw notNewer; // before downloading anything
     }
 
     const dir = upgradesDir(this.options.dataDir);
-    const prepared = await prepareRelease(this.prepareOptions(dir, to));
+    const prepared = await prepareRelease(this.prepareOptions(dir, to, source));
     const refusal = checkUpgradeGuards({
       current: from,
       target: to,
@@ -132,7 +139,7 @@ export class UpgradeCoordinator {
     }
     // Best effort: pre-0.5 releases are unsigned, and GitHub may be down.
     const rollback: PreparedRelease | undefined = await prepareRelease(
-      this.prepareOptions(dir, from),
+      this.prepareOptions(dir, from, source),
     ).catch(() => undefined);
 
     if (!(await acquireLock(dir, { pid: runtime.pid, now: Date.now() }))) {
@@ -184,9 +191,110 @@ export class UpgradeCoordinator {
     return { from, to };
   }
 
-  private prepareOptions(dir: string, version: string) {
+  /**
+   * A paired peer pushed a signed upgrade. Everything that can be decided
+   * from the push alone is decided here, before replying, in a fixed order:
+   * disabled, locked, signature, guards. Only then does the (slow) download
+   * + upgrade run in the background - requester first, then our own source.
+   * A background failure is recorded as `lastUpgrade` failed, which is how
+   * the requester learns about it.
+   */
+  async acceptRemote(input: {
+    request: HfpUpgradeRequest;
+    requesterDeviceId: string;
+    client: Pick<HfpClient, "fetchUpgradeTarball">;
+  }): Promise<{ version: string }> {
+    const { request, requesterDeviceId, client } = input;
+    if (this.options.allowRemote !== true) {
+      throw new UpgradeError(
+        "disabled",
+        "remote upgrades are disabled on this node (upgrade.allowRemote)",
+      );
+    }
+    if (this.options.requestShutdown === undefined) {
+      throw new UpgradeError(
+        "unsupported",
+        "this daemon was not started by homefleetd, so it cannot restart itself",
+      );
+    }
+    // In-memory flag only: a held lock file is re-checked by upgradeSelf
+    // (acquireLock) and surfaces as a failed lastUpgrade instead.
+    if (this.inProgress) {
+      throw new UpgradeError("locked", "an upgrade is already in progress");
+    }
+    const manifestBytes = Buffer.from(request.manifest, "base64");
+    const verified = verifyManifestSignature({
+      manifestBytes,
+      signature: request.signature,
+      expectedVersion: request.version,
+      ...(this.options.publicKeys !== undefined
+        ? { publicKeys: this.options.publicKeys }
+        : {}),
+    });
+    if (!verified.ok) {
+      throw new UpgradeError(
+        "verify-failed",
+        `the pushed manifest was rejected (${verified.reason}): ${verified.detail}`,
+      );
+    }
+    const from = this.options.currentVersion;
+    const version = request.version;
+    const notNewer = checkNewer(from, version);
+    if (notNewer !== undefined) {
+      throw notNewer;
+    }
+    const refusal = checkUpgradeGuards({
+      current: from,
+      target: version,
+      targetHfpVersion: verified.manifest.hfpVersion,
+      localHfpVersion: this.options.localHfpVersion,
+      activeJobs: this.options.activeJobs(),
+      force: false,
+      entryPath: this.runtime().argv[1] ?? "",
+    });
+    if (refusal !== undefined) {
+      throw refusal;
+    }
+
+    const target = this.options.resolvePeer?.(requesterDeviceId);
+    const peer =
+      target !== undefined
+        ? new PeerReleaseSource({
+            client,
+            target,
+            manifestBytes,
+            signature: request.signature,
+          })
+        : undefined;
+    const source = new FallbackReleaseSource(
+      peer !== undefined ? [peer, this.options.source] : [this.options.source],
+    );
+    void this.upgradeSelf({ version, source }).catch(async (error: unknown) => {
+      await writeUpgradeResult(this.options.dataDir, {
+        from,
+        to: version,
+        outcome: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+        at: Date.now(),
+      }).catch(() => undefined);
+    });
+    return { version };
+  }
+
+  private runtime(): UpgradeRuntime {
+    return (
+      this.options.runtime ?? {
+        pid: process.pid,
+        execPath: process.execPath,
+        argv: process.argv,
+        platform: process.platform,
+      }
+    );
+  }
+
+  private prepareOptions(dir: string, version: string, source: ReleaseSource) {
     return {
-      source: this.options.source,
+      source,
       upgradesDir: dir,
       version,
       ...(this.options.publicKeys !== undefined
@@ -195,12 +303,15 @@ export class UpgradeCoordinator {
     };
   }
 
-  private async resolveTarget(version: string | undefined): Promise<string> {
+  private async resolveTarget(
+    version: string | undefined,
+    source: ReleaseSource = this.options.source,
+  ): Promise<string> {
     if (version !== undefined) {
       return version;
     }
     try {
-      return await this.options.source.latestVersion();
+      return await source.latestVersion();
     } catch (error) {
       throw new UpgradeError(
         "fetch-failed",
