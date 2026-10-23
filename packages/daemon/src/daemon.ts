@@ -50,12 +50,20 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
-import { UpgradeCoordinator } from "./upgrade/coordinator.js";
-import { readUpgradeResultSync, toLastUpgrade } from "./upgrade/files.js";
+import {
+  UpgradeCoordinator,
+  type UpgradeCoordinatorOptions,
+} from "./upgrade/coordinator.js";
+import {
+  readUpgradeResultSync,
+  toLastUpgrade,
+  upgradesDir,
+} from "./upgrade/files.js";
 import {
   GitHubReleaseSource,
   type ReleaseSource,
 } from "./upgrade/release-source.js";
+import { registerUpgradeRoutes } from "./upgrade/routes.js";
 import { DAEMON_VERSION } from "./version.js";
 import { ArtifactStore } from "./workspace/artifact-store.js";
 import { registerWorkspaceRoutes } from "./workspace/routes.js";
@@ -103,6 +111,21 @@ export interface DaemonOptions {
   requestShutdown?: (reason: string) => void;
   /** Where upgrades come from; defaults to GitHub Releases. Tests inject a fake. */
   releaseSource?: ReleaseSource;
+  /**
+   * TEST-ONLY override of `DAEMON_VERSION`, applied to both the advertised
+   * NodeInfo and the upgrade coordinator's `currentVersion`, so a test daemon
+   * can be "older" than a fixture release. Never set in production.
+   */
+  daemonVersion?: string;
+  /**
+   * TEST-ONLY seams passed straight to the upgrade coordinator (fake install
+   * runtime, recording updater spawn, test signing keys). Never set in
+   * production.
+   */
+  upgradeSeams?: Pick<
+    UpgradeCoordinatorOptions,
+    "runtime" | "spawnUpdater" | "publicKeys" | "shutdownDelayMs"
+  >;
 }
 
 /**
@@ -112,6 +135,7 @@ export interface DaemonOptions {
 interface DaemonRuntime {
   deviceId: string;
   trustStore: TrustStore;
+  knownNodes: KnownNodesRegistry;
   pairingManager: PairingManager;
   nodeInfoProvider: () => NodeInfo;
   hfpClient: HfpClient;
@@ -359,6 +383,8 @@ export class Daemon {
   private readonly onDiagnostic: (message: string) => void;
   private readonly requestShutdown: ((reason: string) => void) | undefined;
   private readonly releaseSource: ReleaseSource | undefined;
+  private readonly daemonVersion: string;
+  private readonly upgradeSeams: DaemonOptions["upgradeSeams"];
 
   private state: "new" | "started" | "stopped" = "new";
   private runtime: DaemonRuntime | null = null;
@@ -378,6 +404,8 @@ export class Daemon {
     this.onDiagnostic = options.onDiagnostic ?? (() => {});
     this.requestShutdown = options.requestShutdown;
     this.releaseSource = options.releaseSource;
+    this.daemonVersion = options.daemonVersion ?? DAEMON_VERSION;
+    this.upgradeSeams = options.upgradeSeams;
   }
 
   /**
@@ -518,7 +546,7 @@ export class Daemon {
     const nodeInfoProvider = createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
-      daemonVersion: DAEMON_VERSION,
+      daemonVersion: this.daemonVersion,
       jobs: jobManager,
       lastUpgrade: () => {
         const result = readUpgradeResultSync(dataDir);
@@ -616,13 +644,31 @@ export class Daemon {
     let controlPort = 0;
     const upgrades = new UpgradeCoordinator({
       dataDir,
-      currentVersion: DAEMON_VERSION,
+      currentVersion: this.daemonVersion,
       localHfpVersion: HFP_PROTOCOL_VERSION,
       source: this.releaseSource ?? new GitHubReleaseSource(),
       activeJobs: () => jobManager.activeJobs,
       controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
       ...(this.requestShutdown !== undefined
         ? { requestShutdown: this.requestShutdown }
+        : {}),
+      allowRemote: config.upgrade.allowRemote,
+      resolvePeer: (id) => {
+        const node = nodeDirectory.resolve(id);
+        return node?.host !== undefined && node.port !== undefined
+          ? { host: node.host, port: node.port, expectedDeviceId: id }
+          : undefined;
+      },
+      ...this.upgradeSeams,
+    });
+    // Routes are live-registered, so adding them after `nodeServer.start()`
+    // is fine; they need the coordinator, which needs the control endpoint.
+    registerUpgradeRoutes(nodeServer, {
+      coordinator: upgrades,
+      client: hfpClient,
+      upgradesDir: upgradesDir(dataDir),
+      ...(this.upgradeSeams?.publicKeys !== undefined
+        ? { publicKeys: this.upgradeSeams.publicKeys }
         : {}),
     });
     const controlSurface: ControlSurface = {
@@ -705,6 +751,7 @@ export class Daemon {
     this.runtime = {
       deviceId: identity.deviceId,
       trustStore,
+      knownNodes,
       pairingManager,
       nodeInfoProvider,
       hfpClient,
@@ -780,6 +827,11 @@ export class Daemon {
   /** Exposed for pairing flows (recording the peer after a client-side pair). */
   get trustStore(): TrustStore {
     return this.started.trustStore;
+  }
+
+  /** Exposed for tests seeding peer endpoints (discovery is off in tests). */
+  get knownNodes(): KnownNodesRegistry {
+    return this.started.knownNodes;
   }
 
   /** This daemon's outbound HFP client (pairing, workspace sync). */
