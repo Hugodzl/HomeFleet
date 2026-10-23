@@ -26,6 +26,7 @@ import {
   type UpgradeResult,
   upgradesDir,
 } from "../upgrade/files.js";
+import { UPGRADE_WAIT_MS } from "../upgrade/rollout.js";
 import { isSemver } from "../upgrade/semver.js";
 import { DAEMON_VERSION } from "../version.js";
 import {
@@ -575,8 +576,9 @@ async function runDashboard(args: string[], deps: CliDeps): Promise<number> {
   });
 }
 
-/** How long `upgrade` waits for the restarted daemon (spec: 3 minutes). */
-export const UPGRADE_WAIT_MS = 180_000;
+/** `upgrade` waits UPGRADE_WAIT_MS (spec: 3 minutes) for the restarted daemon; defined in upgrade/rollout.ts. */
+export { UPGRADE_WAIT_MS } from "../upgrade/rollout.js";
+
 const UPGRADE_POLL_MS = 2_000;
 
 interface UpgradeArgs {
