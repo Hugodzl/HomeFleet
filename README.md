@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.5.3 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.5.4 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
 > `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
@@ -23,9 +23,8 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > daemon and rolls back if the new version fails — plus `homefleet unpair`.
 > v0.5.2 adds **fleet push** (HFP 0.4.0) — `homefleet fleet upgrade` rolls a
 > release across your paired nodes from one terminal. Peers opt in with
-> `"upgrade": { "allowRemote": true }`; its first real-hardware run is after
-> publishing.
-> Everything through v0.5.1 has run on real hardware, laptop ↔ tower against a local
+> `"upgrade": { "allowRemote": true }`.
+> All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
 > wrote a new test file that landed and passed in ~169 s
@@ -34,7 +33,9 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > in both directions, and the dashboard showed a live delegated job reach
 > `succeeded` against the tower ([dashboard devlog](devlog/2026-09-24-read-only-dashboard.md)),
 > and both machines self-upgraded 0.5.0 → 0.5.1 and rolled back a
-> deliberately broken build ([self-upgrade devlog](devlog/2026-10-22-first-self-upgrade.md)).
+> deliberately broken build ([self-upgrade devlog](devlog/2026-10-22-first-self-upgrade.md)),
+> and the laptop pushed v0.5.3 to the tower with `homefleet fleet upgrade` in
+> 14 s ([fleet-push devlog](devlog/2026-10-23-first-fleet-push.md)).
 > Windows-first; not on the npm registry yet. The
 > [Quickstart](#quickstart) runs today on a single machine; pairing two real
 > machines is the [two-machine demo](#two-machine-demo).
@@ -85,7 +86,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.3) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.5.4) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
