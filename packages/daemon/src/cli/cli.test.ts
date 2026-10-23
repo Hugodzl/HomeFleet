@@ -8,6 +8,7 @@
 import { describe, expect, test } from "vitest";
 import type { DaemonConfig } from "../config/config.js";
 import type { ControlStatus } from "../control/control-server.js";
+import type { PeerRolloutStatus, RolloutStatus } from "../upgrade/rollout.js";
 import { DAEMON_VERSION } from "../version.js";
 import { type CliDeps, type CliIdentity, runCli } from "./cli.js";
 import type {
@@ -47,6 +48,7 @@ function fakeConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
     executors: {},
     models: [],
     jobs: {},
+    upgrade: { allowRemote: false },
     repos: [],
     ...overrides,
   } as DaemonConfig;
@@ -93,6 +95,7 @@ function fakeControlClient(
       available: false,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    upgrades: async () => null,
     ...overrides,
   };
 }
@@ -209,6 +212,20 @@ describe("setup", () => {
     expect(output).toContain("schtasks /Create");
     expect(output).toContain("node.exe");
     expect(output).toContain("homefleetd.ts");
+  });
+
+  test("setup hints how to enable remote upgrades only while they are off", async () => {
+    const hint =
+      'Remote upgrades are off. To let a paired node upgrade this one, add "upgrade": { "allowRemote": true } to config.json.';
+    const off = makeHarness();
+    expect(await runCli(["setup"], off.deps)).toBe(0);
+    expect(off.stdoutLines.join("\n")).toContain(hint);
+
+    const on = makeHarness({
+      config: fakeConfig({ upgrade: { allowRemote: true } }),
+    });
+    expect(await runCli(["setup"], on.deps)).toBe(0);
+    expect(on.stdoutLines.join("\n")).not.toContain(hint);
   });
 
   test("autostart command defaults to the built homefleetd.js entry (not .ts)", async () => {
@@ -1188,5 +1205,325 @@ describe("upgrade visibility (v0.5.1)", () => {
       "lastUpgrade: 0.5.1 → 0.5.2 rolled-back at 2026-10-22T11:00:00.000Z " +
         "(the 0.5.2 daemon did not report its version within 60000 ms)",
     );
+  });
+});
+
+describe("fleet upgrade", () => {
+  const PEER_A = `a1${"0".repeat(62)}`;
+  const PEER_B = `b2${"0".repeat(62)}`;
+  const PEER_B2 = `b2${"0".repeat(10)}${"1".repeat(52)}`;
+
+  function peer(
+    deviceId: string,
+    name: string,
+    state: PeerRolloutStatus["state"],
+    extra: Partial<PeerRolloutStatus> = {},
+  ): PeerRolloutStatus {
+    return { deviceId, name, from: "0.5.0", state, ...extra };
+  }
+
+  function rollout(
+    peers: PeerRolloutStatus[],
+    self: RolloutStatus["self"],
+    state: RolloutStatus["state"] = "running",
+  ): RolloutStatus {
+    return {
+      id: "r1",
+      target: "0.5.2",
+      startedAt: "2026-10-22T12:00:00.000Z",
+      state,
+      peers,
+      self,
+    };
+  }
+
+  function statusAt(daemonVersion: string): ControlStatus {
+    return {
+      deviceId: FAKE_DEVICE_ID,
+      name: "n",
+      platform: "win32",
+      daemonVersion,
+      protocolVersion: "0.4.0",
+      hfpPort: 1,
+      mcpPort: 2,
+      controlPort: 3,
+      roles: [],
+      executors: [],
+      models: [],
+      activeJobs: 0,
+      maxConcurrentJobs: 1,
+    };
+  }
+
+  function nodeEntry(deviceId: string, name: string) {
+    return { deviceId, name, reachable: true };
+  }
+
+  /** Harness with a fake clock: every sleep advances it. */
+  function harness(client: ControlClientLike) {
+    const h = makeHarness({ controlClient: client });
+    let clock = 1_000;
+    h.deps.now = () => clock;
+    h.deps.sleep = async (ms) => {
+      clock += ms;
+    };
+    return h;
+  }
+
+  /** `upgrades()` replays `polls` in order, repeating the last one. */
+  function replay(polls: Array<RolloutStatus | Error | null>) {
+    return async (): Promise<RolloutStatus | null> => {
+      const next = polls.length > 1 ? polls.shift() : polls[0];
+      if (next instanceof Error) {
+        throw next;
+      }
+      return next ?? null;
+    };
+  }
+
+  test("prints the plan and per-peer progress, then waits for self", async () => {
+    const statuses = [statusAt("0.5.0"), statusAt("0.5.0"), statusAt("0.5.2")];
+    const h = harness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.2"),
+        upgrade: async () =>
+          rollout(
+            [peer(PEER_A, "alpha", "pending"), peer(PEER_B, "beta", "pending")],
+            { state: "pending" },
+          ),
+        upgrades: replay([
+          rollout(
+            [
+              peer(PEER_A, "alpha", "restarting"),
+              peer(PEER_B, "beta", "pending"),
+            ],
+            { state: "pending" },
+          ),
+          rollout(
+            [
+              peer(PEER_A, "alpha", "succeeded"),
+              peer(PEER_B, "beta", "succeeded"),
+            ],
+            { state: "pending" },
+          ),
+          rollout(
+            [
+              peer(PEER_A, "alpha", "succeeded"),
+              peer(PEER_B, "beta", "succeeded"),
+            ],
+            { state: "restarting" },
+          ),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
+    expect(h.stdoutLines).toEqual([
+      "Rolling out 0.5.2 to: alpha (0.5.0), beta (0.5.0); this node last.",
+      "  alpha: restarting",
+      "  alpha: succeeded",
+      "  beta: succeeded",
+      "Upgraded to 0.5.2.",
+      "Rollout complete: 3 upgraded.",
+    ]);
+  });
+
+  test("stops and exits 1 when a peer rolls back", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () =>
+          rollout(
+            [peer(PEER_A, "alpha", "pending"), peer(PEER_B, "beta", "pending")],
+            { state: "pending" },
+          ),
+        upgrades: replay([
+          rollout(
+            [
+              peer(PEER_A, "alpha", "rolled-back", {
+                reason: "health check failed",
+              }),
+              peer(PEER_B, "beta", "pending"),
+            ],
+            { state: "pending" },
+            "stopped",
+          ),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stdoutLines).toContain(
+      "  alpha: rolled-back (health check failed)",
+    );
+    expect(h.stderrLines).toContain("Rollout stopped at alpha: rolled-back.");
+  });
+
+  test("a rollout stopped with only a self reason prints that reason", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () =>
+          rollout([peer(PEER_A, "alpha", "pending")], { state: "pending" }),
+        upgrades: replay([
+          rollout(
+            [peer(PEER_A, "alpha", "succeeded")],
+            { state: "pending", reason: "peer list failed: boom" },
+            "stopped",
+          ),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toContain("Rollout stopped: peer list failed: boom");
+  });
+
+  test("a refused peer does not stop the rollout but makes the exit 1", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () =>
+          rollout(
+            [peer(PEER_A, "alpha", "pending"), peer(PEER_B, "beta", "pending")],
+            { state: "skipped" },
+          ),
+        upgrades: replay([
+          rollout(
+            [
+              peer(PEER_A, "alpha", "refused", {
+                reason: "remote upgrades off",
+              }),
+              peer(PEER_B, "beta", "succeeded"),
+            ],
+            { state: "skipped" },
+            "done",
+          ),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stdoutLines).toContain("  alpha: refused (remote upgrades off)");
+    expect(h.stderrLines.join("\n")).toContain("alpha: refused");
+  });
+
+  test("--nodes resolves names and prefixes to full ids", async () => {
+    const calls: unknown[] = [];
+    const h = harness(
+      fakeControlClient({
+        nodes: async () =>
+          [nodeEntry(PEER_A, "alpha"), nodeEntry(PEER_B, "beta")] as never,
+        upgrade: async (input) => {
+          calls.push(input);
+          return rollout([peer(PEER_A, "alpha", "pending")], {
+            state: "skipped",
+          });
+        },
+        upgrades: replay([
+          rollout(
+            [peer(PEER_A, "alpha", "succeeded")],
+            { state: "skipped" },
+            "done",
+          ),
+        ]),
+      }),
+    );
+    const code = await runCli(
+      [
+        "fleet",
+        "upgrade",
+        "--to",
+        "0.5.2",
+        "--force-local",
+        "--nodes",
+        "alpha",
+        PEER_B.slice(0, 8),
+      ],
+      h.deps,
+    );
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      { targets: [PEER_A, PEER_B], version: "0.5.2", forceLocal: true },
+    ]);
+  });
+
+  test("--nodes with an ambiguous prefix exits 2", async () => {
+    let upgraded = false;
+    const h = harness(
+      fakeControlClient({
+        nodes: async () =>
+          [nodeEntry(PEER_B, "beta"), nodeEntry(PEER_B2, "gamma")] as never,
+        upgrade: async () => {
+          upgraded = true;
+          return rollout([], { state: "skipped" });
+        },
+      }),
+    );
+    expect(
+      await runCli(["fleet", "upgrade", "--nodes", "b2000000"], h.deps),
+    ).toBe(2);
+    expect(upgraded).toBe(false);
+  });
+
+  test("bad arguments exit 2", async () => {
+    const h = harness(
+      fakeControlClient({
+        nodes: async () => [nodeEntry(PEER_A, "alpha")] as never,
+      }),
+    );
+    expect(
+      await runCli(["fleet", "upgrade", "--nodes", "nobody"], h.deps),
+    ).toBe(2);
+    expect(await runCli(["fleet", "upgrade", "--nodes"], h.deps)).toBe(2);
+    expect(await runCli(["fleet", "upgrade", "--bogus"], h.deps)).toBe(2);
+    expect(await runCli(["fleet"], h.deps)).toBe(2);
+  });
+
+  test("rollout survives the local restart", async () => {
+    const statuses = [statusAt("0.5.0"), statusAt("0.5.2")];
+    const h = harness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.2"),
+        upgrade: async () =>
+          rollout([peer(PEER_A, "alpha", "pending")], { state: "pending" }),
+        upgrades: replay([
+          rollout([peer(PEER_A, "alpha", "succeeded")], { state: "pending" }),
+          new DaemonUnreachableError("127.0.0.1", 56373, undefined),
+        ]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
+    expect(h.stdoutLines.at(-1)).toBe("Rollout complete: 2 upgraded.");
+  });
+
+  test("an unexpected null rollout while self is pending falls back to waiting", async () => {
+    const statuses = [statusAt("0.5.0"), statusAt("0.5.2")];
+    const h = harness(
+      fakeControlClient({
+        status: async () => statuses.shift() ?? statusAt("0.5.2"),
+        upgrade: async () =>
+          rollout([peer(PEER_A, "alpha", "succeeded")], { state: "pending" }),
+        upgrades: replay([null]),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
+  });
+
+  test("a locked fleet is reported as refused", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () => {
+          throw new ControlRequestError(409, "an upgrade is running", "locked");
+        },
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([
+      "Fleet upgrade refused: an upgrade is running",
+    ]);
+  });
+
+  test("nothing to do", async () => {
+    const h = harness(
+      fakeControlClient({
+        upgrade: async () => rollout([], { state: "skipped" }, "done"),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
+    expect(h.stdoutLines).toEqual(["Everything is already on 0.5.2."]);
   });
 });

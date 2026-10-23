@@ -13,6 +13,7 @@ import os from "node:os";
 import {
   type ExecutorKind,
   HFP_PROTOCOL_VERSION,
+  type LastUpgrade,
   type ModelInfo,
   type NodeInfo,
   NodeInfoSchema,
@@ -21,7 +22,10 @@ import {
 import type { DaemonConfig } from "../config/config.js";
 
 /** The config sections the profile is derived from (DaemonConfig satisfies it). */
-export type NodeInfoConfig = Pick<DaemonConfig, "node" | "executors">;
+export type NodeInfoConfig = Pick<
+  DaemonConfig,
+  "node" | "executors" | "upgrade"
+>;
 
 /**
  * Live job-load surface the profile reads on every call. A `Pick`-style
@@ -38,7 +42,7 @@ export interface JobLoadSource {
 export interface NodeInfoProviderOptions {
   /** This node's device ID (SHA-256 cert fingerprint), from its identity. */
   deviceId: string;
-  /** The loaded daemon config (only `node`/`executors` are read). */
+  /** The loaded daemon config (only `node`/`executors`/`upgrade` are read). */
   config: NodeInfoConfig;
   /** The daemon's own version, advertised as `daemonVersion` (semver). */
   daemonVersion: string;
@@ -51,6 +55,13 @@ export interface NodeInfoProviderOptions {
   jobs?: JobLoadSource;
   /** Test override for `os.hostname()` (the name-fallback chain is OS-dependent). */
   hostname?: string;
+  /**
+   * The last upgrade's outcome, advertised so peers can see how it went.
+   * A function, re-read on every profile build, because the updater writes
+   * the result file after this provider is created (and after a restart it
+   * reports the upgrade that just ran).
+   */
+  lastUpgrade?: () => LastUpgrade | undefined;
   /** The status-stamped catalog to advertise (built by the daemon). */
   models: ModelInfo[];
 }
@@ -165,6 +176,8 @@ export function createNodeInfoProvider(
       // See {@link NodeInfoProviderOptions.jobs} for the 1/0 default.
       maxConcurrentJobs: jobs?.maxConcurrent ?? 1,
       activeJobs: jobs?.activeJobs ?? 0,
+      upgrade: { allowRemote: config.upgrade.allowRemote },
+      lastUpgrade: options.lastUpgrade?.(),
     } satisfies NodeInfo);
 
   // Eager validation: every realistically-failable field (name, versions,

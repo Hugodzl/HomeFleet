@@ -1,10 +1,10 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { UpgradeError } from "./errors.js";
 import { releaseFileName } from "./manifest.js";
-import { prepareRelease } from "./prepare.js";
+import { prepareRelease, readVerifiedCache } from "./prepare.js";
 import {
   FakeReleaseSource,
   makeTestKeys,
@@ -92,4 +92,24 @@ test("a download failure is fetch-failed", async () => {
     publicKeys: [keys.publicKey],
   }).catch((e: unknown) => e);
   expect((error as UpgradeError).code).toBe("fetch-failed");
+});
+
+test("readVerifiedCache returns the cached release, undefined once corrupted", async () => {
+  const { upgradesDir, keys, source } = await setup();
+  expect(
+    await readVerifiedCache(upgradesDir, "0.5.1", [keys.publicKey]),
+  ).toBeUndefined();
+  const prepared = await prepareRelease({
+    source,
+    upgradesDir,
+    version: "0.5.1",
+    publicKeys: [keys.publicKey],
+  });
+  expect(
+    await readVerifiedCache(upgradesDir, "0.5.1", [keys.publicKey]),
+  ).toEqual(prepared);
+  await truncate(prepared.tarballPath, 3);
+  expect(
+    await readVerifiedCache(upgradesDir, "0.5.1", [keys.publicKey]),
+  ).toBeUndefined();
 });

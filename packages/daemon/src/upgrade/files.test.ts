@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   acquireLock,
   LOCK_FILE,
@@ -9,6 +9,8 @@ import {
   readUpgradeResultSync,
   releaseLock,
   STALE_LOCK_MS,
+  toLastUpgrade,
+  writeUpgradeResult,
 } from "./files.js";
 
 const dirs: string[] = [];
@@ -85,4 +87,65 @@ test("readUpgradeResultSync: absent, valid, corrupt", async () => {
   });
   await writeFile(path.join(dataDir, RESULT_FILE), "{");
   expect(readUpgradeResultSync(dataDir)).toBeUndefined();
+});
+
+test("toLastUpgrade maps to -> version and epoch ms -> ISO string", () => {
+  const at = Date.UTC(2026, 9, 22, 18);
+  expect(
+    toLastUpgrade({
+      from: "0.5.1",
+      to: "0.5.2",
+      outcome: "rolled-back",
+      reason: "r",
+      at,
+    }),
+  ).toEqual({
+    version: "0.5.2",
+    outcome: "rolled-back",
+    reason: "r",
+    at: "2026-10-22T18:00:00.000Z",
+  });
+  const noReason = toLastUpgrade({
+    from: "0.5.1",
+    to: "0.5.2",
+    outcome: "succeeded",
+    at,
+  });
+  expect("reason" in noReason).toBe(false);
+});
+
+test("writeUpgradeResult round-trips through readUpgradeResultSync", async () => {
+  const dataDir = await tempDir();
+  const result = {
+    from: "0.5.1",
+    to: "0.5.2",
+    outcome: "failed" as const,
+    reason: "verify-failed",
+    at: 1_700_000_000_000,
+  };
+  await writeUpgradeResult(dataDir, result);
+  expect(readUpgradeResultSync(dataDir)).toEqual(result);
+  expect(
+    (await readFile(path.join(dataDir, RESULT_FILE), "utf8")).endsWith("\n"),
+  ).toBe(true);
+});
+
+describe("readUpgradeResultSync rejects shape-valid but unusable files", () => {
+  const base = { from: "0.5.0", to: "0.5.1", outcome: "failed", at: 5 };
+  test.each([
+    ["non-semver to", { ...base, to: "latest" }],
+    ["non-semver from", { ...base, from: "x" }],
+    ["at out of Date range", { ...base, at: 1e20 }],
+    ["at null", { ...base, at: null }],
+  ])("%s -> undefined", async (_name, body) => {
+    const dataDir = await tempDir();
+    await writeFile(path.join(dataDir, RESULT_FILE), JSON.stringify(body));
+    expect(readUpgradeResultSync(dataDir)).toBeUndefined();
+  });
+
+  test("a valid file still parses", async () => {
+    const dataDir = await tempDir();
+    await writeFile(path.join(dataDir, RESULT_FILE), JSON.stringify(base));
+    expect(readUpgradeResultSync(dataDir)).toEqual(base);
+  });
 });

@@ -18,6 +18,9 @@ export const HfpErrorCodeSchema = z.enum([
   "COMMAND_NOT_ALLOWED",
   "MODEL_NOT_OFFERED",
   "NO_MODEL_SPECIFIED",
+  "UPGRADE_DISABLED",
+  "UPGRADE_REJECTED",
+  "UPGRADE_BUSY",
   "INTERNAL",
 ]);
 export type HfpErrorCode = z.infer<typeof HfpErrorCodeSchema>;

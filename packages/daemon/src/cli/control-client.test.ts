@@ -19,6 +19,7 @@ import {
   type UnpairSummary,
 } from "../control/control-server.js";
 import { UpgradeError } from "../upgrade/errors.js";
+import type { RolloutStatus } from "../upgrade/rollout.js";
 import {
   ControlClient,
   ControlRequestError,
@@ -72,6 +73,7 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       available: true,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    upgrades: () => undefined,
     ...overrides,
   };
 }
@@ -346,4 +348,31 @@ test("an upgrade refusal surfaces as ControlRequestError with status + code", as
     code: "busy",
     message: "1 job(s) running",
   });
+});
+
+const ROLLOUT: RolloutStatus = {
+  id: "rollout-1",
+  target: "0.5.2",
+  startedAt: "2026-10-22T10:00:00.000Z",
+  state: "running",
+  peers: [{ deviceId: "b".repeat(64), name: "peer-node", state: "pending" }],
+  self: { state: "pending" },
+};
+
+test("a fleet upgrade() returns the rollout status; upgrades() reads it back", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => ROLLOUT,
+      upgrades: () => ROLLOUT,
+    }),
+  });
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  await expect(client.upgrade({ targets: "fleet" })).resolves.toEqual(ROLLOUT);
+  await expect(client.upgrades()).resolves.toEqual(ROLLOUT);
+});
+
+test("upgrades() resolves null when no rollout has run", async () => {
+  const server = await start();
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  await expect(client.upgrades()).resolves.toBeNull();
 });

@@ -109,10 +109,22 @@ function signatureValid(
   });
 }
 
-/** Never throws on bad input — every failure is a typed result. */
-export async function verifyRelease(
-  input: VerifyReleaseInput,
-): Promise<VerifyResult> {
+export interface VerifyManifestSignatureInput {
+  manifestBytes: Buffer;
+  /** base64 detached Ed25519 signature (surrounding whitespace ignored). */
+  signature: string;
+  expectedVersion: string;
+  /** Defaults to the pinned RELEASE_PUBLIC_KEYS; tests pass their own. */
+  publicKeys?: readonly string[];
+}
+
+/**
+ * Signature + schema + version, WITHOUT a tarball: a pushed upgrade is
+ * vetted by its manifest before any tarball bytes exist on disk. Never throws.
+ */
+export function verifyManifestSignature(
+  input: VerifyManifestSignatureInput,
+): VerifyResult {
   const publicKeys = input.publicKeys ?? RELEASE_PUBLIC_KEYS;
   if (!signatureValid(input.manifestBytes, input.signature, publicKeys)) {
     return fail(
@@ -137,6 +149,18 @@ export async function verifyRelease(
       `the manifest is for ${manifest.version}, expected ${input.expectedVersion}`,
     );
   }
+  return { ok: true, manifest };
+}
+
+/** Never throws on bad input — every failure is a typed result. */
+export async function verifyRelease(
+  input: VerifyReleaseInput,
+): Promise<VerifyResult> {
+  const checked = verifyManifestSignature(input);
+  if (!checked.ok) {
+    return checked;
+  }
+  const manifest = checked.manifest;
   if (
     manifest.file !== releaseFileName(manifest.version) ||
     path.basename(input.tarballPath) !== manifest.file

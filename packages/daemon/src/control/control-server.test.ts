@@ -12,6 +12,7 @@ import {
 } from "node:http";
 import { afterEach, expect, test } from "vitest";
 import { UpgradeError } from "../upgrade/errors.js";
+import type { RolloutStatus } from "../upgrade/rollout.js";
 import {
   CONTROL_HEADER,
   type ControlJobs,
@@ -73,6 +74,7 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       available: true,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    upgrades: () => undefined,
     ...overrides,
   };
 }
@@ -885,6 +887,152 @@ test("POST /control/upgrade still requires the control header", async () => {
     path: "/control/upgrade",
     headers: { [CONTROL_HEADER]: undefined },
     body: "{}",
+  });
+  expect(response.status).toBe(403);
+});
+
+const FLEET_STATUS: RolloutStatus = {
+  id: "rollout-1",
+  target: "0.5.2",
+  startedAt: "2026-10-22T10:00:00.000Z",
+  state: "running",
+  peers: [
+    {
+      deviceId: FAKE_PEER_DEVICE_ID,
+      name: "peer-node",
+      from: "0.5.0",
+      state: "pending",
+    },
+  ],
+  self: { state: "pending" },
+};
+
+test("POST /control/upgrade {targets:'fleet'} returns 202 with the rollout status", async () => {
+  const calls: unknown[] = [];
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async (input) => {
+        calls.push(input);
+        return FLEET_STATUS;
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: "fleet", forceLocal: true }),
+  });
+  expect(response.status).toBe(202);
+  expect(response.json).toEqual(FLEET_STATUS);
+  expect(calls).toEqual([{ targets: "fleet", forceLocal: true }]);
+});
+
+test("POST /control/upgrade accepts an array of device IDs", async () => {
+  const calls: unknown[] = [];
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async (input) => {
+        calls.push(input);
+        return FLEET_STATUS;
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: [FAKE_PEER_DEVICE_ID] }),
+  });
+  expect(response.status).toBe(202);
+  expect(calls).toEqual([{ targets: [FAKE_PEER_DEVICE_ID] }]);
+});
+
+test("POST /control/upgrade rejects an empty targets array with 400", async () => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        called = true;
+        return FLEET_STATUS;
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: [] }),
+  });
+  expect(response.status).toBe(400);
+  expect(called).toBe(false);
+});
+
+test("a locked UpgradeError (second fleet start) maps to 409 with its code", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        throw new UpgradeError("locked", "a fleet rollout is already running");
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: "fleet" }),
+  });
+  expect(response.status).toBe(409);
+  expect(response.json).toEqual({
+    error: "a fleet rollout is already running",
+    code: "locked",
+  });
+});
+
+test("an unknown-node UpgradeError maps to 400 and names the ids", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        throw new UpgradeError("unknown-node", "not a paired device: cc");
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: ["cc"] }),
+  });
+  expect(response.status).toBe(400);
+  expect(response.json).toEqual({
+    error: "not a paired device: cc",
+    code: "unknown-node",
+  });
+});
+
+test("GET /control/upgrades returns the rollout, or null when none ran", async () => {
+  const withRollout = await start({
+    surface: fakeSurface({ upgrades: () => FLEET_STATUS }),
+  });
+  const a = await send(withRollout.port, {
+    method: "GET",
+    path: "/control/upgrades",
+  });
+  expect(a.status).toBe(200);
+  expect(a.json).toEqual({ rollout: FLEET_STATUS });
+
+  const none = await start();
+  const b = await send(none.port, { method: "GET", path: "/control/upgrades" });
+  expect(b.status).toBe(200);
+  expect(b.json).toEqual({ rollout: null });
+});
+
+test("GET /control/upgrades requires the control header", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "GET",
+    path: "/control/upgrades",
+    headers: { [CONTROL_HEADER]: undefined },
   });
   expect(response.status).toBe(403);
 });

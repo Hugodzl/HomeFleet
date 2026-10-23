@@ -18,7 +18,7 @@ disagree, the schemas win and this document has a bug.
 
 ## Status of This Document
 
-Draft. Describes protocol version **0.3.0** as implemented by the
+Draft. Describes protocol version **0.4.0** as implemented by the
 `@homefleet/protocol` package. Everything in a v0.x protocol version is
 subject to change until v1.
 
@@ -75,6 +75,8 @@ HFP is bound to HTTPS with mutual TLS:
 | GET    | `/hfp/v0/jobs/{id}/artifact` | —                 | git bundle (binary)            |
 | POST   | `/hfp/v0/workspace/have`   | `HaveTipRequest`    | `HaveTipResponse`              |
 | POST   | `/hfp/v0/workspace/bundle` | git bundle (binary) | `BundleUploadResponse`         |
+| POST   | `/hfp/v0/upgrade`          | `UpgradeRequest`    | `UpgradeAccepted` (202)        |
+| GET    | `/hfp/v0/upgrade/tarball/{version}` | —          | release tarball (binary)       |
 
 `{id}` is the job ID (an RFC 4122 UUID, canonical lowercase) returned by
 `POST /hfp/v0/jobs`. On failure,
@@ -118,7 +120,7 @@ What a node advertises about itself during `hello` and pairing.
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
 | `name`              | string                                  | Human-readable, 1–64 chars, no control characters (C0 or DEL) |
 | `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
-| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.3.0"` for this document |
+| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.4.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
 | `executors`         | `("command" \| "agent" \| "write")[]`   | Executor kinds this node offers                |
@@ -126,6 +128,8 @@ What a node advertises about itself during `hello` and pairing.
 | `hardware`          | `{ cpu, ramBytes, gpus: GpuInfo[] }`    | `cpu`: string; `ramBytes`: integer ≥ 0         |
 | `maxConcurrentJobs` | integer ≥ 1                             |                                                |
 | `activeJobs`        | integer ≥ 0                             |                                                |
+| `upgrade`           | `{ allowRemote: boolean }`              | Optional. Whether this node accepts pushed upgrades; absent on pre-0.4 peers |
+| `lastUpgrade`       | `{ version, outcome, reason?, at }`     | Optional. Latest self-upgrade: `outcome` is `"succeeded" \| "rolled-back" \| "failed"`, `at` an ISO 8601 UTC string |
 
 `ModelInfo` is `{ id: string, label?: string, contextWindow?: integer ≥ 1,
 status?: ModelStatus }`, where `ModelStatus` is `"ok" | "not_served" |
@@ -139,8 +143,8 @@ catalog-derived model. `GpuInfo` is `{ name: string, vramBytes?: integer ≥ 0 }
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
-  "daemonVersion": "0.5.1",
-  "protocolVersion": "0.3.0",
+  "daemonVersion": "0.5.2",
+  "protocolVersion": "0.4.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
   "executors": ["command", "agent"],
@@ -537,6 +541,11 @@ one of:
 | `TIMEOUT`               | Command killed after exceeding its `timeoutMs`              |
 | `BUDGET_EXCEEDED`       | Agent job exceeded a `JobBudgets` limit                     |
 | `COMMAND_NOT_ALLOWED`   | Command not on the worker's allowlist; never spawned        |
+| `MODEL_NOT_OFFERED`     | Requested model is not in the worker's catalog              |
+| `NO_MODEL_SPECIFIED`    | Job needs a model and none was given or defaulted           |
+| `UPGRADE_DISABLED`      | Node does not accept remote upgrades (`allowRemote` false)  |
+| `UPGRADE_REJECTED`      | Signature or guard check failed; `details: { reason }`      |
+| `UPGRADE_BUSY`          | An upgrade is already in progress, or jobs are running      |
 | `INTERNAL`              | Unexpected worker-side failure                              |
 
 ```json
@@ -615,6 +624,53 @@ A subsequent job whose `WorkspaceRef.headCommit` equals a synced commit resolves
 to a materialized checkout of that commit; a job for a commit the worker has not
 been sent fails with `WORKSPACE_UNAVAILABLE`.
 
+## Upgrade
+
+A paired peer can push a release to another node so a fleet is upgraded from
+one place. The receiver never trusts the sender: it verifies the release
+signature against its own pinned key and applies its own guards (no
+downgrade, signed releases only) exactly as for a local upgrade.
+
+### Upgrade request — `UpgradeRequest` / `UpgradeAccepted`
+
+`POST /hfp/v0/upgrade` with body `{ version, manifest, signature }`:
+
+| Field       | Type   | Notes                                                              |
+| ----------- | ------ | ------------------------------------------------------------------ |
+| `version`   | string | Strict semver `X.Y.Z` of the release being pushed                  |
+| `manifest`  | string | Base64 of the exact signed manifest bytes (never re-serialized)    |
+| `signature` | string | Base64 detached signature (the content of the `.sig` file)         |
+
+The receiver MUST verify the signature and its guards before replying. On
+success it replies `202` with `UpgradeAccepted`, `{ accepted: true, version }`,
+and the install then proceeds asynchronously: the HTTP reply does not mean the
+upgrade finished. The outcome is observable afterwards through
+`NodeInfo.lastUpgrade` (and the node's `protocolVersion`/`daemonVersion`).
+
+```json
+{ "accepted": true, "version": "0.5.2" }
+```
+
+Refusals use `HfpError`:
+
+| HTTP | Code               | When                                                         |
+| ---- | ------------------ | ------------------------------------------------------------ |
+| 403  | `UPGRADE_DISABLED` | `NodeInfo.upgrade.allowRemote` is false (the default)        |
+| 422  | `UPGRADE_REJECTED` | Bad signature or a failed guard; `details: { reason }` names the upgrade error code |
+| 409  | `UPGRADE_BUSY`     | An upgrade is already in progress, or jobs are running       |
+
+A 0.3.x peer does not know the route and answers 404 `INVALID_REQUEST`
+("unknown endpoint") to `POST /upgrade`; a sender SHOULD report such a peer as
+too old and continue.
+
+### Tarball download
+
+`GET /hfp/v0/upgrade/tarball/{version}` serves the release tarball (binary,
+`Content-Type: application/octet-stream`) so a pushed-to node can fetch it from
+the sender. The node serves only a version that is cached AND verified, and
+`{version}` MUST be strict semver `X.Y.Z`; the path is never derived from
+anything else. Any other request responds 404.
+
 ## Discovery
 
 Discovery is how daemons find connection candidates on the LAN before any
@@ -648,14 +704,14 @@ LocalSend ships); response rate-limiting is a possible future hardening.
 | `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
 | `name`            | string  | Human-readable, 1–64 chars, no control characters (same constraints as `NodeInfo.name`) |
 | `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
-| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.3.0"` for this document            |
+| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.4.0"` for this document            |
 
 ```json
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "port": 47113,
-  "protocolVersion": "0.3.0"
+  "protocolVersion": "0.4.0"
 }
 ```
 
@@ -702,7 +758,7 @@ as one JSON document per datagram, at most 4096 bytes.
 | `kind` | `"announce" \| "response"`  | See exchange rules below     |
 
 ```json
-{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.3.0" }
+{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.4.0" }
 ```
 
 Exchange rules:
@@ -746,7 +802,7 @@ queued ---> running +-----------> failed
 
 ## Versioning
 
-- The protocol version is a semver string (this document: **0.3.0**),
+- The protocol version is a semver string (this document: **0.4.0**),
   exported as `HFP_PROTOCOL_VERSION`; the HTTP path prefix carries the major
   version (`/hfp/v0`, exported as `HFP_PATH_PREFIX` and derived from the
   protocol version so the two cannot drift).
@@ -763,6 +819,8 @@ queued ---> running +-----------> failed
   v0 as a whole is a draft and makes no long-term stability promises.
 - 0.3.0: model-catalog fields on `ModelInfo` (`label`, `status`) and `model`
   on write params — additive.
+- 0.4.0: fleet upgrade — `POST /upgrade`, `GET /upgrade/tarball/{version}`,
+  `NodeInfo.upgrade`/`lastUpgrade`, three `UPGRADE_*` error codes — additive.
 
 ## Security Considerations
 

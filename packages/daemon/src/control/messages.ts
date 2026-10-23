@@ -36,15 +36,25 @@ export const UnpairRequestSchema = z.object({
 export type UnpairRequest = z.infer<typeof UnpairRequestSchema>;
 
 /**
- * Body of `POST /control/upgrade` (fleet-upgrade spec). `targets` only
- * accepts "self" until Phase 3 adds peer device IDs.
+ * Body of `POST /control/upgrade` (fleet-upgrade spec). `targets` is "self"
+ * (this node, the default), "fleet" (every reachable older peer, then this
+ * node), or an explicit list of FULL paired device IDs (the CLI resolves
+ * names; the daemon refuses ids that are not paired). `forceLocal` only
+ * matters for a fleet rollout: it forces the requesting node's own upgrade.
  */
 export const UpgradeRequestSchema = z.strictObject({
-  targets: z.literal("self").default("self"),
+  targets: z
+    .union([
+      z.literal("self"),
+      z.literal("fleet"),
+      z.array(z.string().min(1)).min(1),
+    ])
+    .default("self"),
   version: z
     .string()
     .regex(/^\d+\.\d+\.\d+$/, "must be X.Y.Z")
     .optional(),
   force: z.boolean().optional(),
+  forceLocal: z.boolean().optional(),
 });
 export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;

@@ -198,7 +198,11 @@ async function createDaemon(
     });
     nodeInfo = createNodeInfoProvider({
       deviceId: identity.deviceId,
-      config: { node: { name }, executors: catalogConfig.executors },
+      config: {
+        node: { name },
+        executors: catalogConfig.executors,
+        upgrade: { allowRemote: false },
+      },
       daemonVersion: DAEMON_VERSION,
       jobs: jobManager,
       models: advertisedModels(catalog, modelStatuses),

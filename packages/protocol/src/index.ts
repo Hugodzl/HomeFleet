@@ -11,5 +11,6 @@ export * from "./job.js";
 export * from "./node.js";
 export * from "./pairing.js";
 export * from "./rpc.js";
+export * from "./upgrade.js";
 export * from "./version.js";
 export * from "./workspace.js";

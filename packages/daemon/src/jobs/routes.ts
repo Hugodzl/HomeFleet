@@ -327,6 +327,12 @@ export function statusForCode(code: HfpErrorCode): number {
       return 404;
     case "BUSY":
       return 503;
+    case "UPGRADE_DISABLED":
+      return 403;
+    case "UPGRADE_REJECTED":
+      return 422;
+    case "UPGRADE_BUSY":
+      return 409;
     case "UNSUPPORTED_JOB_TYPE":
     case "MODEL_NOT_OFFERED":
     case "NO_MODEL_SPECIFIED":

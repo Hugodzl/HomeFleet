@@ -14,7 +14,11 @@ import {
   type FinalizeWriteFn,
   WriteExecutor,
 } from "@homefleet/executors";
-import { HFP_PROTOCOL_VERSION, type NodeInfo } from "@homefleet/protocol";
+import {
+  HFP_PROTOCOL_VERSION,
+  type NodeInfo,
+  UpgradeAcceptedSchema,
+} from "@homefleet/protocol";
 import type { DaemonConfig } from "./config/config.js";
 import {
   type ControlJobs,
@@ -50,12 +54,23 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
-import { UpgradeCoordinator } from "./upgrade/coordinator.js";
-import { readUpgradeResultSync } from "./upgrade/files.js";
+import {
+  UpgradeCoordinator,
+  type UpgradeCoordinatorOptions,
+} from "./upgrade/coordinator.js";
+import {
+  readUpgradeResultSync,
+  toLastUpgrade,
+  upgradesDir,
+} from "./upgrade/files.js";
+import { createFleetUpgradeSurface } from "./upgrade/fleet-upgrade.js";
+import { prepareRelease } from "./upgrade/prepare.js";
 import {
   GitHubReleaseSource,
   type ReleaseSource,
 } from "./upgrade/release-source.js";
+import { FleetRollout } from "./upgrade/rollout.js";
+import { registerUpgradeRoutes } from "./upgrade/routes.js";
 import { DAEMON_VERSION } from "./version.js";
 import { ArtifactStore } from "./workspace/artifact-store.js";
 import { registerWorkspaceRoutes } from "./workspace/routes.js";
@@ -103,6 +118,21 @@ export interface DaemonOptions {
   requestShutdown?: (reason: string) => void;
   /** Where upgrades come from; defaults to GitHub Releases. Tests inject a fake. */
   releaseSource?: ReleaseSource;
+  /**
+   * TEST-ONLY override of `DAEMON_VERSION`, applied to both the advertised
+   * NodeInfo and the upgrade coordinator's `currentVersion`, so a test daemon
+   * can be "older" than a fixture release. Never set in production.
+   */
+  daemonVersion?: string;
+  /**
+   * TEST-ONLY seams passed straight to the upgrade coordinator (fake install
+   * runtime, recording updater spawn, test signing keys). Never set in
+   * production.
+   */
+  upgradeSeams?: Pick<
+    UpgradeCoordinatorOptions,
+    "runtime" | "spawnUpdater" | "publicKeys" | "shutdownDelayMs"
+  >;
 }
 
 /**
@@ -112,6 +142,7 @@ export interface DaemonOptions {
 interface DaemonRuntime {
   deviceId: string;
   trustStore: TrustStore;
+  knownNodes: KnownNodesRegistry;
   pairingManager: PairingManager;
   nodeInfoProvider: () => NodeInfo;
   hfpClient: HfpClient;
@@ -359,6 +390,8 @@ export class Daemon {
   private readonly onDiagnostic: (message: string) => void;
   private readonly requestShutdown: ((reason: string) => void) | undefined;
   private readonly releaseSource: ReleaseSource | undefined;
+  private readonly daemonVersion: string;
+  private readonly upgradeSeams: DaemonOptions["upgradeSeams"];
 
   private state: "new" | "started" | "stopped" = "new";
   private runtime: DaemonRuntime | null = null;
@@ -378,6 +411,8 @@ export class Daemon {
     this.onDiagnostic = options.onDiagnostic ?? (() => {});
     this.requestShutdown = options.requestShutdown;
     this.releaseSource = options.releaseSource;
+    this.daemonVersion = options.daemonVersion ?? DAEMON_VERSION;
+    this.upgradeSeams = options.upgradeSeams;
   }
 
   /**
@@ -518,8 +553,12 @@ export class Daemon {
     const nodeInfoProvider = createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
-      daemonVersion: DAEMON_VERSION,
+      daemonVersion: this.daemonVersion,
       jobs: jobManager,
+      lastUpgrade: () => {
+        const result = readUpgradeResultSync(dataDir);
+        return result && toLastUpgrade(result);
+      },
       models: advertisedModels(catalog, modelStatuses),
     });
     const pairingManager = new PairingManager({
@@ -610,16 +649,90 @@ export class Daemon {
     // closure) never observes a stale 0 once the server can actually be
     // reached.
     let controlPort = 0;
+    const releaseSource = this.releaseSource ?? new GitHubReleaseSource();
     const upgrades = new UpgradeCoordinator({
       dataDir,
-      currentVersion: DAEMON_VERSION,
+      currentVersion: this.daemonVersion,
       localHfpVersion: HFP_PROTOCOL_VERSION,
-      source: this.releaseSource ?? new GitHubReleaseSource(),
+      source: releaseSource,
       activeJobs: () => jobManager.activeJobs,
       controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
       ...(this.requestShutdown !== undefined
         ? { requestShutdown: this.requestShutdown }
         : {}),
+      allowRemote: config.upgrade.allowRemote,
+      resolvePeer: (id) => {
+        const node = nodeDirectory.resolve(id);
+        return node?.host !== undefined && node.port !== undefined
+          ? { host: node.host, port: node.port, expectedDeviceId: id }
+          : undefined;
+      },
+      ...this.upgradeSeams,
+    });
+    // Routes are live-registered, so adding them after `nodeServer.start()`
+    // is fine; they need the coordinator, which needs the control endpoint.
+    registerUpgradeRoutes(nodeServer, {
+      coordinator: upgrades,
+      client: hfpClient,
+      upgradesDir: upgradesDir(dataDir),
+      ...(this.upgradeSeams?.publicKeys !== undefined
+        ? { publicKeys: this.upgradeSeams.publicKeys }
+        : {}),
+    });
+    const rollout = new FleetRollout({
+      peers: {
+        list: () => nodeDirectory.list(),
+        push: async (entry, request) => {
+          if (entry.host === undefined || entry.port === undefined) {
+            throw new Error("no known address for this node");
+          }
+          await hfpClient.request({
+            host: entry.host,
+            port: entry.port,
+            expectedDeviceId: entry.deviceId,
+            method: "POST",
+            path: "/upgrade",
+            body: request,
+            responseSchema: UpgradeAcceptedSchema,
+          });
+        },
+        hello: async (entry) => {
+          if (entry.host === undefined || entry.port === undefined) {
+            return undefined;
+          }
+          try {
+            const { nodeInfo } = await hfpClient.hello(
+              {
+                host: entry.host,
+                port: entry.port,
+                expectedDeviceId: entry.deviceId,
+                timeoutMs: 2000,
+              },
+              nodeInfoProvider(),
+            );
+            return nodeInfo;
+          } catch {
+            return undefined;
+          }
+        },
+      },
+      currentVersion: this.daemonVersion,
+      upgradeSelf: (input) => upgrades.upgradeSelf(input),
+    });
+    const fleetUpgrades = createFleetUpgradeSurface({
+      rollout,
+      coordinator: upgrades,
+      pairedDeviceIds: () => trustStore.list().map((d) => d.deviceId),
+      prepare: (version) =>
+        prepareRelease({
+          source: releaseSource,
+          upgradesDir: upgradesDir(dataDir),
+          version,
+          ...(this.upgradeSeams?.publicKeys !== undefined
+            ? { publicKeys: this.upgradeSeams.publicKeys }
+            : {}),
+        }),
+      upgradesDir: upgradesDir(dataDir),
     });
     const controlSurface: ControlSurface = {
       beginPairing: () => pairingManager.beginPairing(),
@@ -683,11 +796,8 @@ export class Daemon {
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
       checkUpgrade: () => upgrades.check(),
-      upgrade: (input) =>
-        upgrades.upgradeSelf({
-          ...(input.version !== undefined ? { version: input.version } : {}),
-          ...(input.force !== undefined ? { force: input.force } : {}),
-        }),
+      upgrade: (input) => fleetUpgrades.upgrade(input),
+      upgrades: () => fleetUpgrades.upgrades(),
     };
     const controlServer = await startControlServer({
       surface: controlSurface,
@@ -701,6 +811,7 @@ export class Daemon {
     this.runtime = {
       deviceId: identity.deviceId,
       trustStore,
+      knownNodes,
       pairingManager,
       nodeInfoProvider,
       hfpClient,
@@ -776,6 +887,11 @@ export class Daemon {
   /** Exposed for pairing flows (recording the peer after a client-side pair). */
   get trustStore(): TrustStore {
     return this.started.trustStore;
+  }
+
+  /** Exposed for tests seeding peer endpoints (discovery is off in tests). */
+  get knownNodes(): KnownNodesRegistry {
+    return this.started.knownNodes;
   }
 
   /** This daemon's outbound HFP client (pairing, workspace sync). */

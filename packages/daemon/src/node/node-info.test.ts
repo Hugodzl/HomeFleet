@@ -6,6 +6,7 @@
 import { MIN_AGENT_CONTEXT_WINDOW } from "@homefleet/executors";
 import {
   HFP_PROTOCOL_VERSION,
+  type LastUpgrade,
   type ModelInfo,
   NodeInfoSchema,
 } from "@homefleet/protocol";
@@ -44,6 +45,7 @@ const WRITE_EXECUTOR = { defaultModel: "test-model" };
 function makeProvider(options: {
   config?: unknown;
   jobs?: JobLoadSource;
+  lastUpgrade?: () => LastUpgrade | undefined;
   hostname?: string;
   daemonVersion?: string;
   models?: ModelInfo[];
@@ -53,6 +55,7 @@ function makeProvider(options: {
     config: DaemonConfigSchema.parse(options.config ?? {}),
     daemonVersion: options.daemonVersion ?? "0.1.0",
     jobs: options.jobs,
+    lastUpgrade: options.lastUpgrade,
     hostname: options.hostname,
     models: options.models ?? [],
   });
@@ -221,6 +224,7 @@ test("the provider advertises the models it is given, verbatim", () => {
     config: {
       node: {},
       executors: { agent: { defaultModel: "qwen" } },
+      upgrade: { allowRemote: false },
     } as NodeInfoConfig,
     daemonVersion: "0.2.0",
     hostname: "tower",
@@ -264,4 +268,28 @@ test("a schema-violating profile fails closed at FACTORY time", () => {
   expect(() =>
     makeProvider({ hostname: `bad${String.fromCharCode(0x07)}name` }),
   ).toThrow();
+});
+
+// --- upgrade advertisement --------------------------------------------------
+
+test("advertises upgrade.allowRemote from config (default false)", () => {
+  expect(makeProvider({})().upgrade).toEqual({ allowRemote: false });
+  expect(
+    makeProvider({ config: { upgrade: { allowRemote: true } } })().upgrade,
+  ).toEqual({ allowRemote: true });
+});
+
+test("lastUpgrade is absent without a source, and re-read on every call", () => {
+  expect(makeProvider({})().lastUpgrade).toBeUndefined();
+  let current: LastUpgrade | undefined;
+  const provider = makeProvider({ lastUpgrade: () => current });
+  expect(provider().lastUpgrade).toBeUndefined();
+  current = {
+    version: "0.5.2",
+    outcome: "succeeded",
+    at: "2026-10-22T18:00:00.000Z",
+  };
+  expect(provider().lastUpgrade).toEqual(current);
+  current = { ...current, outcome: "rolled-back", reason: "unhealthy" };
+  expect(provider().lastUpgrade).toEqual(current);
 });

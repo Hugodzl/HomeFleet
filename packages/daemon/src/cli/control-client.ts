@@ -27,6 +27,7 @@ import {
 import type { UpgradeRequest } from "../control/messages.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
+import type { RolloutStatus } from "../upgrade/rollout.js";
 
 /**
  * Thrown when the client could not even reach the daemon process — connection
@@ -113,7 +114,8 @@ export interface ControlClientLike {
   nodes(): Promise<NodeDirectoryEntry[]>;
   unpair(deviceId: string): Promise<UnpairSummary>;
   checkUpgrade(): Promise<UpgradeCheck>;
-  upgrade(input: UpgradeRequest): Promise<UpgradeStarted>;
+  upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
+  upgrades(): Promise<RolloutStatus | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +238,22 @@ function validateUpgradeCheck(json: unknown): UpgradeCheck {
   return json as unknown as UpgradeCheck;
 }
 
-function validateUpgradeStarted(json: unknown): UpgradeStarted {
+/** A rollout status carries `peers`; the self-upgrade `{from, to}` does not. */
+function validateRolloutStatus(json: unknown, what: string): RolloutStatus {
+  assertIsObject(json, what);
+  assertString(json.id, "id", what);
+  assertString(json.target, "target", what);
+  assertString(json.state, "state", what);
+  assertArray(json.peers, "peers", what);
+  assertIsObject(json.self, `${what}.self`);
+  return json as unknown as RolloutStatus;
+}
+
+function validateUpgradeStarted(json: unknown): UpgradeStarted | RolloutStatus {
   assertIsObject(json, "upgrade");
+  if (json.peers !== undefined) {
+    return validateRolloutStatus(json, "upgrade");
+  }
   assertString(json.from, "from", "upgrade");
   assertString(json.to, "to", "upgrade");
   return json as unknown as UpgradeStarted;
@@ -410,7 +426,9 @@ export class ControlClient implements ControlClientLike {
     return validateUpgradeCheck(json);
   }
 
-  async upgrade(input: UpgradeRequest): Promise<UpgradeStarted> {
+  async upgrade(
+    input: UpgradeRequest,
+  ): Promise<UpgradeStarted | RolloutStatus> {
     const json = await controlRequest(
       this.options,
       "POST",
@@ -418,5 +436,14 @@ export class ControlClient implements ControlClientLike {
       input,
     );
     return validateUpgradeStarted(json);
+  }
+
+  async upgrades(): Promise<RolloutStatus | null> {
+    const json = await controlRequest(this.options, "GET", "/control/upgrades");
+    assertIsObject(json, "upgrades");
+    if (json.rollout === null) {
+      return null;
+    }
+    return validateRolloutStatus(json.rollout, "upgrades.rollout");
   }
 }

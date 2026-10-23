@@ -7,6 +7,7 @@ import {
   hashFile,
   releaseFileName,
   serializeManifest,
+  verifyManifestSignature,
   verifyRelease,
 } from "./manifest.js";
 import { makeTestKeys, writeSignedRelease } from "./test-release.js";
@@ -242,4 +243,63 @@ test("serializeManifest has a fixed key order and trailing newline", () => {
   ).toBe(
     `{"version":"0.5.0","file":"homefleet-0.5.0.tgz","sha256":"${"a".repeat(64)}","size":3,"hfpVersion":"0.3.0"}\n`,
   );
+});
+
+describe("verifyManifestSignature", () => {
+  async function release() {
+    const dir = await tempDir();
+    const keys = makeTestKeys();
+    const written = await writeSignedRelease(dir, "0.5.1", keys);
+    return { keys, written };
+  }
+
+  test("accepts a signed manifest without touching the tarball", async () => {
+    const { keys, written } = await release();
+    await rm(written.tarballPath);
+    const result = verifyManifestSignature({
+      manifestBytes: written.manifestBytes,
+      signature: written.signature,
+      expectedVersion: "0.5.1",
+      publicKeys: [keys.publicKey],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.manifest.version).toBe("0.5.1");
+  });
+
+  test("a flipped manifest byte is bad-signature", async () => {
+    const { keys, written } = await release();
+    const tampered = Buffer.from(written.manifestBytes);
+    tampered[2] = (tampered[2] ?? 0) ^ 1;
+    const result = verifyManifestSignature({
+      manifestBytes: tampered,
+      signature: written.signature,
+      expectedVersion: "0.5.1",
+      publicKeys: [keys.publicKey],
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bad-signature" });
+  });
+
+  test("a different expected version is version-mismatch", async () => {
+    const { keys, written } = await release();
+    const result = verifyManifestSignature({
+      manifestBytes: written.manifestBytes,
+      signature: written.signature,
+      expectedVersion: "9.9.9",
+      publicKeys: [keys.publicKey],
+    });
+    expect(result).toMatchObject({ ok: false, reason: "version-mismatch" });
+  });
+
+  test("a signed non-manifest is bad-manifest", () => {
+    const keys = makeTestKeys();
+    const bytes = Buffer.from('{"nope":1}\n');
+    const signature = sign(null, bytes, keys.privateKey).toString("base64");
+    const result = verifyManifestSignature({
+      manifestBytes: bytes,
+      signature,
+      expectedVersion: "0.5.1",
+      publicKeys: [keys.publicKey],
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bad-manifest" });
+  });
 });

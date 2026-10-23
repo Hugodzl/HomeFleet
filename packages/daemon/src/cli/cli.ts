@@ -26,6 +26,11 @@ import {
   type UpgradeResult,
   upgradesDir,
 } from "../upgrade/files.js";
+import {
+  type PeerRolloutStatus,
+  type RolloutStatus,
+  UPGRADE_WAIT_MS,
+} from "../upgrade/rollout.js";
 import { isSemver } from "../upgrade/semver.js";
 import { DAEMON_VERSION } from "../version.js";
 import {
@@ -138,6 +143,13 @@ Usage:
       --check only reports whether an upgrade is available; --force
       upgrades even while jobs are running.
 
+  homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]
+      Roll the latest signed release (or --to <version>) out across the
+      fleet: paired peers one at a time, THIS node last, stopping at the
+      first failure. --nodes limits it to the named peers (names or id
+      prefixes); --force-local upgrades this node even while jobs run.
+      Peers must have "upgrade.allowRemote" enabled.
+
   homefleet --help
       Show this usage text.
 
@@ -232,6 +244,12 @@ async function runSetup(deps: CliDeps): Promise<number> {
     deps.stdout(
       "(homefleetd.js was not found at the path above. Running from source? " +
         "Run `pnpm build` first so it exists.)",
+    );
+  }
+  if (!config.upgrade.allowRemote) {
+    deps.stdout("");
+    deps.stdout(
+      'Remote upgrades are off. To let a paired node upgrade this one, add "upgrade": { "allowRemote": true } to config.json.',
     );
   }
   return 0;
@@ -569,8 +587,9 @@ async function runDashboard(args: string[], deps: CliDeps): Promise<number> {
   });
 }
 
-/** How long `upgrade` waits for the restarted daemon (spec: 3 minutes). */
-export const UPGRADE_WAIT_MS = 180_000;
+/** `upgrade` waits UPGRADE_WAIT_MS (spec: 3 minutes) for the restarted daemon; defined in upgrade/rollout.ts. */
+export { UPGRADE_WAIT_MS } from "../upgrade/rollout.js";
+
 const UPGRADE_POLL_MS = 2_000;
 
 interface UpgradeArgs {
@@ -693,11 +712,19 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
     }
     let started: UpgradeStarted;
     try {
-      started = await client.upgrade({
+      const response = await client.upgrade({
         targets: "self",
         ...(parsed.version !== undefined ? { version: parsed.version } : {}),
         ...(parsed.force ? { force: true } : {}),
       });
+      // A "self" request never yields a rollout status; narrow for the types.
+      if ("peers" in response) {
+        throw new ControlRequestError(
+          502,
+          "daemon answered a self upgrade with a fleet rollout",
+        );
+      }
+      started = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
         deps.stderr(`Upgrade refused: ${error.message}`);
@@ -711,6 +738,283 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
     );
     return waitForUpgrade(client, started, deps);
   });
+}
+
+interface FleetUpgradeArgs {
+  version?: string;
+  nodes?: string[];
+  forceLocal: boolean;
+}
+
+/** Returns `undefined` (after writing a usage error to stderr) on any parse failure. */
+function parseFleetUpgradeArgs(
+  args: string[],
+  deps: CliDeps,
+): FleetUpgradeArgs | undefined {
+  const parsed: FleetUpgradeArgs = { forceLocal: false };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--force-local") {
+      parsed.forceLocal = true;
+    } else if (arg === "--to") {
+      const version = args[++i];
+      if (version === undefined || !isSemver(version)) {
+        deps.stderr("fleet upgrade: --to requires a version like 0.5.2");
+        return undefined;
+      }
+      parsed.version = version;
+    } else if (arg === "--nodes") {
+      // Takes every following non-flag argument.
+      const queries: string[] = [];
+      while (i + 1 < args.length && !(args[i + 1] as string).startsWith("--")) {
+        queries.push(args[++i] as string);
+      }
+      if (queries.length === 0) {
+        deps.stderr("fleet upgrade: --nodes requires at least one name or id");
+        return undefined;
+      }
+      parsed.nodes = queries;
+    } else {
+      deps.stderr(`fleet upgrade: unexpected argument "${arg}"`);
+      return undefined;
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Resolves each `--nodes` query to exactly one paired node's FULL device id
+ * (the control API wants full ids). Returns `undefined` after writing why to
+ * stderr when any query is unknown or ambiguous.
+ */
+async function resolveFleetNodes(
+  queries: string[],
+  client: ControlClientLike,
+  deps: CliDeps,
+): Promise<string[] | undefined> {
+  const nodes = await client.nodes();
+  const ids: string[] = [];
+  for (const query of queries) {
+    const resolution = resolveUnpairTarget(query, nodes);
+    if (resolution.kind === "none") {
+      deps.stderr(
+        `No paired node matches "${query}". Run "homefleet nodes" to list them.`,
+      );
+      return undefined;
+    }
+    if (resolution.kind === "ambiguous") {
+      deps.stderr(
+        `"${query}" matches ${resolution.candidates.length} paired nodes:`,
+      );
+      for (const candidate of resolution.candidates) {
+        deps.stderr(`  ${candidate.name}  ${candidate.deviceId}`);
+      }
+      deps.stderr("Re-run with the full device ID.");
+      return undefined;
+    }
+    if (!ids.includes(resolution.node.deviceId)) {
+      ids.push(resolution.node.deviceId);
+    }
+  }
+  return ids;
+}
+
+function peerLine(peer: PeerRolloutStatus): string {
+  return `  ${peer.name}: ${peer.state}${peer.reason !== undefined ? ` (${peer.reason})` : ""}`;
+}
+
+/** Peer states that mean the rollout STOPPED there (vs. a refusal it continued past). */
+const STOPPING_PEER_STATES: ReadonlySet<PeerRolloutStatus["state"]> = new Set([
+  "rolled-back",
+  "failed",
+  "timeout",
+]);
+
+/**
+ * Prints the closing summary and returns the exit code: 0 only when every
+ * selected peer succeeded and this node succeeded or was skipped.
+ */
+function summarizeRollout(
+  rollout: RolloutStatus,
+  selfUpgraded: boolean,
+  deps: CliDeps,
+): number {
+  const upgraded =
+    rollout.peers.filter((p) => p.state === "succeeded").length +
+    (selfUpgraded ? 1 : 0);
+  const stopped = rollout.peers.find((p) => STOPPING_PEER_STATES.has(p.state));
+  const problems = rollout.peers.filter((p) => p.state !== "succeeded");
+  const selfRefused = rollout.self.state === "refused";
+  if (problems.length === 0 && !selfRefused && rollout.state !== "stopped") {
+    deps.stdout(`Rollout complete: ${upgraded} upgraded.`);
+    return 0;
+  }
+  if (stopped !== undefined) {
+    deps.stderr(`Rollout stopped at ${stopped.name}: ${stopped.state}.`);
+  } else if (
+    rollout.state === "stopped" &&
+    !selfRefused &&
+    rollout.self.reason !== undefined
+  ) {
+    // The background run failed with no peer in flight.
+    deps.stderr(`Rollout stopped: ${rollout.self.reason}`);
+  } else {
+    deps.stderr(`Rollout finished with problems: ${upgraded} upgraded.`);
+  }
+  for (const peer of problems) {
+    if (peer !== stopped) {
+      deps.stderr(peerLine(peer).trimStart());
+    }
+  }
+  if (selfRefused) {
+    deps.stderr(
+      `This node: refused${rollout.self.reason !== undefined ? ` (${rollout.self.reason})` : ""}`,
+    );
+  }
+  return 1;
+}
+
+/**
+ * `homefleet fleet upgrade`: starts a rollout on the local daemon (peers
+ * first, this node last — see ../upgrade/rollout.ts) and renders its progress
+ * until every node is on the target. This node's own restart ends the
+ * daemon's rollout bookkeeping, so once it is `restarting` — or the daemon
+ * vanishes while it was still due — we hand off to {@link waitForUpgrade},
+ * which already knows how to ride out a restart (and detect a rollback).
+ */
+async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
+  const parsed = parseFleetUpgradeArgs(args, deps);
+  if (parsed === undefined) {
+    return 2;
+  }
+  const sleep =
+    deps.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  return withControlClient(deps, async (client) => {
+    let targets: "fleet" | string[] = "fleet";
+    if (parsed.nodes !== undefined) {
+      const ids = await resolveFleetNodes(parsed.nodes, client, deps);
+      if (ids === undefined) {
+        return 2;
+      }
+      targets = ids;
+    }
+    // The version this node runs BEFORE the rollout: waitForUpgrade needs it.
+    const current = (await client.status()).daemonVersion;
+
+    let rollout: RolloutStatus;
+    try {
+      const response = await client.upgrade({
+        targets,
+        ...(parsed.version !== undefined ? { version: parsed.version } : {}),
+        ...(parsed.forceLocal ? { forceLocal: true } : {}),
+      });
+      if (!("peers" in response)) {
+        throw new ControlRequestError(
+          502,
+          "daemon answered a fleet upgrade with a single-node upgrade",
+        );
+      }
+      rollout = response;
+    } catch (error) {
+      if (error instanceof ControlRequestError) {
+        deps.stderr(`Fleet upgrade refused: ${error.message}`);
+        return 1;
+      }
+      throw error;
+    }
+
+    const target = rollout.target;
+    if (rollout.peers.length === 0 && rollout.self.state === "skipped") {
+      deps.stdout(`Everything is already on ${target}.`);
+      return 0;
+    }
+    const selfDue = rollout.self.state !== "skipped";
+    deps.stdout(
+      rollout.peers.length === 0
+        ? `Rolling out ${target} to this node only.`
+        : `Rolling out ${target} to: ${rollout.peers
+            .map(
+              (p) => `${p.name}${p.from !== undefined ? ` (${p.from})` : ""}`,
+            )
+            .join(", ")}; ${
+            selfDue ? "this node last." : `this node is already on ${target}.`
+          }`,
+    );
+
+    // One line per CHANGE; peers start out "pending" (the plan lists them).
+    const printed = new Map<string, string>(
+      rollout.peers.map((p) => [p.deviceId, "pending|"]),
+    );
+    const render = (status: RolloutStatus): void => {
+      for (const peer of status.peers) {
+        const key = `${peer.state}|${peer.reason ?? ""}`;
+        if (printed.get(peer.deviceId) !== key) {
+          deps.stdout(peerLine(peer));
+          printed.set(peer.deviceId, key);
+        }
+      }
+    };
+    render(rollout);
+
+    // Waits out this node's own restart, then summarizes with the last status
+    // we saw (the restarted daemon no longer remembers the rollout).
+    const finishWithSelf = async (last: RolloutStatus): Promise<number> => {
+      const waited = await waitForUpgrade(
+        client,
+        { from: current, to: target },
+        deps,
+      );
+      return waited !== 0 ? waited : summarizeRollout(last, true, deps);
+    };
+
+    let last = rollout;
+    for (;;) {
+      if (last.self.state === "restarting") {
+        return finishWithSelf(last);
+      }
+      if (last.state !== "running") {
+        return summarizeRollout(last, false, deps);
+      }
+      await sleep(UPGRADE_POLL_MS);
+      let next: RolloutStatus | null;
+      try {
+        next = await client.upgrades();
+      } catch (error) {
+        // The daemon stopped answering. If this node was still due to
+        // restart, that restart is what we are seeing.
+        if (
+          error instanceof DaemonUnreachableError &&
+          last.self.state === "pending"
+        ) {
+          return finishWithSelf(last);
+        }
+        throw error;
+      }
+      if (next === null) {
+        if (last.self.state === "pending") {
+          return finishWithSelf(last);
+        }
+        deps.stderr(
+          "The daemon no longer reports a rollout; its state is lost.",
+        );
+        return 1;
+      }
+      render(next);
+      last = next;
+    }
+  });
+}
+
+async function runFleet(args: string[], deps: CliDeps): Promise<number> {
+  const [sub, ...rest] = args;
+  if (sub === "upgrade") {
+    return runFleetUpgrade(rest, deps);
+  }
+  deps.stderr(
+    "usage: homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]",
+  );
+  return 2;
 }
 
 async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
@@ -750,6 +1054,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       return runDashboard(rest, deps);
     case "upgrade":
       return runUpgrade(rest, deps);
+    case "fleet":
+      return runFleet(rest, deps);
     default:
       deps.stderr(USAGE);
       return 2;
