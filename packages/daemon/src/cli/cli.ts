@@ -234,6 +234,12 @@ async function runSetup(deps: CliDeps): Promise<number> {
         "Run `pnpm build` first so it exists.)",
     );
   }
+  if (!config.upgrade.allowRemote) {
+    deps.stdout("");
+    deps.stdout(
+      'Remote upgrades are off. To let a paired node upgrade this one, add "upgrade": { "allowRemote": true } to config.json.',
+    );
+  }
   return 0;
 }
 

@@ -58,6 +58,7 @@ test("a missing config file yields all defaults", async () => {
     executors: {},
     catalog: { models: [] },
     jobs: {},
+    upgrade: { allowRemote: false },
     repos: [],
   });
   expect(config.discovery.bindAddress).toBeUndefined();
@@ -481,6 +482,28 @@ test("partial jobs config leaves the other limits to the JobManager", async () =
   expect(config.jobs.maxConcurrentJobs).toBe(2);
   expect(config.jobs.maxQueuedJobs).toBeUndefined();
   expect(config.jobs.maxRetainedJobs).toBeUndefined();
+});
+
+test("upgrade.allowRemote defaults to false (fail closed)", async () => {
+  const dir = await newDataDir();
+  const config = await loadDaemonConfig(dir);
+  expect(config.upgrade).toEqual({ allowRemote: false });
+});
+
+test("upgrade.allowRemote can be switched on", async () => {
+  const dir = await newDataDir();
+  await writeConfig(dir, JSON.stringify({ upgrade: { allowRemote: true } }));
+  const config = await loadDaemonConfig(dir);
+  expect(config.upgrade.allowRemote).toBe(true);
+});
+
+test("an unknown key inside upgrade throws", async () => {
+  const dir = await newDataDir();
+  await writeConfig(
+    dir,
+    JSON.stringify({ upgrade: { allowRemote: true, extra: 1 } }),
+  );
+  await expect(loadDaemonConfig(dir)).rejects.toThrow(/Invalid daemon config/);
 });
 
 test("a legacy agent-endpoint config still loads (normalized to a catalog)", async () => {

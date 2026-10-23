@@ -16,7 +16,7 @@
  *
  * Sections: `discovery` (M3), `workspace` (M7, worker side), and the M9
  * daemon-assembly set — `node`, `hfp`, `mcp`, `control`, `executors`,
- * `catalog`, `jobs`, `repos`.
+ * `catalog`, `jobs`, `upgrade`, `repos`.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -213,6 +213,17 @@ export const ControlConfigSchema = z.strictObject({
 export type ControlConfig = z.infer<typeof ControlConfigSchema>;
 
 /**
+ * Fleet-upgrade opt-in. A paired node may push a signed upgrade to this one
+ * only when the operator has switched `allowRemote` on: remote code
+ * replacement is a bigger grant than pairing alone, so it fails closed.
+ * Even when on, only signed releases install and never a downgrade.
+ */
+export const UpgradeConfigSchema = z.strictObject({
+  allowRemote: z.boolean().default(false),
+});
+export type UpgradeConfig = z.infer<typeof UpgradeConfigSchema>;
+
+/**
  * Mirrors `CommandAllowlistEntry` from `@homefleet/executors` (that package
  * exports only the TS interface, not a zod schema, so config validates its
  * own copy — the guard below keeps the two shapes in sync at compile time).
@@ -366,6 +377,7 @@ export const DaemonConfigSchema = z
     /** The node's model catalog: the single source of model truth. */
     catalog: CatalogConfigSchema.prefault({}),
     jobs: JobsConfigSchema.prefault({}),
+    upgrade: UpgradeConfigSchema.prefault({}),
     repos: ReposConfigSchema,
   })
   .superRefine((config, ctx) => {

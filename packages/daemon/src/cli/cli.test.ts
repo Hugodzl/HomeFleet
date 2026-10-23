@@ -47,6 +47,7 @@ function fakeConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
     executors: {},
     models: [],
     jobs: {},
+    upgrade: { allowRemote: false },
     repos: [],
     ...overrides,
   } as DaemonConfig;
@@ -209,6 +210,20 @@ describe("setup", () => {
     expect(output).toContain("schtasks /Create");
     expect(output).toContain("node.exe");
     expect(output).toContain("homefleetd.ts");
+  });
+
+  test("setup hints how to enable remote upgrades only while they are off", async () => {
+    const hint =
+      'Remote upgrades are off. To let a paired node upgrade this one, add "upgrade": { "allowRemote": true } to config.json.';
+    const off = makeHarness();
+    expect(await runCli(["setup"], off.deps)).toBe(0);
+    expect(off.stdoutLines.join("\n")).toContain(hint);
+
+    const on = makeHarness({
+      config: fakeConfig({ upgrade: { allowRemote: true } }),
+    });
+    expect(await runCli(["setup"], on.deps)).toBe(0);
+    expect(on.stdoutLines.join("\n")).not.toContain(hint);
   });
 
   test("autostart command defaults to the built homefleetd.js entry (not .ts)", async () => {

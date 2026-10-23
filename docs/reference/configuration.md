@@ -204,6 +204,15 @@ the `homefleet-mcp-stdio` shim use their own registry and never appear there.
 | `port`      | integer, 0–65535                       | `56373`         | Control API port. |
 | `dashboard` | boolean                                | `true`          | Serve the read-only web dashboard at `http://<host>:<port>/` (open it with `homefleet dashboard`). `false` 404s the page; the JSON routes the CLI uses stay up. |
 
+## `upgrade`
+
+Opt-in for fleet upgrades. A paired node can push an upgrade to this one only
+when `allowRemote` is on; the default fails closed.
+
+| Key           | Type    | Default | Meaning |
+| ------------- | ------- | ------- | ------- |
+| `allowRemote` | boolean | `false` | Let a paired node push a signed upgrade to this node. Only signed releases are installed, never a downgrade, and a new daemon that fails to come up is rolled back. `homefleet setup` prints a hint while this is off. |
+
 ## `executors`
 
 Which job executors this node offers. **All sub-keys are optional and absent
