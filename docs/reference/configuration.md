@@ -24,6 +24,19 @@ Resolution order (see
 Setting `HOMEFLEET_DATA_DIR` is also how you run more than one daemon on the
 same machine (each instance needs its own data directory).
 
+**Windows: start `homefleetd` outside packaged apps.** A terminal inside a
+packaged (MSIX) desktop app — the Claude desktop app is one — runs
+everything it launches inside that app's package. Windows then redirects
+`%LOCALAPPDATA%` writes to the app's private copy
+(`%LOCALAPPDATA%\Packages\<app>\LocalCache\Local\homefleet`), and kills the
+daemon whenever the app closes or updates. A daemon started that way keeps
+its identity and pairings where nothing else can see them, and a daemon
+started normally later creates a fresh identity in the real folder. Start
+`homefleetd` from the Task Scheduler task `homefleet setup` prints, or from
+your own terminal. If a daemon already lived inside a package, copy that
+private folder into `%LOCALAPPDATA%\homefleet` from a process outside the
+app (e.g. a scheduled task) before starting it normally.
+
 ## Parsing rules (read this before editing `config.json`)
 
 - **A missing `config.json` is fine.** No file yields every default below — a
