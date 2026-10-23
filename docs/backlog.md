@@ -77,6 +77,19 @@ add-a-new-machine a one-step flow on both ends (install on the new box,
 approve from an existing one — the fleet GUI above is the natural surface
 for the approval side).
 
+### Fleet rollout: keep the final status across the requester's restart
+
+Found in the v0.5.3 rig run (devlog 023). When the requesting node upgrades
+itself as the last step of `homefleet fleet upgrade`, its daemon restarts and
+the in-memory rollout status is lost. If peers settle between two CLI polls,
+for example a fast `refused`, the CLI only ever saw their earlier states and
+reports them wrong (`tower: pushing` instead of `refused (…UPGRADE_DISABLED…)`).
+The exit code stays correct. Fix: write the final `RolloutStatus` to the data
+directory right before the self-upgrade hands off, and have the restarted
+daemon serve it from `GET /control/upgrades` as the last rollout. The CLI then
+re-reads it after the restart instead of summarizing a stale poll. Pairs with
+the Phase 4 dashboard, which needs the same persisted status.
+
 ### Node lifecycle automation (daemon + model server)
 
 Keeping a node running is still hand work. The v0.5.0 rig rollout
