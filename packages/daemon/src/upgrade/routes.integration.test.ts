@@ -10,6 +10,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { UpgradeAcceptedSchema } from "@homefleet/protocol";
 import { expect, test } from "vitest";
+import { ControlClient } from "../cli/control-client.js";
 import { resolveDataDir } from "../config/paths.js";
 import { Daemon, type DaemonOptions } from "../daemon.js";
 import { createDaemonHarness, HOST } from "../test-fixtures.js";
@@ -21,6 +22,7 @@ import {
   signatureFileName,
 } from "./manifest.js";
 import { prepareRelease } from "./prepare.js";
+import type { RolloutStatus } from "./rollout.js";
 import {
   FakeReleaseSource,
   makeTestKeys,
@@ -57,10 +59,13 @@ async function startNode(
   name: string,
   originDir: string,
   overrides: Record<string, unknown> = {},
+  existing: { dataDir: string; version: string } | undefined = undefined,
 ): Promise<Node> {
-  const dataDir = resolveDataDir({
-    HOMEFLEET_DATA_DIR: await h.tempDir(`homefleet-upgrade-routes-${name}-`),
-  });
+  const dataDir =
+    existing?.dataDir ??
+    resolveDataDir({
+      HOMEFLEET_DATA_DIR: await h.tempDir(`homefleet-upgrade-routes-${name}-`),
+    });
   const source = new RecordingSource(originDir, VERSION);
   const spawned: string[] = [];
   const shutdowns: string[] = [];
@@ -69,7 +74,7 @@ async function startNode(
     config: h.testConfig(name, overrides),
     releaseSource: source,
     requestShutdown: (reason) => shutdowns.push(reason),
-    daemonVersion: "0.5.0",
+    daemonVersion: existing?.version ?? "0.5.0",
     upgradeSeams: {
       publicKeys: [keys.publicKey],
       shutdownDelayMs: 0,
@@ -226,4 +231,156 @@ test("the tarball route refuses unverified or non-semver versions and serves ver
 test("B advertises upgrade.allowRemote in its node info", async () => {
   const { b } = await setup();
   expect(b.daemon.nodeInfo().upgrade).toEqual({ allowRemote: true });
+});
+
+/** `upgrade()` answers `{from,to}` for self and a RolloutStatus for the fleet. */
+function peersOf(started: object) {
+  expect(started).toHaveProperty("peers");
+  return (started as RolloutStatus).peers;
+}
+
+function controlClientFor(daemon: Daemon): ControlClient {
+  return new ControlClient({ host: HOST, port: daemon.controlPort });
+}
+
+/** Both directions seeded: A can reach B (rollout) and B can reach A (tarball). */
+async function seedBoth(a: Node, b: Node) {
+  await seedRequesterEndpoint(a, b);
+  await a.daemon.knownNodes.record({
+    deviceId: b.daemon.deviceId,
+    host: HOST,
+    port: b.daemon.hfpPort,
+    lastSeenAt: new Date().toISOString(),
+    source: "static",
+  });
+}
+
+test("fleet rollout through the control API pushes the peer, then hands off self", async () => {
+  const { a, b } = await setup();
+  await seedBoth(a, b);
+  const control = controlClientFor(a.daemon);
+  const peerPort = b.daemon.hfpPort;
+
+  const started = await control.upgrade({ targets: "fleet", version: VERSION });
+  expect(started).toMatchObject({ state: "running", target: VERSION });
+
+  await h.waitUntil(
+    () => b.spawned.length > 0,
+    10_000,
+    "B spawned its updater",
+  );
+  const bState = JSON.parse(
+    await readFile(path.join(upgradesDir(b.dataDir), STATE_FILE), "utf8"),
+  ) as { to: string };
+  expect(bState.to).toBe(VERSION);
+  await h.waitUntil(
+    async () => (await control.upgrades())?.peers[0]?.state === "restarting",
+    10_000,
+    "A shows B restarting",
+  );
+  // Self goes last: not before the peer is confirmed.
+  expect(a.spawned).toEqual([]);
+
+  // B's updater is fake, so simulate the restart: same data dir and HFP port,
+  // new version. Windows may not release the port instantly, so retry the bind.
+  await b.daemon.stop();
+  let restarted: Node | undefined;
+  await h.waitUntil(
+    async () => {
+      try {
+        restarted = await startNode(
+          "peer",
+          "",
+          {
+            upgrade: { allowRemote: true },
+            hfp: { host: HOST, port: peerPort },
+          },
+          { dataDir: b.dataDir, version: VERSION },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    15_000,
+    "B restarted on its HFP port",
+  );
+  expect(restarted?.daemon.hfpPort).toBe(peerPort);
+
+  await h.waitUntil(
+    async () => {
+      const rollout = await control.upgrades();
+      return (
+        rollout?.peers[0]?.state === "succeeded" &&
+        rollout.self.state === "restarting"
+      );
+    },
+    20_000,
+    "B succeeded and self restarting",
+  );
+  expect(a.spawned).toHaveLength(1);
+  const aState = JSON.parse(await readFile(a.spawned[0] as string, "utf8")) as {
+    to: string;
+  };
+  expect(aState.to).toBe(VERSION);
+  // A's shutdown was requested exactly once, for its own handoff.
+  expect(a.shutdowns.length).toBe(1);
+});
+
+test("a peer that refuses the push is reported refused and the rollout continues to self", async () => {
+  const { a, b } = await setup({});
+  await seedBoth(a, b);
+  const control = controlClientFor(a.daemon);
+  await control.upgrade({ targets: "fleet", version: VERSION });
+  await h.waitUntil(
+    async () => (await control.upgrades())?.self.state === "restarting",
+    15_000,
+    "rollout reached self",
+  );
+  const rollout = await control.upgrades();
+  expect(rollout?.peers[0]).toMatchObject({
+    deviceId: b.daemon.deviceId,
+    state: "refused",
+  });
+  expect(rollout?.peers[0]?.reason).toMatch(/remote|allow/i);
+  expect(b.spawned).toEqual([]);
+  expect(a.spawned).toHaveLength(1);
+});
+
+test("an explicit targets array selects the paired id", async () => {
+  const { a, b } = await setup();
+  await seedBoth(a, b);
+  const control = controlClientFor(a.daemon);
+  const started = await control.upgrade({
+    targets: [b.daemon.deviceId],
+    version: VERSION,
+  });
+  expect(peersOf(started).map((p) => p.deviceId)).toEqual([b.daemon.deviceId]);
+  await h.waitUntil(
+    () => b.spawned.length > 0,
+    10_000,
+    "B spawned its updater",
+  );
+});
+
+test("a paired but undiscovered id in an explicit targets array is unreachable, not dropped", async () => {
+  const { a, b } = await setup();
+  // No knownNodes entry on A for B.
+  const control = controlClientFor(a.daemon);
+  const started = await control.upgrade({
+    targets: [b.daemon.deviceId],
+    version: VERSION,
+  });
+  expect(peersOf(started)).toHaveLength(1);
+  expect(peersOf(started)[0]).toMatchObject({
+    deviceId: b.daemon.deviceId,
+    state: "unreachable",
+  });
+  await h.waitUntil(
+    async () => (await control.upgrades())?.self.state === "restarting",
+    15_000,
+    "rollout reached self",
+  );
+  expect((await control.upgrades())?.peers[0]?.state).toBe("unreachable");
+  expect(b.spawned).toEqual([]);
 });

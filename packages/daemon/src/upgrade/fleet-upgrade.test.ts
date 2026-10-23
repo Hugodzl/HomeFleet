@@ -112,6 +112,36 @@ test("a second start while a rollout runs is refused as locked and touches nothi
   expect(surface.upgrades()?.id).toBe("r1");
 });
 
+test("a self request is refused as locked while a fleet rollout runs", async () => {
+  const { surface, calls } = await harness({ running: true });
+  const error = await surface
+    .upgrade({ targets: "self" })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(UpgradeError);
+  expect((error as UpgradeError).code).toBe("locked");
+  expect(calls.self).toEqual([]);
+});
+
+test("a self request is refused as locked while a fleet rollout is still starting", async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { surface, calls } = await harness({
+    prepare: async () => {
+      await gate;
+      return { version: "0.5.2" } as PreparedRelease;
+    },
+  });
+  const first = surface.upgrade({ targets: "fleet" });
+  await expect(surface.upgrade({ targets: "self" })).rejects.toMatchObject({
+    code: "locked",
+  });
+  expect(calls.self).toEqual([]);
+  release?.();
+  await first;
+});
+
 test("two overlapping starts: the second is locked while the first is still preparing", async () => {
   let release: (() => void) | undefined;
   const gate = new Promise<void>((resolve) => {

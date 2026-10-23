@@ -55,8 +55,12 @@ export function createFleetUpgradeSurface(
   // rollout.start() returns).
   let starting = false;
 
+  function rolloutBusy(): boolean {
+    return starting || options.rollout.status()?.state === "running";
+  }
+
   async function startFleet(input: UpgradeRequest): Promise<RolloutStatus> {
-    if (starting || options.rollout.status()?.state === "running") {
+    if (rolloutBusy()) {
       throw new UpgradeError("locked", "a fleet rollout is already running");
     }
     starting = true;
@@ -109,13 +113,23 @@ export function createFleetUpgradeSurface(
   }
 
   return {
-    upgrade: (input) =>
-      input.targets === "self"
-        ? options.coordinator.upgradeSelf({
-            ...(input.version !== undefined ? { version: input.version } : {}),
-            ...(input.force !== undefined ? { force: input.force } : {}),
-          })
-        : startFleet(input),
+    upgrade: async (input) => {
+      if (input.targets !== "self") {
+        return startFleet(input);
+      }
+      // A self upgrade restarts this daemon, which would silently end a
+      // rollout that is still pushing to peers.
+      if (rolloutBusy()) {
+        throw new UpgradeError(
+          "locked",
+          "a fleet rollout is running; a self upgrade would end it",
+        );
+      }
+      return options.coordinator.upgradeSelf({
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        ...(input.force !== undefined ? { force: input.force } : {}),
+      });
+    },
     upgrades: () => options.rollout.status(),
   };
 }
