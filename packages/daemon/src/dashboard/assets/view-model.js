@@ -70,13 +70,83 @@ export function modelRows(models) {
 }
 
 /**
+ * Strict X.Y.Z comparison, self-contained (this file ships to the browser
+ * with no imports). Anything that is not X.Y.Z sorts lowest.
+ * @param {string} a
+ * @param {string} b
+ * @returns {-1 | 0 | 1}
+ */
+export function compareVersions(a, b) {
+  const parse = (/** @type {string} */ v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa === undefined || pb === undefined) {
+    return pa === pb ? 0 : pa === undefined ? -1 : 1;
+  }
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) {
+      return pa[i] < pb[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Upgrade badge for one node. `label` is only set when eligible; `why`
+ * explains an ineligible node (shown in the confirm dialog).
+ * @param {{reachable: boolean, nodeInfo?: any}} node
+ * @param {string | undefined} target
+ */
+function peerUpgrade(node, target) {
+  const info = node.reachable ? node.nodeInfo : undefined;
+  /** @param {string} why */
+  const no = (why) => ({ eligible: false, label: "", why });
+  if (target === undefined) {
+    return no("no upgrade available");
+  }
+  if (info === undefined) {
+    return no("unreachable");
+  }
+  if (info.upgrade === undefined) {
+    return no("too old for remote upgrade");
+  }
+  if (!info.upgrade.allowRemote) {
+    return no("remote upgrades off");
+  }
+  if (compareVersions(info.daemonVersion, target) >= 0) {
+    return no("already up to date");
+  }
+  return { eligible: true, label: `⬆ ${target} available`, why: "" };
+}
+
+/** @param {any} status a ControlStatus (daemonVersion, availableUpgrade?) */
+export function selfUpgrade(status) {
+  const target = status.availableUpgrade;
+  if (
+    target === undefined ||
+    compareVersions(status.daemonVersion, target) >= 0
+  ) {
+    return { eligible: false, label: "", why: "no upgrade available" };
+  }
+  return { eligible: true, label: `⬆ ${target} available`, why: "" };
+}
+
+/**
  * @param {any[]} nodes NodeDirectoryEntry[]
  * @param {string} ourVersion this daemon's daemonVersion
+ * @param {string} [target] the upgrade target, when one is available
  */
-export function nodeRows(nodes, ourVersion) {
+export function nodeRows(nodes, ourVersion, target) {
   return nodes.map((node) => {
     const info = node.reachable ? node.nodeInfo : undefined;
     return {
+      fullId: node.deviceId,
+      allowRemote: info?.upgrade?.allowRemote === true,
+      activeJobs: info?.activeJobs ?? 0,
+      upgrade: peerUpgrade(node, target),
       name: node.name,
       deviceId: shortId(node.deviceId),
       endpoint:
@@ -129,4 +199,101 @@ export function delegatedJobRows(jobs, nowMs) {
     seen: relativeTime(job.lastStatusAt, nowMs),
     branch: job.appliedBranch ?? "",
   }));
+}
+
+/**
+ * Everything the confirm dialog shows. Peers are the rows the dialog targets;
+ * busy peers are listed as refused because remote pushes never force.
+ * @param {{
+ *   prepared?: {target: string},
+ *   error?: string,
+ *   peers: Array<{name: string, activeJobs: number, upgrade: {eligible: boolean, why: string}}>,
+ *   self: {included: boolean, version: string, activeJobs: number},
+ *   forceSelf: boolean,
+ * }} input
+ */
+export function confirmSummary({ prepared, error, peers, self, forceSelf }) {
+  if (error !== undefined || prepared === undefined) {
+    return {
+      title: "Upgrade failed to prepare",
+      lines: [error ?? "No verified release"],
+      canConfirm: false,
+    };
+  }
+  const target = prepared.target;
+  const lines = [`v${target} — signature verified`];
+  let anyEligible = false;
+  for (const peer of peers) {
+    if (!peer.upgrade.eligible) {
+      lines.push(`${peer.name}: not eligible (${peer.upgrade.why})`);
+    } else if (peer.activeJobs > 0) {
+      lines.push(
+        `${peer.name}: busy (${peer.activeJobs} jobs) — will be refused`,
+      );
+    } else {
+      anyEligible = true;
+      lines.push(`${peer.name}: will upgrade`);
+    }
+  }
+  if (self.included) {
+    if (compareVersions(self.version, target) >= 0) {
+      lines.push(`This node: already on ${self.version}`);
+    } else if (self.activeJobs > 0 && !forceSelf) {
+      lines.push(
+        `This node: busy (${self.activeJobs} jobs) — will be refused unless forced`,
+      );
+    } else {
+      anyEligible = true;
+      lines.push(
+        forceSelf && self.activeJobs > 0
+          ? "This node: will upgrade last (forced)"
+          : "This node: will upgrade last",
+      );
+    }
+  }
+  return { title: `Upgrade to v${target}`, lines, canConfirm: anyEligible };
+}
+
+/** @param {any} rollout RolloutStatus | null */
+export function progressRows(rollout) {
+  if (rollout === null || rollout === undefined) {
+    return [];
+  }
+  return [
+    ...rollout.peers.map((/** @type {any} */ p) => ({
+      name: p.name,
+      state: p.state,
+      reason: p.reason ?? "",
+    })),
+    {
+      name: "This node",
+      state: rollout.self.state,
+      reason: rollout.self.reason ?? "",
+    },
+  ];
+}
+
+/** @param {{status?: number, code?: string, message: string}} error */
+export function startOutcome(error) {
+  return error.code === "locked"
+    ? { kind: "already-running" }
+    : { kind: "error", message: error.message };
+}
+
+/**
+ * Reload the page after an upgrade changed the daemon under it (new version
+ * or a per-boot token that no longer matches), at most once per 10 s.
+ * @param {{loadedVersion: string, statusVersion: string, badToken: boolean, lastReloadAt: number, now: number}} input
+ */
+export function reloadDecision({
+  loadedVersion,
+  statusVersion,
+  badToken,
+  lastReloadAt,
+  now,
+}) {
+  return (
+    (statusVersion !== loadedVersion || badToken) &&
+    now - lastReloadAt >= 10_000
+  );
 }

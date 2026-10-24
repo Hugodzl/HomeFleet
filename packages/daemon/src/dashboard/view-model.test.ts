@@ -2,12 +2,18 @@ import { describe, expect, test } from "vitest";
 import type { ControlJobs, ControlStatus } from "../control/control-server.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
+  compareVersions,
+  confirmSummary,
   delegatedJobRows,
   modelRows,
   nodeRows,
+  progressRows,
   relativeTime,
+  reloadDecision,
   selfRows,
+  selfUpgrade,
   shortId,
+  startOutcome,
   workerJobRows,
 } from "./assets/view-model.js";
 
@@ -106,6 +112,10 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       executors: "command, agent, write",
       models: "qwen3.6-35b-a3b",
       load: "0 / 2",
+      fullId: "b".repeat(64),
+      allowRemote: false,
+      activeJobs: 0,
+      upgrade: { eligible: false, label: "", why: "no upgrade available" },
     },
     {
       name: "asleep",
@@ -117,6 +127,10 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       executors: "—",
       models: "—",
       load: "—",
+      fullId: "c".repeat(64),
+      allowRemote: false,
+      activeJobs: 0,
+      upgrade: { eligible: false, label: "", why: "no upgrade available" },
     },
   ]);
 });
@@ -217,4 +231,229 @@ test("job rows prefer paired names and format times/status", () => {
       branch: "",
     },
   ]);
+});
+
+function peer(
+  version: string,
+  opts: {
+    reachable?: boolean;
+    allowRemote?: boolean | null;
+    activeJobs?: number;
+  } = {},
+): NodeDirectoryEntry {
+  const reachable = opts.reachable ?? true;
+  const allowRemote = opts.allowRemote === undefined ? true : opts.allowRemote;
+  const info = {
+    deviceId: "d".repeat(64),
+    name: "peer",
+    daemonVersion: version,
+    protocolVersion: "0.4.0",
+    platform: "win32",
+    roles: ["execution"],
+    executors: ["command"],
+    models: [],
+    hardware: { cpu: "x", ramBytes: 1, gpus: [] },
+    maxConcurrentJobs: 2,
+    activeJobs: opts.activeJobs ?? 0,
+    ...(allowRemote === null ? {} : { upgrade: { allowRemote } }),
+  };
+  return {
+    deviceId: "d".repeat(64),
+    name: "peer",
+    reachable,
+    ...(reachable ? { nodeInfo: info } : {}),
+  } as NodeDirectoryEntry;
+}
+
+describe("compareVersions", () => {
+  test("orders strict X.Y.Z; non-semver sorts lowest", () => {
+    expect(compareVersions("0.5.9", "0.6.0")).toBe(-1);
+    expect(compareVersions("0.6.0", "0.6.0")).toBe(0);
+    expect(compareVersions("0.10.0", "0.9.0")).toBe(1);
+    expect(compareVersions("x", "0.1.0")).toBe(-1);
+    expect(compareVersions("0.1.0", "x")).toBe(1);
+    expect(compareVersions("x", "y")).toBe(0);
+  });
+});
+
+describe("upgrade eligibility", () => {
+  const up = (n: NodeDirectoryEntry, target: string | undefined = "0.6.0") =>
+    nodeRows([n], "0.6.0", target)[0]?.upgrade;
+
+  test("reachable older peer with allowRemote is eligible", () => {
+    expect(up(peer("0.5.2"))).toEqual({
+      eligible: true,
+      label: "⬆ 0.6.0 available",
+      why: "",
+    });
+  });
+  test("allowRemote off: no label, says why", () => {
+    expect(up(peer("0.5.2", { allowRemote: false }))).toEqual({
+      eligible: false,
+      label: "",
+      why: "remote upgrades off",
+    });
+  });
+  test("peer without the upgrade field is too old", () => {
+    expect(up(peer("0.3.0", { allowRemote: null }))).toEqual({
+      eligible: false,
+      label: "",
+      why: "too old for remote upgrade",
+    });
+  });
+  test("unreachable peer is not eligible", () => {
+    expect(up(peer("0.5.2", { reachable: false }))?.eligible).toBe(false);
+  });
+  test("peer at or above the target is not eligible", () => {
+    expect(up(peer("0.6.0"))?.eligible).toBe(false);
+    expect(up(peer("0.7.0"))?.eligible).toBe(false);
+  });
+  test("exposes fullId, allowRemote and activeJobs", () => {
+    const row = nodeRows(
+      [peer("0.5.2", { activeJobs: 3 })],
+      "0.6.0",
+      "0.6.0",
+    )[0];
+    expect(row?.fullId).toBe("d".repeat(64));
+    expect(row?.allowRemote).toBe(true);
+    expect(row?.activeJobs).toBe(3);
+  });
+  test("selfUpgrade compares status version to availableUpgrade", () => {
+    expect(
+      selfUpgrade({ daemonVersion: "0.5.2", availableUpgrade: "0.6.0" }),
+    ).toEqual({ eligible: true, label: "⬆ 0.6.0 available", why: "" });
+    expect(selfUpgrade({ daemonVersion: "0.6.0" }).eligible).toBe(false);
+    expect(
+      selfUpgrade({ daemonVersion: "0.6.0", availableUpgrade: "0.6.0" }).label,
+    ).toBe("");
+  });
+});
+
+describe("confirmSummary", () => {
+  const prepared = {
+    current: "0.5.2",
+    target: "0.6.0",
+    verified: true as const,
+    size: 5,
+  };
+  const row = (name: string, eligible: boolean, activeJobs = 0, why = "") => ({
+    name,
+    activeJobs,
+    upgrade: { eligible, label: "", why },
+  });
+  const base = {
+    prepared,
+    peers: [row("tower", true)],
+    self: { included: false, version: "0.5.2", activeJobs: 0 },
+    forceSelf: false,
+  };
+
+  test("lists the verified line and peer outcomes", () => {
+    const s = confirmSummary({
+      ...base,
+      peers: [
+        row("tower", true),
+        row("busy", true, 2),
+        row("old", false, 0, "too old for remote upgrade"),
+      ],
+    });
+    expect(s.canConfirm).toBe(true);
+    expect(s.lines).toEqual([
+      "v0.6.0 — signature verified",
+      "tower: will upgrade",
+      "busy: busy (2 jobs) — will be refused",
+      "old: not eligible (too old for remote upgrade)",
+    ]);
+  });
+  test("self lines: idle, busy, forced, already current", () => {
+    const withSelf = (self: object, forceSelf = false) =>
+      confirmSummary({
+        ...base,
+        forceSelf,
+        self: { included: true, version: "0.5.2", activeJobs: 0, ...self },
+      }).lines.at(-1);
+    expect(withSelf({})).toBe("This node: will upgrade last");
+    expect(withSelf({ activeJobs: 1 })).toBe(
+      "This node: busy (1 jobs) — will be refused unless forced",
+    );
+    expect(withSelf({ activeJobs: 1 }, true)).toBe(
+      "This node: will upgrade last (forced)",
+    );
+    expect(withSelf({ version: "0.6.0" })).toBe("This node: already on 0.6.0");
+  });
+  test("error blocks confirmation and is the only line", () => {
+    expect(confirmSummary({ ...base, error: "no release" })).toEqual({
+      title: "Upgrade failed to prepare",
+      lines: ["no release"],
+      canConfirm: false,
+    });
+  });
+  test("no eligible target blocks confirmation", () => {
+    expect(
+      confirmSummary({ ...base, peers: [row("old", false, 0, "unreachable")] })
+        .canConfirm,
+    ).toBe(false);
+    expect(
+      confirmSummary({
+        ...base,
+        peers: [],
+        self: { included: true, version: "0.6.0", activeJobs: 0 },
+      }).canConfirm,
+    ).toBe(false);
+  });
+});
+
+describe("progressRows", () => {
+  test("peers then this node, with reasons; [] for null", () => {
+    expect(progressRows(null)).toEqual([]);
+    expect(
+      progressRows({
+        id: "r",
+        target: "0.6.0",
+        startedAt: "2026-10-23T00:00:00.000Z",
+        state: "running",
+        peers: [
+          { deviceId: "a", name: "tower", state: "refused", reason: "busy" },
+          { deviceId: "b", name: "nuc", state: "succeeded" },
+        ],
+        self: { state: "pending" },
+      }),
+    ).toEqual([
+      { name: "tower", state: "refused", reason: "busy" },
+      { name: "nuc", state: "succeeded", reason: "" },
+      { name: "This node", state: "pending", reason: "" },
+    ]);
+  });
+});
+
+describe("startOutcome", () => {
+  test("locked means already running; anything else is an error", () => {
+    expect(startOutcome({ status: 409, code: "locked", message: "x" })).toEqual(
+      { kind: "already-running" },
+    );
+    expect(startOutcome({ status: 500, message: "boom" })).toEqual({
+      kind: "error",
+      message: "boom",
+    });
+  });
+});
+
+describe("reloadDecision", () => {
+  const base = {
+    loadedVersion: "0.5.2",
+    statusVersion: "0.5.2",
+    badToken: false,
+    lastReloadAt: 0,
+    now: 60_000,
+  };
+  test("version change or bad token reloads", () => {
+    expect(reloadDecision({ ...base, statusVersion: "0.6.0" })).toBe(true);
+    expect(reloadDecision({ ...base, badToken: true })).toBe(true);
+  });
+  test("throttled within 10 s; no change means no reload", () => {
+    expect(
+      reloadDecision({ ...base, badToken: true, lastReloadAt: 55_000 }),
+    ).toBe(false);
+    expect(reloadDecision(base)).toBe(false);
+  });
 });
