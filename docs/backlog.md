@@ -199,10 +199,10 @@ and making reuse visible in the job result so it's never silent.
 - Split the dashboard's `app.js` (527 lines): move the dialog/progress wiring
   to `upgrade-ui.js`, and make `assets.scan.test.ts` iterate every `.js` in
   the assets dir.
-- Title a persisted rollout that isn't running "Last rollout".
+- (Done in v0.6.1: a finished rollout is titled "Last rollout"; start errors
+  are titled "Upgrade failed".)
 - The dialog should prepare `{version: status.availableUpgrade}`, so the badge
   and the dialog agree and an offline dialog can use the cache.
-- Title start errors "Upgrade failed", not "failed to prepare".
 - Start progress polling for a rollout begun from the CLI or another tab.
 - Match the progress record by the returned rollout id instead of `startedAt`.
 

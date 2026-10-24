@@ -66,6 +66,7 @@ export function confirmSummary(input: {
 export function progressRows(
   rollout: RolloutStatus | null,
 ): Array<{ name: string; state: string; reason: string }>;
+export function progressTitle(rollout: { state: string }): string;
 export function startOutcome(error: {
   status?: number;
   code?: string;

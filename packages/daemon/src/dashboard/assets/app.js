@@ -14,6 +14,7 @@ import {
   modelRows,
   nodeRows,
   progressRows,
+  progressTitle,
   reloadDecision,
   restartBannerState,
   selfRows,
@@ -447,6 +448,10 @@ async function pollProgress() {
     const rollout = currentRollout(body.rollout, confirmedAt);
     const rows = progressRows(rollout);
     document.getElementById("upgrade-progress").hidden = rows.length === 0;
+    if (rollout) {
+      document.getElementById("upgrade-progress-title").textContent =
+        progressTitle(rollout);
+    }
     renderTable(
       document.getElementById("upgrade-progress-body"),
       [
