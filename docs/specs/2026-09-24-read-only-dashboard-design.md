@@ -1,7 +1,10 @@
 # Read-only Dashboard — Design
 
 - **Date:** 2026-09-24
-- **Status:** implemented.
+- **Status:** implemented (v0.4). **Amended in v0.6.0:** the page is no longer
+  strictly read-only. It can start an upgrade through two token-guarded POSTs;
+  see [Amendment: upgrade from the dashboard](#amendment-upgrade-from-the-dashboard-v060).
+  Everything below describes the v0.4 design; the amendment says what changed.
 - **Roadmap slot:** third step of the
   [approved sequencing](2026-07-12-backlog-structuring.md#approved-sequencing)
   (after S1 packaging, before S2 + A1). The
@@ -184,10 +187,65 @@ interface DelegatedJobSummary {
 
 ## Out of scope
 
-Any mutation (rename, config edits, GUI pairing, cancel), live job-event
-streaming or output views, a tray app, remote management, a per-boot
-control token, persisted job history, cross-node aggregation (each
+Any mutation other than the v0.6.0 upgrade (rename, config edits, GUI
+pairing, cancel), live job-event streaming or output views, a tray app,
+remote management, persisted job history, cross-node aggregation (each
 daemon's dashboard shows only what *that* daemon knows).
+
+## Amendment: upgrade from the dashboard (v0.6.0)
+
+[Fleet upgrade Phase 4](2026-09-25-fleet-upgrade-design.md) lets the page
+trigger an upgrade, so the dashboard is **read-only except upgrade**. Nothing
+else changed: still no rename, config edit, pairing or cancel from the page.
+
+**Two POST routes, both token-guarded:**
+
+- `POST /control/upgrade/prepare` downloads and verifies a release into the
+  cache without starting anything, so the confirm dialog can say "signature
+  verified" before the person confirms (verify, then confirm).
+- `POST /control/upgrade` starts the rollout (the same route the CLI uses).
+  The page sends `targets: "fleet"` for Upgrade all, `targets: [id],
+  includeSelf: false` for a peer's button, and `targets: "self"` for this
+  node's button.
+
+**The per-boot control token** (`control/control-token.ts`):
+
+- 32 random bytes, hex (64 chars), **a new token every daemon boot**.
+- Written to `<dataDir>/control-token` with mode 0600 (any stale file is
+  removed first, because `mode` only applies on creation). The CLI reads it
+  from there.
+- Embedded in the served page as
+  `<meta name="homefleet-control-token" content="...">`; only `GET /` carries
+  it. A cross-origin page cannot read that page (same-origin policy, no CORS
+  headers), which is the point.
+- Sent back in the `x-homefleet-control-token` request header.
+- Compared with `crypto.timingSafeEqual` on equal-length buffers; a length
+  mismatch is refused without comparing.
+- Required **only** on `POST /control/upgrade` and
+  `POST /control/upgrade/prepare`. The Host check and the
+  `x-homefleet-control: 1` check still run first. A missing or wrong token
+  answers 403 `{ error, code: "bad-token" }` and the body is never read.
+  Every other route, including the `pair/*` and `unpair` writes, is
+  unchanged.
+
+**CSP and the static scan.** The CSP is unchanged (`connect-src 'self'`
+covers the POSTs). The asset scan's rule "the client only ever issues GET"
+became a carve-out: every `fetch` must name its method as a literal
+double-quoted `"GET"` or `"POST"`; there is exactly one POST call site; it
+may only target `/control/upgrade` or `/control/upgrade/prepare`; and it
+must send the token header. The forbidden-sink list is unchanged, and matters
+more now that the token sits in the page: no `innerHTML` and the rest.
+
+**Progress and reload.** While a rollout runs the page polls the shipped
+`RolloutStatus` (`GET /control/upgrades`) and shows each peer's step and
+this node's. Restarting this node rotates the token and swaps the assets, so
+the page reloads once afterwards (see the fleet upgrade spec's decisions).
+
+**The upgrade badge.** `GET /control/status?dashboard=1` adds
+`availableUpgrade` (the latest release, when newer than this daemon). The page
+marks each node that could take the push; a peer shows no badge when it is
+unreachable, too old for remote upgrade, has `allowRemote` off, or is already
+current.
 
 ## Error handling
 
@@ -223,3 +281,20 @@ daemon's dashboard shows only what *that* daemon knows).
   injected so tests never launch a browser.
 - **Rig check**: open the dashboard on the laptop with the tower paired and
   run one delegation; record in the devlog.
+
+**Added in v0.6.0:**
+
+- `control/control-token.test.ts`: generation, the file rewritten each boot,
+  constant-time compare.
+- `control-server.test.ts`: both POSTs answer 403 `bad-token` without or with
+  a wrong token and never reach the surface; the token is injected into the
+  served page.
+- `dashboard/assets.scan.test.ts`: the POST carve-out above (method literal,
+  one call site, allowed paths, token header) plus the unchanged sink list.
+- `dashboard/view-model.test.ts`: upgrade eligibility, badges, confirm
+  summary, progress, reload decision. There is no DOM test environment, so
+  the page logic lives in `view-model.js` as pure functions.
+- `daemon.control.integration.test.ts`: an assembled daemon serves the token
+  in the page, writes the file, and refuses the POST without it.
+- **Rig check (after publishing):** push v0.6.1 from the dashboard, including
+  this node's own restart and the page reload; record in the devlog.

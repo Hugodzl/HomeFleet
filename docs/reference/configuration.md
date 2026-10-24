@@ -21,6 +21,15 @@ Resolution order (see
    - **darwin:** `~/Library/Application Support/homefleet`
    - **linux (and everything else):** `~/.local/share/homefleet`
 
+The directory also holds `control-token`, the per-boot secret that guards the
+dashboard's upgrade POSTs. The daemon regenerates it on every start (a new
+64-character hex value, mode 0600, replacing the old file); the `homefleet`
+CLI reads it to authenticate `upgrade` and `fleet upgrade`. It is not a
+config knob: don't edit it, and don't copy it between machines. If the CLI
+reports "the daemon's control token didn't match", the CLI and the daemon are
+different versions or the daemon restarted; upgrade the CLI to the daemon's
+version.
+
 Setting `HOMEFLEET_DATA_DIR` is also how you run more than one daemon on the
 same machine (each instance needs its own data directory).
 

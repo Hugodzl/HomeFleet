@@ -1,6 +1,6 @@
 {
   "name": "@homefleet/protocol",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "HomeFleet Protocol (HFP) message schemas and types",
   "license": "Apache-2.0",
   "type": "module",

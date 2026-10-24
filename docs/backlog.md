@@ -25,7 +25,8 @@ HTTP API was deliberately designed so a dashboard can be added as a client
 scope (tray vs. web vs. both) and which mutations the API should expose. The
 read-only viewing half shipped as the dashboard (spec
 `specs/2026-09-24-read-only-dashboard-design.md`); A1 now means the
-mutations.
+mutations. The first, upgrade, shipped in v0.6.0 (Upgrade all, per node, this
+node, behind a per-boot control token); the rest are still to do.
 
 ### Unpair a node
 
@@ -93,7 +94,8 @@ The exit code stays correct. Fix: write the final `RolloutStatus` to the data
 directory right before the self-upgrade hands off, and have the restarted
 daemon serve it from `GET /control/upgrades` as the last rollout. The CLI then
 re-reads it after the restart instead of summarizing a stale poll. Pairs with
-the Phase 4 dashboard, which needs the same persisted status.
+the Phase 4 dashboard, which needs the same persisted status. The v0.6.0
+dashboard reads it.
 
 ### Node lifecycle automation (daemon + model server)
 
