@@ -131,3 +131,37 @@ button {
   color: var(--fg);
   cursor: pointer;
 }
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.badge {
+  color: var(--ok);
+  font-weight: 600;
+}
+.banner.info {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+dialog {
+  max-width: 520px;
+  width: calc(100% - 40px);
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+dialog p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

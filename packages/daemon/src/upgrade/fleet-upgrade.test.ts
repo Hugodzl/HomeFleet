@@ -56,11 +56,15 @@ async function harness(
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, manifestFileName("0.5.2")), "MANIFEST");
   await writeFile(path.join(dir, signatureFileName("0.5.2")), "SIG\n");
-  const prepared = { version: "0.5.2" } as PreparedRelease;
+  const prepared = {
+    version: "0.5.2",
+    manifest: { size: 4096 },
+  } as PreparedRelease;
   const calls = {
     start: [] as RolloutStartInput[],
     prepare: [] as string[],
     self: [] as unknown[],
+    check: 0,
   };
   let current: RolloutStatus | undefined = opts.running
     ? status("running")
@@ -75,16 +79,20 @@ async function harness(
       status: () => current,
     },
     coordinator: {
-      check: async () => ({
-        current: "0.5.0",
-        latest: "0.5.2",
-        available: true,
-      }),
+      check: async () => {
+        calls.check += 1;
+        return {
+          current: "0.5.0",
+          latest: "0.5.2",
+          available: true,
+        };
+      },
       upgradeSelf: async (input) => {
         calls.self.push(input);
         return { from: "0.5.0", to: "0.5.2" };
       },
     },
+    currentVersion: "0.5.1",
     pairedDeviceIds: () => [PEER],
     prepare:
       opts.prepare ??
@@ -117,6 +125,15 @@ test("a fleet request resolves latest, prepares, and pushes the cached bytes", a
   expect(calls.start[0]?.forceLocal).toBe(true);
   expect(calls.start[0]?.nodes).toBeUndefined();
   expect(surface.upgrades()?.state).toBe("running");
+});
+
+test("includeSelf is forwarded to the rollout, and absent by default", async () => {
+  const { surface, calls } = await harness();
+  await surface.upgrade({ targets: "fleet", includeSelf: false });
+  expect(calls.start[0]?.includeSelf).toBe(false);
+  const other = await harness();
+  await other.surface.upgrade({ targets: "fleet" });
+  expect(other.calls.start[0]).not.toHaveProperty("includeSelf");
 });
 
 test("a second start while a rollout runs is refused as locked and touches nothing", async () => {
@@ -286,4 +303,73 @@ test("the final rollout survives this node's restart: written at handoff, served
   await expect(surface.upgrade({ targets: "fleet" })).resolves.toBeDefined();
   expect(calls.prepare).toEqual(["0.5.2"]);
   await after.abort(); // let the new loop's save land before the temp dir goes
+});
+
+test("prepare({}) resolves latest, prepares once, and reports the verified release", async () => {
+  const { surface, calls } = await harness();
+  await expect(surface.prepare({})).resolves.toEqual({
+    current: "0.5.1",
+    target: "0.5.2",
+    verified: true,
+    size: 4096,
+  });
+  expect(calls.prepare).toEqual(["0.5.2"]);
+  expect(calls.start).toEqual([]);
+});
+
+test("prepare({version}) prepares exactly that version", async () => {
+  const { surface, calls } = await harness();
+  await surface.prepare({ version: "0.5.2" });
+  expect(calls.prepare).toEqual(["0.5.2"]);
+});
+
+test("prepare() rejects with the verify-failed code from the prepare step", async () => {
+  const { surface } = await harness({
+    prepare: async () => {
+      throw new UpgradeError("verify-failed", "bad signature");
+    },
+  });
+  await expect(surface.prepare({})).rejects.toMatchObject({
+    code: "verify-failed",
+  });
+});
+
+test("a fleet upgrade after prepare() reuses the verified cache (one download)", async () => {
+  let downloads = 0;
+  const cached = new Set<string>();
+  const prepared = {
+    version: "0.5.2",
+    manifest: { size: 4096 },
+  } as PreparedRelease;
+  const { surface, calls } = await harness({
+    prepare: async () => {
+      if (!cached.has("0.5.2")) {
+        downloads += 1;
+        cached.add("0.5.2");
+      }
+      return prepared;
+    },
+  });
+  await surface.prepare({});
+  await surface.upgrade({ targets: "fleet" });
+  expect(downloads).toBe(1);
+  expect(calls.start).toHaveLength(1);
+});
+
+test("an explicit version never needs a release lookup (prepare or fleet upgrade)", async () => {
+  const { surface, calls } = await harness();
+  await surface.prepare({ version: "0.5.2" });
+  await surface.upgrade({ targets: "fleet", version: "0.5.2" });
+  expect(calls.check).toBe(0);
+  expect(calls.prepare).toEqual(["0.5.2", "0.5.2"]);
+});
+
+test("without a version the latest is looked up once; current is the option", async () => {
+  const { surface, calls } = await harness();
+  await expect(surface.prepare({})).resolves.toMatchObject({
+    current: "0.5.1",
+    target: "0.5.2",
+  });
+  expect(calls.check).toBe(1);
+  expect(calls.prepare).toEqual(["0.5.2"]);
 });

@@ -24,6 +24,10 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "./control/control-server.js";
+import {
+  generateControlToken,
+  writeControlToken,
+} from "./control/control-token.js";
 import { DiscoveryAggregator } from "./discovery/aggregator.js";
 import { KnownNodesRegistry } from "./discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "./identity/identity.js";
@@ -51,6 +55,7 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
+import { createAvailableUpgrade } from "./upgrade/available-upgrade.js";
 import {
   UpgradeCoordinator,
   type UpgradeCoordinatorOptions,
@@ -657,6 +662,10 @@ export class Daemon {
     // reached.
     let controlPort = 0;
     const releaseSource = this.releaseSource ?? new GitHubReleaseSource();
+    const availableUpgrade = createAvailableUpgrade({
+      currentVersion: this.daemonVersion,
+      latestVersion: () => releaseSource.latestVersion(),
+    });
     const upgrades = new UpgradeCoordinator({
       dataDir,
       currentVersion: this.daemonVersion,
@@ -713,6 +722,7 @@ export class Daemon {
     const fleetUpgrades = createFleetUpgradeSurface({
       rollout,
       coordinator: upgrades,
+      currentVersion: this.daemonVersion,
       pairedDeviceIds: () => trustStore.list().map((d) => d.deviceId),
       prepare: (version) =>
         prepareRelease({
@@ -735,8 +745,14 @@ export class Daemon {
           nodeInfoProvider,
           input,
         }),
-      status: (): ControlStatus => {
+      status: (opts): ControlStatus => {
         const info = nodeInfoProvider();
+        if (opts?.dashboard) {
+          availableUpgrade.refreshIfStale();
+        }
+        const available = opts?.dashboard
+          ? availableUpgrade.current()
+          : undefined;
         return {
           deviceId: info.deviceId,
           name: info.name,
@@ -755,6 +771,7 @@ export class Daemon {
             const lastUpgrade = readUpgradeResultSync(dataDir);
             return lastUpgrade !== undefined ? { lastUpgrade } : {};
           })(),
+          ...(available !== undefined ? { availableUpgrade: available } : {}),
         };
       },
       listNodes: () => nodeDirectory.list(),
@@ -788,10 +805,15 @@ export class Daemon {
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
       checkUpgrade: () => upgrades.check(),
       upgrade: (input) => fleetUpgrades.upgrade(input),
+      prepareUpgrade: (input) => fleetUpgrades.prepare(input),
       upgrades: () => fleetUpgrades.upgrades(),
     };
+    // Fresh per boot: embedded in the dashboard, required on upgrade POSTs.
+    const controlToken = generateControlToken();
+    await writeControlToken(dataDir, controlToken);
     const controlServer = await startControlServer({
       surface: controlSurface,
+      token: controlToken,
       host: config.control.host,
       port: config.control.port,
       dashboard: config.control.dashboard,

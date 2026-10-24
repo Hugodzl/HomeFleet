@@ -9,6 +9,7 @@ test("/ serves the embedded index.html as UTF-8 HTML", () => {
   const asset = lookupStaticAsset("/");
   expect(asset?.contentType).toBe("text/html; charset=utf-8");
   expect(asset?.body).toContain("data-homefleet-dashboard");
+  expect(asset?.body).toContain('id="upgrade-dialog"');
 });
 
 test("lookup is exact-match only (no traversal, no prefix matching)", () => {
@@ -50,5 +51,8 @@ test("the page's script, view model and stylesheet are served with exact types",
   );
   expect(lookupStaticAsset("/dashboard/app.js")?.body).toContain(
     "/control/jobs",
+  );
+  expect(lookupStaticAsset("/dashboard/app.js")?.body).toContain(
+    "/control/upgrade/prepare",
   );
 });

@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "../config/config.js";
+import { CONTROL_TOKEN_FILE } from "../control/control-token.js";
 import type { UpgradeStarted } from "../upgrade/coordinator.js";
 import {
   UPDATER_LOG,
@@ -62,7 +63,15 @@ export interface CliDeps {
   makeControlClient: (options: {
     host: string;
     port: number;
+    /** Per-boot control token, read lazily per request (see control-token.ts). */
+    token?: () => string | undefined;
   }) => ControlClientLike;
+  /**
+   * Reads the daemon's per-boot control token from `dataDir` (real:
+   * `readControlTokenSync`). Absent in tests that don't exercise the token;
+   * the client then sends none and the daemon answers 403 `bad-token`.
+   */
+  readControlToken?: (dataDir: string) => string | undefined;
   /** Writes one line (no trailing newline management needed by callers) to stdout. */
   stdout: (line: string) => void;
   /** Writes one line to stderr. */
@@ -170,6 +179,15 @@ function defaultDaemonEntryPath(): string {
   return fileURLToPath(new URL("./homefleetd.js", import.meta.url));
 }
 
+/** The one explanation both upgrade commands print when the daemon rejects the control token. */
+function badTokenMessage(deps: CliDeps): string {
+  const tokenPath = path.join(deps.dataDir, CONTROL_TOKEN_FILE);
+  return (
+    `Refused: the daemon's control token didn't match (${tokenPath}). ` +
+    "Is homefleetd v0.6.0+ running from this data directory?"
+  );
+}
+
 /**
  * Loads config and builds a control client, runs `action` against it, and
  * maps a {@link DaemonUnreachableError} to a friendly stderr message + exit
@@ -185,6 +203,7 @@ async function withControlClient(
   const client = deps.makeControlClient({
     host: config.control.host,
     port: config.control.port,
+    token: () => deps.readControlToken?.(deps.dataDir),
   });
   try {
     return await action(client, config);
@@ -727,7 +746,11 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
       started = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
-        deps.stderr(`Upgrade refused: ${error.message}`);
+        deps.stderr(
+          error.code === "bad-token"
+            ? badTokenMessage(deps)
+            : `Upgrade refused: ${error.message}`,
+        );
         return 1;
       }
       throw error;
@@ -918,7 +941,11 @@ async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
       rollout = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
-        deps.stderr(`Fleet upgrade refused: ${error.message}`);
+        deps.stderr(
+          error.code === "bad-token"
+            ? badTokenMessage(deps)
+            : `Fleet upgrade refused: ${error.message}`,
+        );
         return 1;
       }
       throw error;

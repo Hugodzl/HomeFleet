@@ -12,7 +12,10 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { UpgradeRequest } from "../control/messages.js";
+import type {
+  PrepareUpgradeRequest,
+  UpgradeRequest,
+} from "../control/messages.js";
 import type { UpgradeCheck, UpgradeStarted } from "./coordinator.js";
 import { UpgradeError } from "./errors.js";
 import { manifestFileName, signatureFileName } from "./manifest.js";
@@ -31,6 +34,8 @@ export interface FleetUpgradeSurfaceOptions {
       force?: boolean;
     }): Promise<UpgradeStarted>;
   };
+  /** This daemon's version (the coordinator's and rollout's), reported as `current`. */
+  currentVersion: string;
   /** Device ids currently in the trust store. */
   pairedDeviceIds: () => string[];
   /** Download + verify `version` into the cache (the coordinator's source and keys). */
@@ -38,7 +43,21 @@ export interface FleetUpgradeSurfaceOptions {
   upgradesDir: string;
 }
 
+/**
+ * What `POST /control/upgrade/prepare` reports once the target release is
+ * downloaded and verified into the cache. Not an eligibility verdict: a
+ * target that is not newer than this node is still reported.
+ */
+export interface PreparedUpgrade {
+  current: string;
+  target: string;
+  verified: true;
+  size: number;
+}
+
 export interface FleetUpgradeSurface {
+  /** Download + verify the target now, so the confirm dialog can say so. */
+  prepare(input: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
   upgrades(): RolloutStatus | undefined;
 }
@@ -59,6 +78,22 @@ export function createFleetUpgradeSurface(
     return starting || options.rollout.status()?.state === "running";
   }
 
+  /**
+   * The ONE place the target is resolved and prepared, shared by `prepare`
+   * and `startFleet` so the dialog's verify step and the later start agree.
+   */
+  async function resolveAndPrepare(
+    version: string | undefined,
+  ): Promise<{ current: string; prepared: PreparedRelease }> {
+    // An explicit version never touches the network here, so a cached
+    // verified release can still be rolled out offline.
+    const target = version ?? (await options.coordinator.check()).latest;
+    return {
+      current: options.currentVersion,
+      prepared: await options.prepare(target),
+    };
+  }
+
   async function startFleet(input: UpgradeRequest): Promise<RolloutStatus> {
     if (rolloutBusy()) {
       throw new UpgradeError("locked", "a fleet rollout is already running");
@@ -76,9 +111,7 @@ export function createFleetUpgradeSurface(
           );
         }
       }
-      const version =
-        input.version ?? (await options.coordinator.check()).latest;
-      const prepared = await options.prepare(version);
+      const { prepared } = await resolveAndPrepare(input.version);
       const dir = path.join(options.upgradesDir, prepared.version);
       let manifestBytes: Buffer;
       let signature: string;
@@ -106,6 +139,9 @@ export function createFleetUpgradeSurface(
         ...(input.forceLocal !== undefined
           ? { forceLocal: input.forceLocal }
           : {}),
+        ...(input.includeSelf !== undefined
+          ? { includeSelf: input.includeSelf }
+          : {}),
       });
     } finally {
       starting = false;
@@ -113,6 +149,15 @@ export function createFleetUpgradeSurface(
   }
 
   return {
+    prepare: async (input) => {
+      const { current, prepared } = await resolveAndPrepare(input.version);
+      return {
+        current,
+        target: prepared.version,
+        verified: true,
+        size: prepared.manifest.size,
+      };
+    },
     upgrade: async (input) => {
       if (input.targets !== "self") {
         return startFleet(input);

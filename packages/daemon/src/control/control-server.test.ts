@@ -25,6 +25,7 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "./control-server.js";
+import { CONTROL_TOKEN_HEADER } from "./control-token.js";
 
 const running: RunningControlServer[] = [];
 
@@ -34,10 +35,16 @@ afterEach(async () => {
   }
 });
 
+/** The per-boot token every `start()`ed server uses (see `send`). */
+const T = "c".repeat(64);
+
 const FAKE_DEVICE_ID = "a".repeat(64);
 const FAKE_PEER_DEVICE_ID = "b".repeat(64);
 
 /** A fully-functional fake surface; individual fields are overridden per test. */
+/** Every `status()` call's options, so route tests can assert the flag. */
+const statusCalls: Array<{ dashboard?: boolean } | undefined> = [];
+
 function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
   const status: ControlStatus = {
     deviceId: FAKE_DEVICE_ID,
@@ -61,7 +68,10 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       deviceId: FAKE_PEER_DEVICE_ID,
       name: "peer-node",
     }),
-    status: () => status,
+    status: (opts) => {
+      statusCalls.push(opts);
+      return status;
+    },
     listNodes: async () => [],
     listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
     unpair: async (deviceId: string): Promise<UnpairSummary | undefined> =>
@@ -74,6 +84,12 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       available: true,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    prepareUpgrade: async () => ({
+      current: "0.5.0",
+      target: "0.5.1",
+      verified: true,
+      size: 1234,
+    }),
     upgrades: () => undefined,
     ...overrides,
   };
@@ -86,6 +102,7 @@ async function start(
     surface: fakeSurface(),
     host: "127.0.0.1",
     port: 0,
+    token: T,
     ...extra,
   });
   running.push(server);
@@ -124,6 +141,13 @@ function send(
   const mergedHeaders: Record<string, string | undefined> = {
     host: options.hostHeader ?? `127.0.0.1:${port}`,
     [CONTROL_HEADER]: "1",
+    // Upgrade POSTs carry the per-boot token by default (as the real client
+    // does); a test passes `{ [CONTROL_TOKEN_HEADER]: undefined }` to drop it.
+    ...(options.method === "POST" &&
+    (options.path === "/control/upgrade" ||
+      options.path.startsWith("/control/upgrade/"))
+      ? { [CONTROL_TOKEN_HEADER]: T }
+      : {}),
     ...(body !== undefined
       ? {
           "content-type": "application/json",
@@ -367,6 +391,24 @@ test("POST /control/pair/connect with an empty body is treated as {} and fails s
   });
   expect(res.status).toBe(400);
   expect(res.json).toMatchObject({ error: expect.any(String) });
+});
+
+test("/control/status?dashboard=1 passes { dashboard: true } to the surface", async () => {
+  statusCalls.length = 0;
+  const server = await start();
+  const res = await send(server.port, {
+    method: "GET",
+    path: "/control/status?dashboard=1",
+  });
+  expect(res.status).toBe(200);
+  expect(statusCalls).toEqual([{ dashboard: true }]);
+});
+
+test("a plain /control/status passes { dashboard: false }", async () => {
+  statusCalls.length = 0;
+  const server = await start();
+  await send(server.port, { method: "GET", path: "/control/status" });
+  expect(statusCalls).toEqual([{ dashboard: false }]);
 });
 
 test("GET /control/status returns the live status shape", async () => {
@@ -928,6 +970,39 @@ test("POST /control/upgrade {targets:'fleet'} returns 202 with the rollout statu
   expect(calls).toEqual([{ targets: "fleet", forceLocal: true }]);
 });
 
+test("POST /control/upgrade rejects includeSelf with targets:'self' and accepts it with a list", async () => {
+  const calls: unknown[] = [];
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async (input) => {
+        calls.push(input);
+        return FLEET_STATUS;
+      },
+    }),
+  });
+  const bad = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: "self", includeSelf: false }),
+  });
+  expect(bad.status).toBe(400);
+  expect(calls).toEqual([]);
+  const ok = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      targets: [FAKE_PEER_DEVICE_ID],
+      includeSelf: false,
+    }),
+  });
+  expect(ok.status).toBe(202);
+  expect(calls).toEqual([
+    { targets: [FAKE_PEER_DEVICE_ID], includeSelf: false },
+  ]);
+});
+
 test("POST /control/upgrade accepts an array of device IDs", async () => {
   const calls: unknown[] = [];
   const server = await start({
@@ -1035,4 +1110,188 @@ test("GET /control/upgrades requires the control header", async () => {
     headers: { [CONTROL_HEADER]: undefined },
   });
   expect(response.status).toBe(403);
+});
+
+// --- per-boot control token -------------------------------------------------
+
+const TOKEN_META = `<meta name="homefleet-control-token" content="${T}">`;
+
+test("GET / embeds the token meta; other assets and data routes never carry it", async () => {
+  const server = await start();
+  const page = await getRaw(server.port, { path: "/" });
+  expect(page.text).toContain(TOKEN_META);
+  const js = await getRaw(server.port, { path: "/dashboard/app.js" });
+  expect(js.text).not.toContain(T);
+  const status = await getRaw(server.port, {
+    path: "/control/status",
+    headers: { [CONTROL_HEADER]: "1" },
+  });
+  expect(status.text).not.toContain(T);
+});
+
+test("HEAD / reports the same content-length as the GET body bytes", async () => {
+  const server = await start();
+  const get = await getRaw(server.port, { path: "/" });
+  const head = await getRaw(server.port, { method: "HEAD", path: "/" });
+  expect(head.headers["content-length"]).toBe(
+    String(Buffer.byteLength(get.text, "utf8")),
+  );
+  expect(get.headers["content-length"]).toBe(head.headers["content-length"]);
+});
+
+test.each([
+  ["no token", undefined],
+  ["a wrong token", "d".repeat(64)],
+  ["a token of a different length", "c"],
+])("POST /control/upgrade with %s is 403 bad-token and never reaches the surface", async (_name, value) => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        called = true;
+        return { from: "0.5.0", to: "0.5.1" };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { [CONTROL_TOKEN_HEADER]: value },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+  expect(called).toBe(false);
+});
+
+test("any POST under /control/upgrade is token-guarded before the body is read", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "not json at all",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+});
+
+test("a server started without a token refuses POST /control/upgrade (fail closed)", async () => {
+  const server = await start({ token: undefined });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+});
+
+test("GET /control/status and /control/upgrades work without a token", async () => {
+  const server = await start();
+  const a = await send(server.port, { method: "GET", path: "/control/status" });
+  const b = await send(server.port, {
+    method: "GET",
+    path: "/control/upgrades",
+  });
+  expect(a.status).toBe(200);
+  expect(b.status).toBe(200);
+});
+
+test("a malformed token is refused at startup, not on every GET /", async () => {
+  await expect(
+    startControlServer({
+      surface: fakeSurface(),
+      host: "127.0.0.1",
+      port: 0,
+      token: "nope",
+    }),
+  ).rejects.toThrow(/64 lowercase hex/);
+});
+
+test("POST /control/upgrades (a sibling path) is a plain 404, not a token 403", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrades",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(404);
+});
+
+test("POST /control/upgrade/prepare returns 200 with the prepared release", async () => {
+  let received: unknown;
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async (input) => {
+        received = input;
+        return { current: "0.5.0", target: "0.5.2", verified: true, size: 99 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: JSON.stringify({ version: "0.5.2" }),
+  });
+  expect(response.status).toBe(200);
+  expect(response.json).toEqual({
+    current: "0.5.0",
+    target: "0.5.2",
+    verified: true,
+    size: 99,
+  });
+  expect(received).toEqual({ version: "0.5.2" });
+});
+
+test("POST /control/upgrade/prepare without the token is 403 and never reaches the surface", async () => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async () => {
+        called = true;
+        return { current: "0.5.0", target: "0.5.1", verified: true, size: 1 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+  expect(called).toBe(false);
+});
+
+test.each([
+  ["verify-failed", 422],
+  ["fetch-failed", 502],
+] as const)("POST /control/upgrade/prepare maps %s to %i", async (code, status) => {
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async () => {
+        throw new UpgradeError(code, "nope");
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: "{}",
+  });
+  expect(response.status).toBe(status);
+  expect(response.json).toMatchObject({ code });
+});
+
+test("POST /control/upgrade/prepare rejects a bad body with 400", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: JSON.stringify({ version: "latest" }),
+  });
+  expect(response.status).toBe(400);
 });

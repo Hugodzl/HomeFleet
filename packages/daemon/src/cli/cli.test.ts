@@ -5,6 +5,7 @@
  * `ensureIdentity` never touch disk, and no `makeControlClient` call is even
  * exercised in the setup tests.
  */
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import type { DaemonConfig } from "../config/config.js";
 import type { ControlStatus } from "../control/control-server.js";
@@ -95,6 +96,12 @@ function fakeControlClient(
       available: false,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    prepareUpgrade: async () => ({
+      current: "0.5.0",
+      target: "0.5.1",
+      verified: true,
+      size: 1234,
+    }),
     upgrades: async () => null,
     ...overrides,
   };
@@ -106,6 +113,10 @@ interface Harness {
   stderrLines: string[];
   controlClient: ControlClientLike;
   makeControlClientCalls: Array<{ host: string; port: number }>;
+  /** The `token` option each makeControlClient call received, in order. */
+  makeControlClientTokens: Array<
+    (() => string | undefined) | string | undefined
+  >;
 }
 
 function makeHarness(
@@ -121,6 +132,7 @@ function makeHarness(
   const identity = options.identity ?? { deviceId: FAKE_DEVICE_ID };
   const controlClient = options.controlClient ?? fakeControlClient();
   const makeControlClientCalls: Array<{ host: string; port: number }> = [];
+  const makeControlClientTokens: Harness["makeControlClientTokens"] = [];
   const deps: CliDeps = {
     dataDir: "/fake/data-dir",
     loadConfig: async (dataDir: string) => {
@@ -132,7 +144,8 @@ function makeHarness(
       return identity;
     },
     makeControlClient: (opts) => {
-      makeControlClientCalls.push(opts);
+      makeControlClientCalls.push({ host: opts.host, port: opts.port });
+      makeControlClientTokens.push(opts.token);
       return controlClient;
     },
     stdout: (line) => stdoutLines.push(line),
@@ -147,6 +160,7 @@ function makeHarness(
     stderrLines,
     controlClient,
     makeControlClientCalls,
+    makeControlClientTokens,
   };
 }
 
@@ -1575,5 +1589,57 @@ describe("fleet upgrade", () => {
     );
     expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(0);
     expect(h.stdoutLines).toEqual(["Everything is already on 0.5.2."]);
+  });
+});
+
+describe("control token on upgrade (v0.6.0)", () => {
+  const BAD_TOKEN_MESSAGE =
+    "Refused: the daemon's control token didn't match " +
+    `(${path.join("/fake/data-dir", "control-token")}). ` +
+    "Is homefleetd v0.6.0+ running from this data directory?";
+
+  function badToken(): ControlClientLike {
+    return fakeControlClient({
+      upgrade: async () => {
+        throw new ControlRequestError(
+          403,
+          "control token required",
+          "bad-token",
+        );
+      },
+    });
+  }
+
+  test("the client factory gets a token getter backed by readControlToken", async () => {
+    const h = makeHarness();
+    const reads: string[] = [];
+    h.deps.readControlToken = (dataDir) => {
+      reads.push(dataDir);
+      return "T";
+    };
+    await runCli(["status"], h.deps);
+    const getter = h.makeControlClientTokens[0];
+    expect(typeof getter).toBe("function");
+    expect(typeof getter === "function" && getter()).toBe("T");
+    expect(reads).toEqual(["/fake/data-dir"]);
+  });
+
+  test("without readControlToken the getter yields undefined", async () => {
+    const h = makeHarness();
+    await runCli(["status"], h.deps);
+    const getter = h.makeControlClientTokens[0];
+    expect(typeof getter === "function" && getter()).toBeUndefined();
+  });
+
+  test("homefleet upgrade explains a bad-token refusal", async () => {
+    const h = makeHarness({ controlClient: badToken() });
+    expect(await runCli(["upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([BAD_TOKEN_MESSAGE]);
+  });
+
+  test("homefleet fleet upgrade explains a bad-token refusal", async () => {
+    const h = makeHarness({ controlClient: badToken() });
+    expect(await runCli(["fleet", "upgrade"], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([BAD_TOKEN_MESSAGE]);
   });
 });
