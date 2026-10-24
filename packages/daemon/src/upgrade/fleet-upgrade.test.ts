@@ -119,6 +119,15 @@ test("a fleet request resolves latest, prepares, and pushes the cached bytes", a
   expect(surface.upgrades()?.state).toBe("running");
 });
 
+test("includeSelf is forwarded to the rollout, and absent by default", async () => {
+  const { surface, calls } = await harness();
+  await surface.upgrade({ targets: "fleet", includeSelf: false });
+  expect(calls.start[0]?.includeSelf).toBe(false);
+  const other = await harness();
+  await other.surface.upgrade({ targets: "fleet" });
+  expect(other.calls.start[0]).not.toHaveProperty("includeSelf");
+});
+
 test("a second start while a rollout runs is refused as locked and touches nothing", async () => {
   const { surface, calls } = await harness({ running: true });
   const error = await surface

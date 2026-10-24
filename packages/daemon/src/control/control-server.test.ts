@@ -938,6 +938,39 @@ test("POST /control/upgrade {targets:'fleet'} returns 202 with the rollout statu
   expect(calls).toEqual([{ targets: "fleet", forceLocal: true }]);
 });
 
+test("POST /control/upgrade rejects includeSelf with targets:'self' and accepts it with a list", async () => {
+  const calls: unknown[] = [];
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async (input) => {
+        calls.push(input);
+        return FLEET_STATUS;
+      },
+    }),
+  });
+  const bad = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: "self", includeSelf: false }),
+  });
+  expect(bad.status).toBe(400);
+  expect(calls).toEqual([]);
+  const ok = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      targets: [FAKE_PEER_DEVICE_ID],
+      includeSelf: false,
+    }),
+  });
+  expect(ok.status).toBe(202);
+  expect(calls).toEqual([
+    { targets: [FAKE_PEER_DEVICE_ID], includeSelf: false },
+  ]);
+});
+
 test("POST /control/upgrade accepts an array of device IDs", async () => {
   const calls: unknown[] = [];
   const server = await start({

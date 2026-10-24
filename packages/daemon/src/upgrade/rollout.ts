@@ -109,6 +109,8 @@ export interface RolloutStartInput {
   signature: string;
   nodes?: string[];
   forceLocal?: boolean;
+  /** Default true. False targets peers only: this node's own step is skipped. */
+  includeSelf?: boolean;
 }
 
 function messageOf(error: unknown): string {
@@ -239,6 +241,7 @@ export class FleetRollout {
       }),
       self: {
         state:
+          input.includeSelf !== false &&
           compareSemver(this.currentVersion, target) < 0
             ? "pending"
             : "skipped",

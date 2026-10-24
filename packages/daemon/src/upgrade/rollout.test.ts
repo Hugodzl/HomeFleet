@@ -327,6 +327,14 @@ describe("FleetRollout", () => {
     expect(h.calls).not.toContain("upgradeSelf");
   });
 
+  it("includeSelf false skips this node even when it is behind", async () => {
+    const h = setup([entry("p1", "0.5.0")]);
+    const s = await run(h, { includeSelf: false });
+    expect(s.self.state).toBe("skipped");
+    expect(s.state).toBe("done");
+    expect(h.calls).not.toContain("upgradeSelf");
+  });
+
   it("a refused self upgrade ends the rollout as done", async () => {
     const h = setup([], {
       selfError: new UpgradeError("busy", "another upgrade is running"),

@@ -106,6 +106,9 @@ export function createFleetUpgradeSurface(
         ...(input.forceLocal !== undefined
           ? { forceLocal: input.forceLocal }
           : {}),
+        ...(input.includeSelf !== undefined
+          ? { includeSelf: input.includeSelf }
+          : {}),
       });
     } finally {
       starting = false;
