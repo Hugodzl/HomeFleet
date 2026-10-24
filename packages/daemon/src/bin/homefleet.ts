@@ -30,11 +30,8 @@ async function main(): Promise<number> {
     dataDir,
     loadConfig: loadDaemonConfig,
     ensureIdentity: loadOrCreateIdentity,
-    makeControlClient: (options) =>
-      new ControlClient({
-        ...options,
-        token: () => readControlTokenSync(dataDir),
-      }),
+    makeControlClient: (options) => new ControlClient(options),
+    readControlToken: readControlTokenSync,
     stdout: (line) => process.stdout.write(`${line}\n`),
     stderr: (line) => process.stderr.write(`${line}\n`),
     fileExists: existsSync,
