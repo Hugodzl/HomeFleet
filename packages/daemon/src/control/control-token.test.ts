@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -32,6 +32,17 @@ describe("control token", () => {
     expect(readControlTokenSync(dir)).toBe("bb");
     expect(CONTROL_TOKEN_FILE).toBe("control-token");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "writes the file with mode 0600, including over an existing file",
+    async () => {
+      const file = path.join(dir, CONTROL_TOKEN_FILE);
+      await writeControlToken(dir, "aa");
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      await writeControlToken(dir, "bb");
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it("creates the data dir if missing", async () => {
     const nested = path.join(dir, "a", "b");

@@ -113,3 +113,23 @@ test("readVerifiedCache returns the cached release, undefined once corrupted", a
     await readVerifiedCache(upgradesDir, "0.5.1", [keys.publicKey]),
   ).toBeUndefined();
 });
+
+test("concurrent prepares of the same uncached version share one fetch", async () => {
+  const { upgradesDir, keys, source } = await setup();
+  const opts = {
+    source,
+    upgradesDir,
+    version: "0.5.1",
+    publicKeys: [keys.publicKey],
+  };
+  const [a, b] = await Promise.all([
+    prepareRelease(opts),
+    prepareRelease(opts),
+  ]);
+  expect(source.fetchCount).toBe(1);
+  expect(a.manifest).toEqual(b.manifest);
+  expect(a.tarballPath).toBe(b.tarballPath);
+  // Once settled, the next call is served from the verified cache.
+  await prepareRelease(opts);
+  expect(source.fetchCount).toBe(1);
+});

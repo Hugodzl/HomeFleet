@@ -194,6 +194,18 @@ with them so repeat recon starts warm. Lowest priority: staleness is the
 real risk — the brainstorm is invalidation (commit distance, touched paths)
 and making reuse visible in the job result so it's never silent.
 
+### Dashboard upgrade UI: follow-ups from the v0.6.0 final review
+
+- Split the dashboard's `app.js` (527 lines): move the dialog/progress wiring
+  to `upgrade-ui.js`, and make `assets.scan.test.ts` iterate every `.js` in
+  the assets dir.
+- Title a persisted rollout that isn't running "Last rollout".
+- The dialog should prepare `{version: status.availableUpgrade}`, so the badge
+  and the dialog agree and an offline dialog can use the cache.
+- Title start errors "Upgrade failed", not "failed to prepare".
+- Start progress polling for a rollout begun from the CLI or another tab.
+- Match the progress record by the returned rollout id instead of `startedAt`.
+
 ### Flaky Windows test: oversized-body 413 in `mcp/http-transport.test.ts`
 
 **Fixed in v0.5.5:** the test now sends only the headers of the oversized request (the content-length fast path refuses on the declared size), so there is no unread body for the server's close to reset.

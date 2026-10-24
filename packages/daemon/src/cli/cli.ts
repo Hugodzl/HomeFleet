@@ -179,13 +179,6 @@ function defaultDaemonEntryPath(): string {
   return fileURLToPath(new URL("./homefleetd.js", import.meta.url));
 }
 
-/**
- * Loads config and builds a control client, runs `action` against it, and
- * maps a {@link DaemonUnreachableError} to a friendly stderr message + exit
- * code 1 — the one place every daemon-talking subcommand shares that
- * behavior, so none of them can forget it (see the Unit brief: "never leak a
- * stack").
- */
 /** The one explanation both upgrade commands print when the daemon rejects the control token. */
 function badTokenMessage(deps: CliDeps): string {
   const tokenPath = path.join(deps.dataDir, CONTROL_TOKEN_FILE);
@@ -195,6 +188,13 @@ function badTokenMessage(deps: CliDeps): string {
   );
 }
 
+/**
+ * Loads config and builds a control client, runs `action` against it, and
+ * maps a {@link DaemonUnreachableError} to a friendly stderr message + exit
+ * code 1 — the one place every daemon-talking subcommand shares that
+ * behavior, so none of them can forget it (see the Unit brief: "never leak a
+ * stack").
+ */
 async function withControlClient(
   deps: CliDeps,
   action: (client: ControlClientLike, config: DaemonConfig) => Promise<number>,

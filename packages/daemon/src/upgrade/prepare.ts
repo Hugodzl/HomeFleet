@@ -64,7 +64,30 @@ export async function readVerifiedCache(
     : undefined;
 }
 
-export async function prepareRelease(
+/**
+ * In-flight prepares keyed by target dir. Two overlapping first-time prepares
+ * of one version would both wipe and fetch into the same dir, and the loser's
+ * failure cleanup could delete the winner's verified cache.
+ */
+const inFlight = new Map<string, Promise<PreparedRelease>>();
+
+/** Single-flight per target dir: concurrent callers share one prepare. */
+export function prepareRelease(
+  options: PrepareOptions,
+): Promise<PreparedRelease> {
+  const dir = path.resolve(options.upgradesDir, options.version);
+  const existing = inFlight.get(dir);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const run = prepareReleaseOnce(options).finally(() => {
+    inFlight.delete(dir);
+  });
+  inFlight.set(dir, run);
+  return run;
+}
+
+async function prepareReleaseOnce(
   options: PrepareOptions,
 ): Promise<PreparedRelease> {
   const { source, upgradesDir, version, publicKeys } = options;
