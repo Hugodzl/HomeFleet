@@ -11,13 +11,19 @@
     <header>
       <h1>HomeFleet</h1>
       <span id="updated" class="muted">Loading…</span>
+      <button id="upgrade-all" type="button" hidden>Upgrade all</button>
       <button id="refresh" type="button">Refresh</button>
     </header>
     <div id="banner" class="banner" hidden></div>
     <main>
+      <section id="upgrade-progress" hidden>
+        <h2>Upgrade progress</h2>
+        <div id="upgrade-progress-body"></div>
+      </section>
       <section>
         <h2>This node</h2>
         <div id="self"></div>
+        <p><button id="upgrade-self" type="button" hidden>Upgrade this node</button></p>
         <h3>Models</h3>
         <div id="models"></div>
       </section>
@@ -36,5 +42,17 @@
         <div id="delegated-jobs"></div>
       </section>
     </main>
+    <dialog id="upgrade-dialog">
+      <h2 id="upgrade-title">Upgrade</h2>
+      <div id="upgrade-lines"></div>
+      <label id="upgrade-force-row" hidden>
+        <input id="upgrade-force" type="checkbox" />
+        Force this node even if busy
+      </label>
+      <div class="dialog-actions">
+        <button id="upgrade-cancel" type="button">Cancel</button>
+        <button id="upgrade-confirm" type="button" disabled>Confirm</button>
+      </div>
+    </dialog>
   </body>
 </html>

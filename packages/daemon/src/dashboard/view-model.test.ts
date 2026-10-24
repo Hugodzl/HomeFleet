@@ -318,6 +318,16 @@ describe("upgrade eligibility", () => {
     expect(row?.allowRemote).toBe(true);
     expect(row?.activeJobs).toBe(3);
   });
+  test("a non-semver daemonVersion is never eligible (no downgrade offer)", () => {
+    expect(up(peer("dev-build"))).toEqual({
+      eligible: false,
+      label: "",
+      why: "unknown version",
+    });
+    expect(
+      selfUpgrade({ daemonVersion: "dev-build", availableUpgrade: "0.6.0" }),
+    ).toEqual({ eligible: false, label: "", why: "unknown version" });
+  });
   test("selfUpgrade compares status version to availableUpgrade", () => {
     expect(
       selfUpgrade({ daemonVersion: "0.5.2", availableUpgrade: "0.6.0" }),
@@ -365,6 +375,12 @@ describe("confirmSummary", () => {
       "old: not eligible (too old for remote upgrade)",
     ]);
   });
+  test("job counts are pluralized", () => {
+    const busy = (n: number) =>
+      confirmSummary({ ...base, peers: [row("b", true, n)] }).lines.at(-1);
+    expect(busy(1)).toBe("b: busy (1 job) — will be refused");
+    expect(busy(2)).toBe("b: busy (2 jobs) — will be refused");
+  });
   test("self lines: idle, busy, forced, already current", () => {
     const withSelf = (self: object, forceSelf = false) =>
       confirmSummary({
@@ -374,7 +390,7 @@ describe("confirmSummary", () => {
       }).lines.at(-1);
     expect(withSelf({})).toBe("This node: will upgrade last");
     expect(withSelf({ activeJobs: 1 })).toBe(
-      "This node: busy (1 jobs) — will be refused unless forced",
+      "This node: busy (1 job) — will be refused unless forced",
     );
     expect(withSelf({ activeJobs: 1 }, true)).toBe(
       "This node: will upgrade last (forced)",

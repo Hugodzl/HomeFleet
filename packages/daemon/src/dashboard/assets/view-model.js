@@ -17,6 +17,16 @@ function list(items) {
   return items.length > 0 ? items.join(", ") : "(none)";
 }
 
+/** @param {number} n */
+function jobs(n) {
+  return `${n} ${n === 1 ? "job" : "jobs"}`;
+}
+
+/** @param {string} v strict X.Y.Z only */
+function isSemver(v) {
+  return /^\d+\.\d+\.\d+$/.test(v);
+}
+
 /**
  * @param {number | undefined} epochMs
  * @param {number} nowMs
@@ -116,6 +126,9 @@ function peerUpgrade(node, target) {
   if (!info.upgrade.allowRemote) {
     return no("remote upgrades off");
   }
+  if (!isSemver(info.daemonVersion)) {
+    return no("unknown version");
+  }
   if (compareVersions(info.daemonVersion, target) >= 0) {
     return no("already up to date");
   }
@@ -125,10 +138,13 @@ function peerUpgrade(node, target) {
 /** @param {any} status a ControlStatus (daemonVersion, availableUpgrade?) */
 export function selfUpgrade(status) {
   const target = status.availableUpgrade;
-  if (
-    target === undefined ||
-    compareVersions(status.daemonVersion, target) >= 0
-  ) {
+  if (target === undefined) {
+    return { eligible: false, label: "", why: "no upgrade available" };
+  }
+  if (!isSemver(status.daemonVersion)) {
+    return { eligible: false, label: "", why: "unknown version" };
+  }
+  if (compareVersions(status.daemonVersion, target) >= 0) {
     return { eligible: false, label: "", why: "no upgrade available" };
   }
   return { eligible: true, label: `⬆ ${target} available`, why: "" };
@@ -228,7 +244,7 @@ export function confirmSummary({ prepared, error, peers, self, forceSelf }) {
       lines.push(`${peer.name}: not eligible (${peer.upgrade.why})`);
     } else if (peer.activeJobs > 0) {
       lines.push(
-        `${peer.name}: busy (${peer.activeJobs} jobs) — will be refused`,
+        `${peer.name}: busy (${jobs(peer.activeJobs)}) — will be refused`,
       );
     } else {
       anyEligible = true;
@@ -240,7 +256,7 @@ export function confirmSummary({ prepared, error, peers, self, forceSelf }) {
       lines.push(`This node: already on ${self.version}`);
     } else if (self.activeJobs > 0 && !forceSelf) {
       lines.push(
-        `This node: busy (${self.activeJobs} jobs) — will be refused unless forced`,
+        `This node: busy (${jobs(self.activeJobs)}) — will be refused unless forced`,
       );
     } else {
       anyEligible = true;

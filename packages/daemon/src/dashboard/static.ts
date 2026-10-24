@@ -8,7 +8,8 @@
  * control API's mutating `pair/*` routes, so script injection into this
  * page would be a real escalation. The CSP forbids inline script/style and
  * eval, and only lets the page talk to its own origin; the client code's
- * own discipline (textContent-only rendering, GET-only fetches) is enforced
+ * own discipline (textContent-only rendering; every fetch names its method and
+ * the only POSTs are the two token-bearing upgrade routes) is enforced
  * separately by assets.scan.test.ts.
  */
 import appCss from "./assets/app.css?raw";
