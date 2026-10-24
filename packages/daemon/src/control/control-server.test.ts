@@ -42,6 +42,9 @@ const FAKE_DEVICE_ID = "a".repeat(64);
 const FAKE_PEER_DEVICE_ID = "b".repeat(64);
 
 /** A fully-functional fake surface; individual fields are overridden per test. */
+/** Every `status()` call's options, so route tests can assert the flag. */
+const statusCalls: Array<{ dashboard?: boolean } | undefined> = [];
+
 function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
   const status: ControlStatus = {
     deviceId: FAKE_DEVICE_ID,
@@ -65,7 +68,10 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       deviceId: FAKE_PEER_DEVICE_ID,
       name: "peer-node",
     }),
-    status: () => status,
+    status: (opts) => {
+      statusCalls.push(opts);
+      return status;
+    },
     listNodes: async () => [],
     listJobs: (): ControlJobs => ({ worker: [], delegated: [] }),
     unpair: async (deviceId: string): Promise<UnpairSummary | undefined> =>
@@ -385,6 +391,24 @@ test("POST /control/pair/connect with an empty body is treated as {} and fails s
   });
   expect(res.status).toBe(400);
   expect(res.json).toMatchObject({ error: expect.any(String) });
+});
+
+test("/control/status?dashboard=1 passes { dashboard: true } to the surface", async () => {
+  statusCalls.length = 0;
+  const server = await start();
+  const res = await send(server.port, {
+    method: "GET",
+    path: "/control/status?dashboard=1",
+  });
+  expect(res.status).toBe(200);
+  expect(statusCalls).toEqual([{ dashboard: true }]);
+});
+
+test("a plain /control/status passes { dashboard: false }", async () => {
+  statusCalls.length = 0;
+  const server = await start();
+  await send(server.port, { method: "GET", path: "/control/status" });
+  expect(statusCalls).toEqual([{ dashboard: false }]);
 });
 
 test("GET /control/status returns the live status shape", async () => {

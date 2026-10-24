@@ -55,6 +55,7 @@ import { PairingManager } from "./pairing/pairing.js";
 import { HfpClient, type PairTarget } from "./transport/client.js";
 import { NodeServer } from "./transport/server.js";
 import { TrustStore } from "./trust/trust-store.js";
+import { createAvailableUpgrade } from "./upgrade/available-upgrade.js";
 import {
   UpgradeCoordinator,
   type UpgradeCoordinatorOptions,
@@ -661,6 +662,10 @@ export class Daemon {
     // reached.
     let controlPort = 0;
     const releaseSource = this.releaseSource ?? new GitHubReleaseSource();
+    const availableUpgrade = createAvailableUpgrade({
+      currentVersion: this.daemonVersion,
+      latestVersion: () => releaseSource.latestVersion(),
+    });
     const upgrades = new UpgradeCoordinator({
       dataDir,
       currentVersion: this.daemonVersion,
@@ -740,8 +745,14 @@ export class Daemon {
           nodeInfoProvider,
           input,
         }),
-      status: (): ControlStatus => {
+      status: (opts): ControlStatus => {
         const info = nodeInfoProvider();
+        if (opts?.dashboard) {
+          availableUpgrade.refreshIfStale();
+        }
+        const available = opts?.dashboard
+          ? availableUpgrade.current()
+          : undefined;
         return {
           deviceId: info.deviceId,
           name: info.name,
@@ -760,6 +771,7 @@ export class Daemon {
             const lastUpgrade = readUpgradeResultSync(dataDir);
             return lastUpgrade !== undefined ? { lastUpgrade } : {};
           })(),
+          ...(available !== undefined ? { availableUpgrade: available } : {}),
         };
       },
       listNodes: () => nodeDirectory.list(),

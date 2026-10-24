@@ -239,6 +239,9 @@ function validateControlStatus(json: unknown): ControlStatus {
   if (json.lastUpgrade !== undefined) {
     assertIsObject(json.lastUpgrade, "status.lastUpgrade");
   }
+  if (json.availableUpgrade !== undefined) {
+    assertString(json.availableUpgrade, "availableUpgrade", "status");
+  }
   return json as unknown as ControlStatus;
 }
 

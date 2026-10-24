@@ -167,6 +167,8 @@ export interface ControlStatus {
   maxConcurrentJobs: number;
   /** The last upgrade's outcome on this node, if one ever ran (upgrade-result.json). */
   lastUpgrade?: UpgradeResult;
+  /** A newer release than this daemon, from the dashboard-gated cached check. */
+  availableUpgrade?: string;
 }
 
 /** One worker-side job (this node ran it for a peer), as `/control/jobs` reports it. */
@@ -244,8 +246,11 @@ export interface ControlSurface {
     code: string;
     expectedDeviceId?: string;
   }): Promise<PairConnectSummary>;
-  /** This node's own live status. */
-  status(): ControlStatus;
+  /**
+   * This node's own live status. `dashboard` marks a poll from the dashboard
+   * page — the only caller allowed to trigger the cached release lookup.
+   */
+  status(opts?: { dashboard?: boolean }): ControlStatus;
   /** The live paired-node directory; wraps `NodeDirectory.list`. */
   listNodes(): Promise<NodeDirectoryEntry[]>;
   /**
@@ -579,8 +584,15 @@ export async function startControlServer(
     respondJson(res, 200, summary);
   }
 
-  async function handleStatus(res: ServerResponse): Promise<void> {
-    respondJson(res, 200, surface.status());
+  async function handleStatus(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const dashboard =
+      new URL(req.url ?? "", "http://localhost").searchParams.get(
+        "dashboard",
+      ) === "1";
+    respondJson(res, 200, surface.status({ dashboard }));
   }
 
   async function handleNodes(res: ServerResponse): Promise<void> {
@@ -799,7 +811,7 @@ export async function startControlServer(
         return;
       }
       if (method === "GET" && pathname === "/control/status") {
-        await handleStatus(res);
+        await handleStatus(req, res);
         return;
       }
       if (method === "GET" && pathname === "/control/nodes") {
