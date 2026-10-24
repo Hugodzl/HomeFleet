@@ -2,7 +2,7 @@
  * The daemon's CONTROL API (M9 Unit 7): a loopback HTTP server the
  * `homefleet` CLI uses to drive pairing and unpairing, list nodes, read status, list
  * recent jobs, check for and start a self-upgrade (`GET /control/upgrade/check`,
- * `POST /control/upgrade`), and serve the read-only dashboard against the
+ * `POST /control/upgrade`), and serve the dashboard (read-only except the token-guarded upgrade POSTs) against the
  * RUNNING daemon.
  *
  * Why this exists: pairing is server-side state — the RESPONDER's live
@@ -58,8 +58,8 @@
  *   The page's own data fetches are same-origin and send the header, so no
  *   CORS headers are ever added.
  *
- * NOTE: local processes are trusted (same posture as the MCP front) — there
- * is no per-request auth token in v0. The defenses above are about the
+ * NOTE: local processes are trusted (same posture as the MCP front) — only the
+ * upgrade POSTs carry a per-boot token (below). The defenses above are about the
  * NETWORK boundary (nothing off-loopback can reach this at all) and the
  * BROWSER boundary (no web page can drive it cross-origin); any other
  * process already running as the same OS user could reach this port
@@ -83,17 +83,21 @@
  * place of the static header value — not a rewrite of the network/browser
  * defenses above, which hold independently.
  *
- * `POST /control/upgrade` joins that same same-OS-user trust boundary: it
- * can only install a release whose manifest verifies under a PINNED key
- * (../upgrade/manifest.ts), never caller-supplied bytes. Phase 4 of the
- * fleet-upgrade spec adds the per-boot token before a browser page may
- * trigger it.
+ * `POST /control/upgrade` (and anything under `/control/upgrade/`) can only
+ * install a release whose manifest verifies under a PINNED key
+ * (../upgrade/manifest.ts), never caller-supplied bytes. Because the
+ * dashboard may now TRIGGER it, those routes additionally require the
+ * per-boot token (./control-token.ts): random per daemon start, written to a
+ * 0600 file for the CLI, and embedded in the served dashboard page (a
+ * cross-origin page cannot read it). The guard is a single check in the
+ * dispatch, before any body is read. Every other route is unchanged.
  *
  * `unpair` (the inverse trust-store write) is covered by the same sign-off:
  * a same-OS-user co-resident process can call it just as it can call
  * `pair/connect`. The worst it can do is REVOKE trust (a local denial of
  * service), which is strictly less than `pair/connect`'s ADD. The same
- * per-boot-token upgrade path applies to both.
+ * per-boot-token mechanism is the upgrade path for both, should that boundary
+ * ever be judged insufficient.
  */
 import {
   createServer,
@@ -120,6 +124,7 @@ import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
 import { UpgradeError } from "../upgrade/errors.js";
 import type { UpgradeResult } from "../upgrade/files.js";
 import type { RolloutStatus } from "../upgrade/rollout.js";
+import { CONTROL_TOKEN_HEADER, tokensMatch } from "./control-token.js";
 import {
   type PairConnectRequest,
   PairConnectRequestSchema,
@@ -278,10 +283,16 @@ export interface ControlServerOptions {
   /** Extra allowed Host header values (beyond the bound loopback host:port). */
   allowedHosts?: string[];
   /**
-   * Serve the read-only dashboard's static assets (default `true`; config
+   * Serve the dashboard's static assets (default `true`; config
    * `control.dashboard`). `false` 404s them; data routes are unaffected.
    */
   dashboard?: boolean;
+  /**
+   * The per-boot control token (see ./control-token.ts). Embedded in the
+   * dashboard page and required on every `POST /control/upgrade*`. Absent =>
+   * those routes answer 403 `bad-token` (fail closed).
+   */
+  token?: string;
 }
 
 export interface RunningControlServer {
@@ -311,13 +322,43 @@ function respondError(
   respondJson(res, status, { error: message });
 }
 
-/** Serves an embedded dashboard asset with the static security headers. */
+const CHARSET_META = '<meta charset="utf-8" />';
+
+/**
+ * Embeds the per-boot token in the dashboard page, right after the charset
+ * meta. The token is hex (asserted, so no escaping is ever needed).
+ */
+function injectToken(html: string, token: string): string {
+  if (!/^[0-9a-f]{64}$/.test(token)) {
+    throw new Error("control token must be 64 lowercase hex characters");
+  }
+  if (!html.includes(CHARSET_META)) {
+    throw new Error("dashboard index.html lost its charset meta tag");
+  }
+  return html.replace(
+    CHARSET_META,
+    `${CHARSET_META}
+    <meta name="homefleet-control-token" content="${token}">`,
+  );
+}
+
+/**
+ * Serves an embedded dashboard asset with the static security headers. The
+ * page ("/") alone gets the per-boot token injected; `content-length` is
+ * computed from the transformed bytes (HEAD reports the same length).
+ */
 function serveStatic(
   res: ServerResponse,
   asset: StaticAsset,
   headOnly: boolean,
+  token: string | undefined,
+  pathname: string,
 ): void {
-  const body = Buffer.from(asset.body, "utf8");
+  const text =
+    pathname === "/" && token !== undefined
+      ? injectToken(asset.body, token)
+      : asset.body;
+  const body = Buffer.from(text, "utf8");
   res.writeHead(200, {
     ...STATIC_SECURITY_HEADERS,
     "content-type": asset.contentType,
@@ -554,6 +595,23 @@ export async function startControlServer(
     respondJson(res, 200, { rollout: surface.upgrades() ?? null });
   }
 
+  /** Writes the 403 and returns false when the request lacks the token. */
+  function requireControlToken(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): boolean {
+    const header = req.headers[CONTROL_TOKEN_HEADER];
+    const provided = Array.isArray(header) ? header[0] : header;
+    if (options.token !== undefined && tokensMatch(options.token, provided)) {
+      return true;
+    }
+    respondJson(res, 403, {
+      error: `missing or wrong "${CONTROL_TOKEN_HEADER}" header`,
+      code: "bad-token",
+    });
+    return false;
+  }
+
   async function handleUpgrade(
     req: IncomingMessage,
     res: ServerResponse,
@@ -661,7 +719,7 @@ export async function startControlServer(
           respondError(res, 404, "not found");
           return;
         }
-        serveStatic(res, asset, method === "HEAD");
+        serveStatic(res, asset, method === "HEAD", options.token, pathname);
         return;
       }
     }
@@ -672,6 +730,16 @@ export async function startControlServer(
     // request before it is ever sent.
     if (req.headers[CONTROL_HEADER] !== "1") {
       respondError(res, 403, `missing required "${CONTROL_HEADER}" header`);
+      return;
+    }
+
+    // ONE guard for every upgrade POST, before any handler reads a body, so a
+    // route added under /control/upgrade is protected by construction.
+    if (
+      method === "POST" &&
+      pathname.startsWith("/control/upgrade") &&
+      !requireControlToken(req, res)
+    ) {
       return;
     }
 

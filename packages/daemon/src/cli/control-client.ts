@@ -24,6 +24,7 @@ import {
   type PairConnectSummary,
   type UnpairSummary,
 } from "../control/control-server.js";
+import { CONTROL_TOKEN_HEADER } from "../control/control-token.js";
 import type { UpgradeRequest } from "../control/messages.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
@@ -87,6 +88,12 @@ export interface ControlClientOptions {
   port: number;
   /** Injectable for tests; defaults to the global `fetch`. */
   fetch?: typeof fetch;
+  /**
+   * The daemon's per-boot control token (see ../control/control-token.ts),
+   * or a getter read per request (the CLI reads the daemon's token file
+   * lazily). Sent ONLY on `POST /control/upgrade*`.
+   */
+  token?: string | (() => string | undefined);
 }
 
 export interface PairConnectInput {
@@ -297,6 +304,20 @@ function validateUnpairSummary(json: unknown): UnpairSummary {
   };
 }
 
+/** The token header, for upgrade POSTs only — never on a GET. */
+function tokenHeader(
+  options: ControlClientOptions,
+  method: string,
+  path: string,
+): Record<string, string> {
+  if (method !== "POST" || !path.startsWith("/control/upgrade")) {
+    return {};
+  }
+  const token =
+    typeof options.token === "function" ? options.token() : options.token;
+  return token === undefined ? {} : { [CONTROL_TOKEN_HEADER]: token };
+}
+
 /**
  * Issues one request against the control API. Every request carries {@link
  * CONTROL_HEADER} (required by every route, see control-server.ts) — this is
@@ -325,6 +346,7 @@ async function controlRequest(
       method,
       headers: {
         [CONTROL_HEADER]: "1",
+        ...tokenHeader(options, method, path),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

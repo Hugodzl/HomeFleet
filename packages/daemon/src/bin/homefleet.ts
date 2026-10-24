@@ -19,6 +19,7 @@ import { ControlClient } from "../cli/control-client.js";
 import { openUrl } from "../cli/open-url.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
+import { readControlTokenSync } from "../control/control-token.js";
 import { loadOrCreateIdentity } from "../identity/identity.js";
 import { readUpgradeResultSync } from "../upgrade/files.js";
 import { isInvokedDirectly } from "./invoked-directly.js";
@@ -29,7 +30,11 @@ async function main(): Promise<number> {
     dataDir,
     loadConfig: loadDaemonConfig,
     ensureIdentity: loadOrCreateIdentity,
-    makeControlClient: (options) => new ControlClient(options),
+    makeControlClient: (options) =>
+      new ControlClient({
+        ...options,
+        token: () => readControlTokenSync(dataDir),
+      }),
     stdout: (line) => process.stdout.write(`${line}\n`),
     stderr: (line) => process.stderr.write(`${line}\n`),
     fileExists: existsSync,

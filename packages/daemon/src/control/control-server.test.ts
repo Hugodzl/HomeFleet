@@ -25,6 +25,7 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "./control-server.js";
+import { CONTROL_TOKEN_HEADER } from "./control-token.js";
 
 const running: RunningControlServer[] = [];
 
@@ -33,6 +34,9 @@ afterEach(async () => {
     await server.close();
   }
 });
+
+/** The per-boot token every `start()`ed server uses (see `send`). */
+const T = "c".repeat(64);
 
 const FAKE_DEVICE_ID = "a".repeat(64);
 const FAKE_PEER_DEVICE_ID = "b".repeat(64);
@@ -86,6 +90,7 @@ async function start(
     surface: fakeSurface(),
     host: "127.0.0.1",
     port: 0,
+    token: T,
     ...extra,
   });
   running.push(server);
@@ -124,6 +129,11 @@ function send(
   const mergedHeaders: Record<string, string | undefined> = {
     host: options.hostHeader ?? `127.0.0.1:${port}`,
     [CONTROL_HEADER]: "1",
+    // Upgrade POSTs carry the per-boot token by default (as the real client
+    // does); a test passes `{ [CONTROL_TOKEN_HEADER]: undefined }` to drop it.
+    ...(options.method === "POST" && options.path.startsWith("/control/upgrade")
+      ? { [CONTROL_TOKEN_HEADER]: T }
+      : {}),
     ...(body !== undefined
       ? {
           "content-type": "application/json",
@@ -1035,4 +1045,90 @@ test("GET /control/upgrades requires the control header", async () => {
     headers: { [CONTROL_HEADER]: undefined },
   });
   expect(response.status).toBe(403);
+});
+
+// --- per-boot control token -------------------------------------------------
+
+const TOKEN_META = `<meta name="homefleet-control-token" content="${T}">`;
+
+test("GET / embeds the token meta; other assets and data routes never carry it", async () => {
+  const server = await start();
+  const page = await getRaw(server.port, { path: "/" });
+  expect(page.text).toContain(TOKEN_META);
+  const js = await getRaw(server.port, { path: "/dashboard/app.js" });
+  expect(js.text).not.toContain(T);
+  const status = await getRaw(server.port, {
+    path: "/control/status",
+    headers: { [CONTROL_HEADER]: "1" },
+  });
+  expect(status.text).not.toContain(T);
+});
+
+test("HEAD / reports the same content-length as the GET body bytes", async () => {
+  const server = await start();
+  const get = await getRaw(server.port, { path: "/" });
+  const head = await getRaw(server.port, { method: "HEAD", path: "/" });
+  expect(head.headers["content-length"]).toBe(
+    String(Buffer.byteLength(get.text, "utf8")),
+  );
+  expect(get.headers["content-length"]).toBe(head.headers["content-length"]);
+});
+
+test.each([
+  ["no token", undefined],
+  ["a wrong token", "d".repeat(64)],
+  ["a token of a different length", "c"],
+])("POST /control/upgrade with %s is 403 bad-token and never reaches the surface", async (_name, value) => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      upgrade: async () => {
+        called = true;
+        return { from: "0.5.0", to: "0.5.1" };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    headers: { [CONTROL_TOKEN_HEADER]: value },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+  expect(called).toBe(false);
+});
+
+test("any POST under /control/upgrade is token-guarded before the body is read", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "not json at all",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+});
+
+test("a server started without a token refuses POST /control/upgrade (fail closed)", async () => {
+  const server = await start({ token: undefined });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade",
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+});
+
+test("GET /control/status and /control/upgrades work without a token", async () => {
+  const server = await start();
+  const a = await send(server.port, { method: "GET", path: "/control/status" });
+  const b = await send(server.port, {
+    method: "GET",
+    path: "/control/upgrades",
+  });
+  expect(a.status).toBe(200);
+  expect(b.status).toBe(200);
 });

@@ -12,6 +12,7 @@ import { UpgradeAcceptedSchema } from "@homefleet/protocol";
 import { expect, test } from "vitest";
 import { ControlClient } from "../cli/control-client.js";
 import { resolveDataDir } from "../config/paths.js";
+import { readControlTokenSync } from "../control/control-token.js";
 import { Daemon, type DaemonOptions } from "../daemon.js";
 import { createDaemonHarness, HOST } from "../test-fixtures.js";
 import { HfpRequestError } from "../transport/client.js";
@@ -297,8 +298,12 @@ function peersOf(started: object) {
   return (started as RolloutStatus).peers;
 }
 
-function controlClientFor(daemon: Daemon): ControlClient {
-  return new ControlClient({ host: HOST, port: daemon.controlPort });
+function controlClientFor(node: Node): ControlClient {
+  return new ControlClient({
+    host: HOST,
+    port: node.daemon.controlPort,
+    token: readControlTokenSync(node.dataDir),
+  });
 }
 
 /** Both directions seeded: A can reach B (rollout) and B can reach A (tarball). */
@@ -316,7 +321,7 @@ async function seedBoth(a: Node, b: Node) {
 test("fleet rollout through the control API pushes the peer, then hands off self", async () => {
   const { a, b } = await setup();
   await seedBoth(a, b);
-  const control = controlClientFor(a.daemon);
+  const control = controlClientFor(a);
   const peerPort = b.daemon.hfpPort;
 
   const started = await control.upgrade({ targets: "fleet", version: VERSION });
@@ -388,7 +393,7 @@ test("fleet rollout through the control API pushes the peer, then hands off self
 test("a peer that refuses the push is reported refused and the rollout continues to self", async () => {
   const { a, b } = await setup({});
   await seedBoth(a, b);
-  const control = controlClientFor(a.daemon);
+  const control = controlClientFor(a);
   await control.upgrade({ targets: "fleet", version: VERSION });
   await h.waitUntil(
     async () => (await control.upgrades())?.self.state === "restarting",
@@ -408,7 +413,7 @@ test("a peer that refuses the push is reported refused and the rollout continues
 test("an explicit targets array selects the paired id", async () => {
   const { a, b } = await setup();
   await seedBoth(a, b);
-  const control = controlClientFor(a.daemon);
+  const control = controlClientFor(a);
   const started = await control.upgrade({
     targets: [b.daemon.deviceId],
     version: VERSION,
@@ -424,7 +429,7 @@ test("an explicit targets array selects the paired id", async () => {
 test("a paired but undiscovered id in an explicit targets array is unreachable, not dropped", async () => {
   const { a, b } = await setup();
   // No knownNodes entry on A for B.
-  const control = controlClientFor(a.daemon);
+  const control = controlClientFor(a);
   const started = await control.upgrade({
     targets: [b.daemon.deviceId],
     version: VERSION,

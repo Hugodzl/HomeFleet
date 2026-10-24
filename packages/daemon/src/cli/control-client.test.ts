@@ -18,6 +18,7 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "../control/control-server.js";
+import { CONTROL_TOKEN_HEADER } from "../control/control-token.js";
 import { UpgradeError } from "../upgrade/errors.js";
 import type { RolloutStatus } from "../upgrade/rollout.js";
 import {
@@ -33,6 +34,9 @@ afterEach(async () => {
     await server.close();
   }
 });
+
+/** The per-boot token the test servers run with. */
+const T = "c".repeat(64);
 
 const FAKE_DEVICE_ID = "a".repeat(64);
 const FAKE_PEER_DEVICE_ID = "b".repeat(64);
@@ -85,6 +89,7 @@ async function start(
     surface: fakeSurface(),
     host: "127.0.0.1",
     port: 0,
+    token: T,
     ...extra,
   });
   running.push(server);
@@ -318,7 +323,11 @@ test("unpair() of a device that is not paired throws ControlRequestError 404", a
 
 test("checkUpgrade() and upgrade() round-trip over real HTTP", async () => {
   const server = await start();
-  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
   await expect(client.checkUpgrade()).resolves.toEqual({
     current: "0.5.0",
     latest: "0.5.1",
@@ -338,7 +347,11 @@ test("an upgrade refusal surfaces as ControlRequestError with status + code", as
       },
     }),
   });
-  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
   const error = await client
     .upgrade({ targets: "self" })
     .catch((e: unknown) => e);
@@ -366,13 +379,69 @@ test("a fleet upgrade() returns the rollout status; upgrades() reads it back", a
       upgrades: () => ROLLOUT,
     }),
   });
-  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
   await expect(client.upgrade({ targets: "fleet" })).resolves.toEqual(ROLLOUT);
   await expect(client.upgrades()).resolves.toEqual(ROLLOUT);
 });
 
 test("upgrades() resolves null when no rollout has run", async () => {
   const server = await start();
-  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
   await expect(client.upgrades()).resolves.toBeNull();
+});
+
+test("upgrade() without a token is refused 403 bad-token", async () => {
+  const server = await start();
+  const client = new ControlClient({ host: "127.0.0.1", port: server.port });
+  const error = await client
+    .upgrade({ targets: "self" })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ControlRequestError);
+  expect(error).toMatchObject({ status: 403, code: "bad-token" });
+});
+
+test("a token getter is read per request", async () => {
+  const server = await start();
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: () => T,
+  });
+  await expect(client.upgrade({ targets: "self" })).resolves.toBeDefined();
+});
+
+test("the token header is sent on upgrade POSTs only, never on GETs", async () => {
+  const seen: Array<[string, string | undefined]> = [];
+  const server = await start();
+  const recording = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const headers = new Headers(init?.headers);
+    seen.push([
+      `${init?.method} ${new URL(String(input)).pathname}`,
+      headers.get(CONTROL_TOKEN_HEADER) ?? undefined,
+    ]);
+    return fetch(input, init);
+  }) as typeof fetch;
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+    fetch: recording,
+  });
+  await client.status();
+  await client.upgrade({ targets: "self" });
+  expect(seen).toEqual([
+    ["GET /control/status", undefined],
+    ["POST /control/upgrade", T],
+  ]);
 });

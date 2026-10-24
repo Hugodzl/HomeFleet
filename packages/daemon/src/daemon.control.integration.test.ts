@@ -23,6 +23,7 @@
  */
 import { expect, test } from "vitest";
 import { ControlClient, ControlRequestError } from "./cli/control-client.js";
+import { readControlTokenSync } from "./control/control-token.js";
 import type { Daemon } from "./daemon.js";
 import { JobResultOutputSchema } from "./mcp/tools.js";
 import {
@@ -35,8 +36,12 @@ import { writeRolloutStatus } from "./upgrade/files.js";
 const h = createDaemonHarness({ tempPrefix: "homefleet-daemon-control" });
 
 /** A real control-API client pointed at `daemon`'s bound control port. */
-function controlClientFor(daemon: Daemon): ControlClient {
-  return new ControlClient({ host: HOST, port: daemon.controlPort });
+function controlClientFor(daemon: Daemon, dataDir?: string): ControlClient {
+  return new ControlClient({
+    host: HOST,
+    port: daemon.controlPort,
+    ...(dataDir !== undefined ? { token: readControlTokenSync(dataDir) } : {}),
+  });
 }
 
 test("pairing through the real control-API HTTP surface seeds known-nodes, so the peer is immediately reachable with live discovery fully disabled", async () => {
@@ -324,8 +329,8 @@ test("unpair through the real control route: trust revoked live, the peer's job 
 }, 90_000);
 
 test("a daemon without a shutdown hook refuses upgrades cleanly (409 unsupported) and reports no lastUpgrade", async () => {
-  const { daemon } = await h.startDaemon("solo");
-  const control = controlClientFor(daemon);
+  const { daemon, dataDir } = await h.startDaemon("solo");
+  const control = controlClientFor(daemon, dataDir);
 
   const error = await control
     .upgrade({ targets: "self" })
@@ -339,7 +344,7 @@ test("a daemon without a shutdown hook refuses upgrades cleanly (409 unsupported
 
 test("a rollout saved before this node's own restart is served back by the restarted daemon", async () => {
   const { daemon, dataDir } = await h.startDaemon("requester");
-  expect(await controlClientFor(daemon).upgrades()).toBeNull();
+  expect(await controlClientFor(daemon, dataDir).upgrades()).toBeNull();
   const version = daemon.nodeInfo().daemonVersion;
   await daemon.stop();
 
@@ -365,7 +370,7 @@ test("a rollout saved before this node's own restart is served back by the resta
     undefined,
     dataDir,
   );
-  const rollout = await controlClientFor(restarted).upgrades();
+  const rollout = await controlClientFor(restarted, dataDir).upgrades();
   expect(rollout).toMatchObject({
     id: "r1",
     state: "done",

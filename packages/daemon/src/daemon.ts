@@ -24,6 +24,10 @@ import {
   startControlServer,
   type UnpairSummary,
 } from "./control/control-server.js";
+import {
+  generateControlToken,
+  writeControlToken,
+} from "./control/control-token.js";
 import { DiscoveryAggregator } from "./discovery/aggregator.js";
 import { KnownNodesRegistry } from "./discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "./identity/identity.js";
@@ -790,8 +794,12 @@ export class Daemon {
       upgrade: (input) => fleetUpgrades.upgrade(input),
       upgrades: () => fleetUpgrades.upgrades(),
     };
+    // Fresh per boot: embedded in the dashboard, required on upgrade POSTs.
+    const controlToken = generateControlToken();
+    await writeControlToken(dataDir, controlToken);
     const controlServer = await startControlServer({
       surface: controlSurface,
+      token: controlToken,
       host: config.control.host,
       port: config.control.port,
       dashboard: config.control.dashboard,
