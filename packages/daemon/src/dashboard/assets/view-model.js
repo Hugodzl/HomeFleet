@@ -341,8 +341,47 @@ export function restartBannerState({
   rollout,
   pollFailed,
 }) {
-  if (rollout?.self?.state === "restarting") {
+  // A persisted record can keep self "restarting" after the fact; only a
+  // rollout that is still running means this node is about to restart.
+  if (rollout?.state === "running" && rollout.self?.state === "restarting") {
     return true;
   }
   return pollFailed && confirmedSelfOrFleet;
+}
+
+const SELF_WATCH_MS = 90_000;
+
+/**
+ * GET /control/upgrades falls back to the persisted record of an OLD rollout
+ * when none is in memory. A record that started before the user's confirm is
+ * not the one they started, so it is ignored.
+ * @param {any} rollout RolloutStatus | null
+ * @param {number} confirmedAt epoch ms of the confirm, 0 when none
+ */
+export function currentRollout(rollout, confirmedAt) {
+  if (rollout === null || rollout === undefined) {
+    return null;
+  }
+  return confirmedAt > 0 && Date.parse(rollout.startedAt) < confirmedAt
+    ? null
+    : rollout;
+}
+
+/**
+ * Whether the progress poller keeps going: while a rollout runs, or for 90 s
+ * after a confirmed self/fleet start that has no current record yet (a
+ * self-only upgrade never creates one — the daemon just goes down).
+ * @param {{confirmedSelfOrFleet: boolean, confirmedAt: number, now: number, rollout: any}} input
+ */
+export function shouldKeepWatching({
+  confirmedSelfOrFleet,
+  confirmedAt,
+  now,
+  rollout,
+}) {
+  const current = currentRollout(rollout, confirmedAt);
+  if (current !== null) {
+    return current.state === "running";
+  }
+  return confirmedSelfOrFleet && now - confirmedAt < SELF_WATCH_MS;
 }

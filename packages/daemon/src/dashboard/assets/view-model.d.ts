@@ -96,3 +96,13 @@ export function restartBannerState(input: {
   rollout: RolloutStatus | null;
   pollFailed: boolean;
 }): boolean;
+export function currentRollout(
+  rollout: RolloutStatus | null,
+  confirmedAt: number,
+): RolloutStatus | null;
+export function shouldKeepWatching(input: {
+  confirmedSelfOrFleet: boolean;
+  confirmedAt: number;
+  now: number;
+  rollout: RolloutStatus | null;
+}): boolean;

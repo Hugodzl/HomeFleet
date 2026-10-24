@@ -4,6 +4,7 @@ import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
   compareVersions,
   confirmSummary,
+  currentRollout,
   delegatedJobRows,
   modelRows,
   nodeRows,
@@ -14,6 +15,7 @@ import {
   selfRows,
   selfUpgrade,
   shortId,
+  shouldKeepWatching,
   startOutcome,
   versionCell,
   workerJobRows,
@@ -546,6 +548,65 @@ describe("restartBannerState", () => {
         confirmedSelfOrFleet: false,
         rollout: null,
         pollFailed: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("stale rollout records and the self-only watch", () => {
+  const rec = (state: string, self: string, startedAt: string) =>
+    ({
+      id: "r",
+      target: "0.6.0",
+      startedAt,
+      state,
+      self: { state: self },
+      peers: [],
+    }) as never;
+  const t0 = Date.parse("2026-10-23T12:00:00Z");
+  const old = rec("done", "succeeded", "2026-10-22T12:00:00Z");
+
+  test("restarting self in a non-running record gets no banner", () => {
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: false,
+        rollout: rec("done", "restarting", "2026-10-22T12:00:00Z"),
+        pollFailed: false,
+      }),
+    ).toBe(false);
+  });
+  test("currentRollout drops a record older than the confirm", () => {
+    expect(currentRollout(old, t0)).toBeNull();
+    expect(currentRollout(old, 0)).toBe(old);
+    expect(currentRollout(null, t0)).toBeNull();
+    const fresh = rec("running", "pending", "2026-10-23T12:00:01Z");
+    expect(currentRollout(fresh, t0)).toBe(fresh);
+  });
+  test("a stale finished record keeps the watch alive for 90 s, then stops", () => {
+    const input = { confirmedSelfOrFleet: true, confirmedAt: t0, rollout: old };
+    expect(shouldKeepWatching({ ...input, now: t0 + 30_000 })).toBe(true);
+    expect(shouldKeepWatching({ ...input, now: t0 + 90_000 })).toBe(false);
+  });
+  test("running keeps watching; a fresh finished record stops it", () => {
+    const running = rec("running", "pending", "2026-10-23T12:00:01Z");
+    const done = rec("done", "refused", "2026-10-23T12:00:01Z");
+    const base = {
+      confirmedSelfOrFleet: true,
+      confirmedAt: t0,
+      now: t0 + 500_000,
+    };
+    expect(shouldKeepWatching({ ...base, rollout: running })).toBe(true);
+    expect(shouldKeepWatching({ ...base, now: t0 + 1000, rollout: done })).toBe(
+      false,
+    );
+  });
+  test("nothing confirmed and nothing running: no watch", () => {
+    expect(
+      shouldKeepWatching({
+        confirmedSelfOrFleet: false,
+        confirmedAt: 0,
+        now: t0,
+        rollout: null,
       }),
     ).toBe(false);
   });

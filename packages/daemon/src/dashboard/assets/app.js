@@ -9,6 +9,7 @@
  */
 import {
   confirmSummary,
+  currentRollout,
   delegatedJobRows,
   modelRows,
   nodeRows,
@@ -17,6 +18,7 @@ import {
   restartBannerState,
   selfRows,
   selfUpgrade,
+  shouldKeepWatching,
   startOutcome,
   versionCell,
   workerJobRows,
@@ -24,7 +26,6 @@ import {
 
 const POLL_MS = 3000;
 const PROGRESS_POLL_MS = 2000;
-const SELF_WATCH_MS = 90_000;
 const RELOAD_KEY = "homefleet-last-reload-at";
 const token =
   document
@@ -314,7 +315,6 @@ function syncRestarting(rollout, pollFailed) {
     showRestarting();
   } else if (restarting && !sawDown) {
     restarting = false;
-    confirmedSelfOrFleet = false;
     const banner = document.getElementById("banner");
     banner.classList.remove("info");
     banner.hidden = true;
@@ -410,12 +410,14 @@ async function confirmUpgrade() {
   const confirm = document.getElementById("upgrade-confirm");
   confirm.disabled = true;
   const includesSelf = action.kind !== "node";
+  // Stamped before the POST so the new rollout record is never older than it.
+  confirmedAt = Date.now();
+  confirmedSelfOrFleet = false;
   try {
     await postJson("/control/upgrade", startBody());
     dialog().close();
     // This daemon may restart itself; a failing poll then means "restarting".
     confirmedSelfOrFleet = includesSelf;
-    confirmedAt = Date.now();
     startProgress();
   } catch (error) {
     noteBadToken(error);
@@ -425,6 +427,8 @@ async function confirmUpgrade() {
       message: error instanceof Error ? error.message : "request failed",
     });
     if (outcome.kind === "already-running") {
+      // Someone else's rollout: show it as-is, not as ours.
+      confirmedAt = 0;
       dialog().close();
       startProgress();
     } else {
@@ -438,7 +442,9 @@ async function confirmUpgrade() {
 
 async function pollProgress() {
   try {
-    const { rollout } = await getJson("/control/upgrades");
+    const body = await getJson("/control/upgrades");
+    // The daemon may answer with the record of an old, finished rollout.
+    const rollout = currentRollout(body.rollout, confirmedAt);
     const rows = progressRows(rollout);
     document.getElementById("upgrade-progress").hidden = rows.length === 0;
     renderTable(
@@ -453,16 +459,18 @@ async function pollProgress() {
       statusClass,
     );
     syncRestarting(rollout, false);
-    // A self-only upgrade has no rollout record: keep watching for a while,
-    // since the daemon is about to go down.
-    const awaitingSelf =
-      confirmedSelfOrFleet &&
-      rollout === null &&
-      Date.now() - confirmedAt < SELF_WATCH_MS;
-    if (rollout?.state === "running" || awaitingSelf) {
+    const keepWatching = shouldKeepWatching({
+      confirmedSelfOrFleet,
+      confirmedAt,
+      now: Date.now(),
+      rollout: body.rollout,
+    });
+    if (keepWatching) {
       progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
     } else {
       progressTimer = undefined;
+      confirmedSelfOrFleet = false;
+      confirmedAt = 0;
     }
   } catch {
     // The daemon is going down for its own restart, or hiccuped: keep
