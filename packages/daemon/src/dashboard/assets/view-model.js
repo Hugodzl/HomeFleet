@@ -231,7 +231,9 @@ export function delegatedJobRows(jobs, nowMs) {
 export function confirmSummary({ prepared, error, peers, self, forceSelf }) {
   if (error !== undefined || prepared === undefined) {
     return {
-      title: "Upgrade failed to prepare",
+      // A verified release that then failed to start is not a prepare error.
+      title:
+        prepared === undefined ? "Upgrade failed to prepare" : "Upgrade failed",
       lines: [error ?? "No verified release"],
       canConfirm: false,
     };
@@ -287,6 +289,15 @@ export function progressRows(rollout) {
       reason: rollout.self.reason ?? "",
     },
   ];
+}
+
+/**
+ * Heading over the progress table: the daemon also serves the saved record of
+ * a finished rollout, which may be days old.
+ * @param {{state: string}} rollout
+ */
+export function progressTitle(rollout) {
+  return rollout.state === "running" ? "Upgrade progress" : "Last rollout";
 }
 
 /** @param {{status?: number, code?: string, message: string}} error */

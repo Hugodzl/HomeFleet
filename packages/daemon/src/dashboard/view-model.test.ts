@@ -9,6 +9,7 @@ import {
   modelRows,
   nodeRows,
   progressRows,
+  progressTitle,
   relativeTime,
   reloadDecision,
   restartBannerState,
@@ -402,9 +403,20 @@ describe("confirmSummary", () => {
     expect(withSelf({ version: "0.6.0" })).toBe("This node: already on 0.6.0");
   });
   test("error blocks confirmation and is the only line", () => {
-    expect(confirmSummary({ ...base, error: "no release" })).toEqual({
+    expect(
+      confirmSummary({ ...base, prepared: undefined, error: "no release" }),
+    ).toEqual({
       title: "Upgrade failed to prepare",
       lines: ["no release"],
+      canConfirm: false,
+    });
+  });
+  test("a start error after a verified prepare is titled as a failed upgrade", () => {
+    expect(
+      confirmSummary({ ...base, prepared: { target: "0.6.1" }, error: "busy" }),
+    ).toEqual({
+      title: "Upgrade failed",
+      lines: ["busy"],
       canConfirm: false,
     });
   });
@@ -443,6 +455,14 @@ describe("progressRows", () => {
       { name: "nuc", state: "succeeded", reason: "" },
       { name: "This node", state: "pending", reason: "" },
     ]);
+  });
+});
+
+describe("progressTitle", () => {
+  test("a running rollout is progress; a finished one is the last rollout", () => {
+    expect(progressTitle({ state: "running" })).toBe("Upgrade progress");
+    expect(progressTitle({ state: "done" })).toBe("Last rollout");
+    expect(progressTitle({ state: "stopped" })).toBe("Last rollout");
   });
 });
 
