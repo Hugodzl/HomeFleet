@@ -64,6 +64,7 @@ async function harness(
     start: [] as RolloutStartInput[],
     prepare: [] as string[],
     self: [] as unknown[],
+    check: 0,
   };
   let current: RolloutStatus | undefined = opts.running
     ? status("running")
@@ -78,16 +79,20 @@ async function harness(
       status: () => current,
     },
     coordinator: {
-      check: async () => ({
-        current: "0.5.0",
-        latest: "0.5.2",
-        available: true,
-      }),
+      check: async () => {
+        calls.check += 1;
+        return {
+          current: "0.5.0",
+          latest: "0.5.2",
+          available: true,
+        };
+      },
       upgradeSelf: async (input) => {
         calls.self.push(input);
         return { from: "0.5.0", to: "0.5.2" };
       },
     },
+    currentVersion: "0.5.1",
     pairedDeviceIds: () => [PEER],
     prepare:
       opts.prepare ??
@@ -303,7 +308,7 @@ test("the final rollout survives this node's restart: written at handoff, served
 test("prepare({}) resolves latest, prepares once, and reports the verified release", async () => {
   const { surface, calls } = await harness();
   await expect(surface.prepare({})).resolves.toEqual({
-    current: "0.5.0",
+    current: "0.5.1",
     target: "0.5.2",
     verified: true,
     size: 4096,
@@ -349,4 +354,22 @@ test("a fleet upgrade after prepare() reuses the verified cache (one download)",
   await surface.upgrade({ targets: "fleet" });
   expect(downloads).toBe(1);
   expect(calls.start).toHaveLength(1);
+});
+
+test("an explicit version never needs a release lookup (prepare or fleet upgrade)", async () => {
+  const { surface, calls } = await harness();
+  await surface.prepare({ version: "0.5.2" });
+  await surface.upgrade({ targets: "fleet", version: "0.5.2" });
+  expect(calls.check).toBe(0);
+  expect(calls.prepare).toEqual(["0.5.2", "0.5.2"]);
+});
+
+test("without a version the latest is looked up once; current is the option", async () => {
+  const { surface, calls } = await harness();
+  await expect(surface.prepare({})).resolves.toMatchObject({
+    current: "0.5.1",
+    target: "0.5.2",
+  });
+  expect(calls.check).toBe(1);
+  expect(calls.prepare).toEqual(["0.5.2"]);
 });

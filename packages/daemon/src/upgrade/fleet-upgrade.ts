@@ -34,6 +34,8 @@ export interface FleetUpgradeSurfaceOptions {
       force?: boolean;
     }): Promise<UpgradeStarted>;
   };
+  /** This daemon's version (the coordinator's and rollout's), reported as `current`. */
+  currentVersion: string;
   /** Device ids currently in the trust store. */
   pairedDeviceIds: () => string[];
   /** Download + verify `version` into the cache (the coordinator's source and keys). */
@@ -83,9 +85,13 @@ export function createFleetUpgradeSurface(
   async function resolveAndPrepare(
     version: string | undefined,
   ): Promise<{ current: string; prepared: PreparedRelease }> {
-    const check = await options.coordinator.check();
-    const prepared = await options.prepare(version ?? check.latest);
-    return { current: check.current, prepared };
+    // An explicit version never touches the network here, so a cached
+    // verified release can still be rolled out offline.
+    const target = version ?? (await options.coordinator.check()).latest;
+    return {
+      current: options.currentVersion,
+      prepared: await options.prepare(target),
+    };
   }
 
   async function startFleet(input: UpgradeRequest): Promise<RolloutStatus> {

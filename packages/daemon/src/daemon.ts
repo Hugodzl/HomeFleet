@@ -717,6 +717,7 @@ export class Daemon {
     const fleetUpgrades = createFleetUpgradeSurface({
       rollout,
       coordinator: upgrades,
+      currentVersion: this.daemonVersion,
       pairedDeviceIds: () => trustStore.list().map((d) => d.deviceId),
       prepare: (version) =>
         prepareRelease({
