@@ -14,14 +14,17 @@ import {
   nodeRows,
   progressRows,
   reloadDecision,
+  restartBannerState,
   selfRows,
   selfUpgrade,
   startOutcome,
+  versionCell,
   workerJobRows,
 } from "./view-model.js";
 
 const POLL_MS = 3000;
 const PROGRESS_POLL_MS = 2000;
+const SELF_WATCH_MS = 90_000;
 const RELOAD_KEY = "homefleet-last-reload-at";
 const token =
   document
@@ -33,6 +36,8 @@ let progressTimer;
 let loadedVersion;
 let latest; // { status, peers } from the last successful poll
 let restarting = false;
+let confirmedSelfOrFleet = false;
+let confirmedAt = 0;
 let sawDown = false; // a poll failed while restarting
 let badToken = false;
 let action; // the open dialog's { kind, row, prepared, error }
@@ -184,11 +189,7 @@ function render(status, nodes, jobs, now) {
     status.availableUpgrade,
   ).map((row) => ({
     ...row,
-    version: !row.skew
-      ? row.version
-      : row.upgrade.eligible
-        ? `${row.version} ${row.upgrade.label}`
-        : `${row.version} (differs from ours)`,
+    version: versionCell(row).text,
   }));
   latest = { status, peers };
   renderUpgradeControls();
@@ -210,8 +211,8 @@ function render(status, nodes, jobs, now) {
       if (key === "reachable") {
         return row.reachable === "yes" ? "ok" : "bad";
       }
-      if (key === "version" && row.skew) {
-        return row.upgrade.eligible ? "badge" : "warn";
+      if (key === "version") {
+        return versionCell(row).className;
       }
       return undefined;
     },
@@ -307,6 +308,19 @@ function showRestarting() {
   banner.hidden = false;
 }
 
+/** Applies restartBannerState; clears a banner that no longer applies. */
+function syncRestarting(rollout, pollFailed) {
+  if (restartBannerState({ confirmedSelfOrFleet, rollout, pollFailed })) {
+    showRestarting();
+  } else if (restarting && !sawDown) {
+    restarting = false;
+    confirmedSelfOrFleet = false;
+    const banner = document.getElementById("banner");
+    banner.classList.remove("info");
+    banner.hidden = true;
+  }
+}
+
 /** Shows the Upgrade all / Upgrade this node buttons when anything is eligible. */
 function renderUpgradeControls() {
   const { status, peers } = latest;
@@ -399,10 +413,9 @@ async function confirmUpgrade() {
   try {
     await postJson("/control/upgrade", startBody());
     dialog().close();
-    if (includesSelf) {
-      // This daemon restarts itself; the poll failing is expected.
-      showRestarting();
-    }
+    // This daemon may restart itself; a failing poll then means "restarting".
+    confirmedSelfOrFleet = includesSelf;
+    confirmedAt = Date.now();
     startProgress();
   } catch (error) {
     noteBadToken(error);
@@ -439,10 +452,14 @@ async function pollProgress() {
       "",
       statusClass,
     );
-    if (rollout?.self.state === "restarting") {
-      showRestarting();
-    }
-    if (rollout?.state === "running") {
+    syncRestarting(rollout, false);
+    // A self-only upgrade has no rollout record: keep watching for a while,
+    // since the daemon is about to go down.
+    const awaitingSelf =
+      confirmedSelfOrFleet &&
+      rollout === null &&
+      Date.now() - confirmedAt < SELF_WATCH_MS;
+    if (rollout?.state === "running" || awaitingSelf) {
       progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
     } else {
       progressTimer = undefined;
@@ -450,6 +467,7 @@ async function pollProgress() {
   } catch {
     // The daemon is going down for its own restart, or hiccuped: keep
     // polling until the main refresh loop reloads the page or it answers.
+    syncRestarting(null, true);
     progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
   }
 }

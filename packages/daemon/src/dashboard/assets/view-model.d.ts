@@ -86,3 +86,13 @@ export function delegatedJobRows(
   jobs: DelegatedJobSummary[],
   nowMs: number,
 ): Array<Record<string, string>>;
+export function versionCell(row: {
+  version: string;
+  skew: boolean;
+  upgrade: { eligible: boolean; label: string };
+}): { text: string; className: string | undefined };
+export function restartBannerState(input: {
+  confirmedSelfOrFleet: boolean;
+  rollout: RolloutStatus | null;
+  pollFailed: boolean;
+}): boolean;

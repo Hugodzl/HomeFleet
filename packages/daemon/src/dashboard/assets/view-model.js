@@ -313,3 +313,36 @@ export function reloadDecision({
     now - lastReloadAt >= 10_000
   );
 }
+
+/**
+ * Version column of a peer row: the upgrade badge wins whenever the node is
+ * eligible (whatever its skew); otherwise skew gets the warning suffix.
+ * @param {{version: string, skew: boolean, upgrade: {eligible: boolean, label: string}}} row
+ * @returns {{text: string, className: string | undefined}}
+ */
+export function versionCell(row) {
+  if (row.upgrade.eligible) {
+    return { text: `${row.version} ${row.upgrade.label}`, className: "badge" };
+  }
+  if (row.skew) {
+    return { text: `${row.version} (differs from ours)`, className: "warn" };
+  }
+  return { text: row.version, className: undefined };
+}
+
+/**
+ * Whether the "Restarting…" banner applies: this node's step is restarting,
+ * or a progress poll failed after a confirmed self/fleet start. A refused or
+ * stopped rollout never restarts this node, so it gets no banner.
+ * @param {{confirmedSelfOrFleet: boolean, rollout: any, pollFailed: boolean}} input
+ */
+export function restartBannerState({
+  confirmedSelfOrFleet,
+  rollout,
+  pollFailed,
+}) {
+  if (rollout?.self?.state === "restarting") {
+    return true;
+  }
+  return pollFailed && confirmedSelfOrFleet;
+}

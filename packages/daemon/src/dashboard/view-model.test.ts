@@ -10,10 +10,12 @@ import {
   progressRows,
   relativeTime,
   reloadDecision,
+  restartBannerState,
   selfRows,
   selfUpgrade,
   shortId,
   startOutcome,
+  versionCell,
   workerJobRows,
 } from "./assets/view-model.js";
 
@@ -471,5 +473,80 @@ describe("reloadDecision", () => {
       reloadDecision({ ...base, badToken: true, lastReloadAt: 55_000 }),
     ).toBe(false);
     expect(reloadDecision(base)).toBe(false);
+  });
+});
+
+describe("versionCell", () => {
+  const cell = (version: string, skew: boolean, eligible: boolean) =>
+    versionCell({
+      version,
+      skew,
+      upgrade: {
+        eligible,
+        label: eligible ? "⬆ 0.6.1 available" : "",
+      },
+    });
+  test("eligible row gets the badge even when not skewed", () => {
+    expect(cell("0.5.2", false, true)).toEqual({
+      text: "0.5.2 ⬆ 0.6.1 available",
+      className: "badge",
+    });
+    expect(cell("0.4.0", true, true).className).toBe("badge");
+  });
+  test("skewed, ineligible row keeps the suffix and warn", () => {
+    expect(cell("0.4.0", true, false)).toEqual({
+      text: "0.4.0 (differs from ours)",
+      className: "warn",
+    });
+  });
+  test("neither: plain version", () => {
+    expect(cell("0.5.2", false, false)).toEqual({
+      text: "0.5.2",
+      className: undefined,
+    });
+  });
+});
+
+describe("restartBannerState", () => {
+  const rollout = (state: string, self: string) =>
+    ({ state, self: { state: self }, peers: [] }) as never;
+  test("shows only for a restarting self or a poll failure after a confirmed self/fleet start", () => {
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: true,
+        rollout: rollout("running", "restarting"),
+        pollFailed: false,
+      }),
+    ).toBe(true);
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: true,
+        rollout: null,
+        pollFailed: true,
+      }),
+    ).toBe(true);
+  });
+  test("no banner when self was refused, the rollout stopped, or nothing failed", () => {
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: true,
+        rollout: rollout("done", "refused"),
+        pollFailed: false,
+      }),
+    ).toBe(false);
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: true,
+        rollout: rollout("stopped", "pending"),
+        pollFailed: false,
+      }),
+    ).toBe(false);
+    expect(
+      restartBannerState({
+        confirmedSelfOrFleet: false,
+        rollout: null,
+        pollFailed: true,
+      }),
+    ).toBe(false);
   });
 });
