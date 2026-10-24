@@ -56,7 +56,10 @@ async function harness(
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, manifestFileName("0.5.2")), "MANIFEST");
   await writeFile(path.join(dir, signatureFileName("0.5.2")), "SIG\n");
-  const prepared = { version: "0.5.2" } as PreparedRelease;
+  const prepared = {
+    version: "0.5.2",
+    manifest: { size: 4096 },
+  } as PreparedRelease;
   const calls = {
     start: [] as RolloutStartInput[],
     prepare: [] as string[],
@@ -295,4 +298,55 @@ test("the final rollout survives this node's restart: written at handoff, served
   await expect(surface.upgrade({ targets: "fleet" })).resolves.toBeDefined();
   expect(calls.prepare).toEqual(["0.5.2"]);
   await after.abort(); // let the new loop's save land before the temp dir goes
+});
+
+test("prepare({}) resolves latest, prepares once, and reports the verified release", async () => {
+  const { surface, calls } = await harness();
+  await expect(surface.prepare({})).resolves.toEqual({
+    current: "0.5.0",
+    target: "0.5.2",
+    verified: true,
+    size: 4096,
+  });
+  expect(calls.prepare).toEqual(["0.5.2"]);
+  expect(calls.start).toEqual([]);
+});
+
+test("prepare({version}) prepares exactly that version", async () => {
+  const { surface, calls } = await harness();
+  await surface.prepare({ version: "0.5.2" });
+  expect(calls.prepare).toEqual(["0.5.2"]);
+});
+
+test("prepare() rejects with the verify-failed code from the prepare step", async () => {
+  const { surface } = await harness({
+    prepare: async () => {
+      throw new UpgradeError("verify-failed", "bad signature");
+    },
+  });
+  await expect(surface.prepare({})).rejects.toMatchObject({
+    code: "verify-failed",
+  });
+});
+
+test("a fleet upgrade after prepare() reuses the verified cache (one download)", async () => {
+  let downloads = 0;
+  const cached = new Set<string>();
+  const prepared = {
+    version: "0.5.2",
+    manifest: { size: 4096 },
+  } as PreparedRelease;
+  const { surface, calls } = await harness({
+    prepare: async () => {
+      if (!cached.has("0.5.2")) {
+        downloads += 1;
+        cached.add("0.5.2");
+      }
+      return prepared;
+    },
+  });
+  await surface.prepare({});
+  await surface.upgrade({ targets: "fleet" });
+  expect(downloads).toBe(1);
+  expect(calls.start).toHaveLength(1);
 });

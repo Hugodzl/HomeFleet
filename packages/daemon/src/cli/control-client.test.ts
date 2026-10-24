@@ -77,6 +77,12 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       available: true,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    prepareUpgrade: async () => ({
+      current: "0.5.0",
+      target: "0.5.1",
+      verified: true,
+      size: 1234,
+    }),
     upgrades: () => undefined,
     ...overrides,
   };
@@ -444,4 +450,29 @@ test("the token header is sent on upgrade POSTs only, never on GETs", async () =
     ["GET /control/status", undefined],
     ["POST /control/upgrade", T],
   ]);
+});
+
+test("prepareUpgrade() round-trips over real HTTP with the token", async () => {
+  let received: unknown;
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async (input) => {
+        received = input;
+        return { current: "0.5.0", target: "0.5.2", verified: true, size: 77 };
+      },
+    }),
+  });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
+  await expect(client.prepareUpgrade({ version: "0.5.2" })).resolves.toEqual({
+    current: "0.5.0",
+    target: "0.5.2",
+    verified: true,
+    size: 77,
+  });
+  expect(received).toEqual({ version: "0.5.2" });
+  await expect(client.prepareUpgrade()).resolves.toMatchObject({ size: 77 });
 });

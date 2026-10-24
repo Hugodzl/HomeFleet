@@ -96,6 +96,12 @@ function fakeControlClient(
       available: false,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    prepareUpgrade: async () => ({
+      current: "0.5.0",
+      target: "0.5.1",
+      verified: true,
+      size: 1234,
+    }),
     upgrades: async () => null,
     ...overrides,
   };

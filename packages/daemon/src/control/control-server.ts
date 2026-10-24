@@ -123,11 +123,14 @@ import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
 import { UpgradeError } from "../upgrade/errors.js";
 import type { UpgradeResult } from "../upgrade/files.js";
+import type { PreparedUpgrade } from "../upgrade/fleet-upgrade.js";
 import type { RolloutStatus } from "../upgrade/rollout.js";
 import { CONTROL_TOKEN_HEADER, tokensMatch } from "./control-token.js";
 import {
   type PairConnectRequest,
   PairConnectRequestSchema,
+  type PrepareUpgradeRequest,
+  PrepareUpgradeRequestSchema,
   UnpairRequestSchema,
   type UpgradeRequest,
   UpgradeRequestSchema,
@@ -259,6 +262,11 @@ export interface ControlSurface {
    * Refusals throw {@link UpgradeError}.
    */
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
+  /**
+   * Downloads and verifies the target release into the cache without
+   * starting anything. Refusals throw {@link UpgradeError}.
+   */
+  prepareUpgrade(input: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   /** The latest fleet rollout this daemon ran or is running, if any. */
   upgrades(): RolloutStatus | undefined;
   /**
@@ -509,6 +517,11 @@ function respondUpgradeError(res: ServerResponse, error: UpgradeError): void {
 export async function startControlServer(
   options: ControlServerOptions,
 ): Promise<RunningControlServer> {
+  // Fail at startup: a malformed token would otherwise make the dashboard's
+  // injection throw on every GET / (an unhandled rejection that ends the daemon).
+  if (options.token !== undefined && !/^[0-9a-f]{64}$/.test(options.token)) {
+    throw new Error("control token must be 64 lowercase hex characters");
+  }
   const host = options.host ?? "127.0.0.1";
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new Error(
@@ -640,6 +653,34 @@ export async function startControlServer(
     }
   }
 
+  async function handlePrepareUpgrade(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) {
+      return;
+    }
+    const parsed = PrepareUpgradeRequestSchema.safeParse(body.value);
+    if (!parsed.success) {
+      respondError(
+        res,
+        400,
+        `invalid prepare request: ${describeIssues(parsed.error.issues)}`,
+      );
+      return;
+    }
+    try {
+      respondJson(res, 200, await surface.prepareUpgrade(parsed.data));
+    } catch (error) {
+      if (error instanceof UpgradeError) {
+        respondUpgradeError(res, error);
+        return;
+      }
+      throw error;
+    }
+  }
+
   async function handleUnpair(
     req: IncomingMessage,
     res: ServerResponse,
@@ -737,7 +778,8 @@ export async function startControlServer(
     // route added under /control/upgrade is protected by construction.
     if (
       method === "POST" &&
-      pathname.startsWith("/control/upgrade") &&
+      (pathname === "/control/upgrade" ||
+        pathname.startsWith("/control/upgrade/")) &&
       !requireControlToken(req, res)
     ) {
       return;
@@ -778,6 +820,10 @@ export async function startControlServer(
       }
       if (method === "POST" && pathname === "/control/upgrade") {
         await handleUpgrade(req, res);
+        return;
+      }
+      if (method === "POST" && pathname === "/control/upgrade/prepare") {
+        await handlePrepareUpgrade(req, res);
         return;
       }
       respondError(res, 404, "not found");

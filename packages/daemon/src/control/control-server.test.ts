@@ -78,6 +78,12 @@ function fakeSurface(overrides: Partial<ControlSurface> = {}): ControlSurface {
       available: true,
     }),
     upgrade: async () => ({ from: "0.5.0", to: "0.5.1" }),
+    prepareUpgrade: async () => ({
+      current: "0.5.0",
+      target: "0.5.1",
+      verified: true,
+      size: 1234,
+    }),
     upgrades: () => undefined,
     ...overrides,
   };
@@ -131,7 +137,9 @@ function send(
     [CONTROL_HEADER]: "1",
     // Upgrade POSTs carry the per-boot token by default (as the real client
     // does); a test passes `{ [CONTROL_TOKEN_HEADER]: undefined }` to drop it.
-    ...(options.method === "POST" && options.path.startsWith("/control/upgrade")
+    ...(options.method === "POST" &&
+    (options.path === "/control/upgrade" ||
+      options.path.startsWith("/control/upgrade/"))
       ? { [CONTROL_TOKEN_HEADER]: T }
       : {}),
     ...(body !== undefined
@@ -1164,4 +1172,102 @@ test("GET /control/status and /control/upgrades work without a token", async () 
   });
   expect(a.status).toBe(200);
   expect(b.status).toBe(200);
+});
+
+test("a malformed token is refused at startup, not on every GET /", async () => {
+  await expect(
+    startControlServer({
+      surface: fakeSurface(),
+      host: "127.0.0.1",
+      port: 0,
+      token: "nope",
+    }),
+  ).rejects.toThrow(/64 lowercase hex/);
+});
+
+test("POST /control/upgrades (a sibling path) is a plain 404, not a token 403", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrades",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(404);
+});
+
+test("POST /control/upgrade/prepare returns 200 with the prepared release", async () => {
+  let received: unknown;
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async (input) => {
+        received = input;
+        return { current: "0.5.0", target: "0.5.2", verified: true, size: 99 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: JSON.stringify({ version: "0.5.2" }),
+  });
+  expect(response.status).toBe(200);
+  expect(response.json).toEqual({
+    current: "0.5.0",
+    target: "0.5.2",
+    verified: true,
+    size: 99,
+  });
+  expect(received).toEqual({ version: "0.5.2" });
+});
+
+test("POST /control/upgrade/prepare without the token is 403 and never reaches the surface", async () => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async () => {
+        called = true;
+        return { current: "0.5.0", target: "0.5.1", verified: true, size: 1 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+  expect(called).toBe(false);
+});
+
+test.each([
+  ["verify-failed", 422],
+  ["fetch-failed", 502],
+] as const)("POST /control/upgrade/prepare maps %s to %i", async (code, status) => {
+  const server = await start({
+    surface: fakeSurface({
+      prepareUpgrade: async () => {
+        throw new UpgradeError(code, "nope");
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: "{}",
+  });
+  expect(response.status).toBe(status);
+  expect(response.json).toMatchObject({ code });
+});
+
+test("POST /control/upgrade/prepare rejects a bad body with 400", async () => {
+  const server = await start();
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/upgrade/prepare",
+    body: JSON.stringify({ version: "latest" }),
+  });
+  expect(response.status).toBe(400);
 });

@@ -66,3 +66,17 @@ export const UpgradeRequestSchema = z
     path: ["includeSelf"],
   });
 export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;
+
+/**
+ * Body of `POST /control/upgrade/prepare`: download and verify a release
+ * (default: the latest) without starting anything, so the dashboard's confirm
+ * dialog can show "signature verified" first. Same version syntax as
+ * {@link UpgradeRequestSchema}.
+ */
+export const PrepareUpgradeRequestSchema = z.strictObject({
+  version: z
+    .string()
+    .regex(/^\d+\.\d+\.\d+$/, "must be X.Y.Z")
+    .optional(),
+});
+export type PrepareUpgradeRequest = z.infer<typeof PrepareUpgradeRequestSchema>;

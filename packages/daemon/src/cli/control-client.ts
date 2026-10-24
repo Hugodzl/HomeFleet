@@ -25,9 +25,13 @@ import {
   type UnpairSummary,
 } from "../control/control-server.js";
 import { CONTROL_TOKEN_HEADER } from "../control/control-token.js";
-import type { UpgradeRequest } from "../control/messages.js";
+import type {
+  PrepareUpgradeRequest,
+  UpgradeRequest,
+} from "../control/messages.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import type { UpgradeCheck, UpgradeStarted } from "../upgrade/coordinator.js";
+import type { PreparedUpgrade } from "../upgrade/fleet-upgrade.js";
 import type { RolloutStatus } from "../upgrade/rollout.js";
 
 /**
@@ -122,6 +126,7 @@ export interface ControlClientLike {
   unpair(deviceId: string): Promise<UnpairSummary>;
   checkUpgrade(): Promise<UpgradeCheck>;
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
+  prepareUpgrade(input?: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   upgrades(): Promise<RolloutStatus | null>;
 }
 
@@ -245,6 +250,17 @@ function validateUpgradeCheck(json: unknown): UpgradeCheck {
   return json as unknown as UpgradeCheck;
 }
 
+function validatePreparedUpgrade(json: unknown): PreparedUpgrade {
+  assertIsObject(json, "upgrade/prepare");
+  assertString(json.current, "current", "upgrade/prepare");
+  assertString(json.target, "target", "upgrade/prepare");
+  assertBoolean(json.verified, "verified", "upgrade/prepare");
+  if (typeof json.size !== "number") {
+    throw new Error('upgrade/prepare: "size" must be a number');
+  }
+  return json as unknown as PreparedUpgrade;
+}
+
 /** A rollout status carries `peers`; the self-upgrade `{from, to}` does not. */
 function validateRolloutStatus(json: unknown, what: string): RolloutStatus {
   assertIsObject(json, what);
@@ -310,7 +326,10 @@ function tokenHeader(
   method: string,
   path: string,
 ): Record<string, string> {
-  if (method !== "POST" || !path.startsWith("/control/upgrade")) {
+  if (
+    method !== "POST" ||
+    !(path === "/control/upgrade" || path.startsWith("/control/upgrade/"))
+  ) {
     return {};
   }
   const token =
@@ -458,6 +477,18 @@ export class ControlClient implements ControlClientLike {
       input,
     );
     return validateUpgradeStarted(json);
+  }
+
+  async prepareUpgrade(
+    input: PrepareUpgradeRequest = {},
+  ): Promise<PreparedUpgrade> {
+    const json = await controlRequest(
+      this.options,
+      "POST",
+      "/control/upgrade/prepare",
+      input,
+    );
+    return validatePreparedUpgrade(json);
   }
 
   async upgrades(): Promise<RolloutStatus | null> {

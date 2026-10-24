@@ -792,6 +792,7 @@ export class Daemon {
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
       checkUpgrade: () => upgrades.check(),
       upgrade: (input) => fleetUpgrades.upgrade(input),
+      prepareUpgrade: (input) => fleetUpgrades.prepare(input),
       upgrades: () => fleetUpgrades.upgrades(),
     };
     // Fresh per boot: embedded in the dashboard, required on upgrade POSTs.
