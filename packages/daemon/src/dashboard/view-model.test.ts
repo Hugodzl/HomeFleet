@@ -82,6 +82,47 @@ test("modelRows shows label and catalog status, dashing missing fields", () => {
   ]);
 });
 
+test("nodeRows shows each peer model's catalog status and warns when one is not ok", () => {
+  const peer = (models: Array<{ id: string; status?: string }>) =>
+    nodeRows(
+      [
+        {
+          deviceId: "b".repeat(64),
+          name: "tower",
+          reachable: true,
+          nodeInfo: {
+            deviceId: "b".repeat(64),
+            name: "tower",
+            daemonVersion: "0.6.1",
+            protocolVersion: "0.4.0",
+            platform: "win32",
+            roles: ["inference"],
+            executors: ["agent"],
+            models,
+            hardware: { cpu: "Ryzen", ramBytes: 1, gpus: [] },
+            maxConcurrentJobs: 2,
+            activeJobs: 0,
+          },
+        } as NodeDirectoryEntry,
+      ],
+      "0.6.1",
+    )[0];
+  expect(
+    peer([{ id: "qwen3.6-35b-a3b", status: "unreachable" }]),
+  ).toMatchObject({
+    models: "qwen3.6-35b-a3b (unreachable)",
+    modelsWarn: true,
+  });
+  expect(
+    peer([
+      { id: "a", status: "ok" },
+      { id: "b", status: "ok" },
+    ]),
+  ).toMatchObject({ models: "a (ok), b (ok)", modelsWarn: false });
+  // Older peers advertise no status: show the id alone, no warning.
+  expect(peer([{ id: "a" }])).toMatchObject({ models: "a", modelsWarn: false });
+});
+
 test("nodeRows flags version skew and handles unreachable peers", () => {
   const nodes: NodeDirectoryEntry[] = [
     {
@@ -116,6 +157,7 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       skew: true,
       executors: "command, agent, write",
       models: "qwen3.6-35b-a3b",
+      modelsWarn: false,
       load: "0 / 2",
       fullId: "b".repeat(64),
       allowRemote: false,
@@ -131,6 +173,7 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       skew: false,
       executors: "—",
       models: "—",
+      modelsWarn: false,
       load: "—",
       fullId: "c".repeat(64),
       allowRemote: false,

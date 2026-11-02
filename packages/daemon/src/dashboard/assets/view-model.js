@@ -173,7 +173,20 @@ export function nodeRows(nodes, ourVersion, target) {
       version: info?.daemonVersion ?? DASH,
       skew: info !== undefined && info.daemonVersion !== ourVersion,
       executors: info !== undefined ? list(info.executors) : DASH,
-      models: info !== undefined ? list(info.models.map((m) => m.id)) : DASH,
+      // Same `id (status)` form as `homefleet nodes`: a reachable daemon can
+      // still have a model server that is down.
+      models:
+        info !== undefined
+          ? list(
+              info.models.map((/** @type {any} */ m) =>
+                m.status !== undefined ? `${m.id} (${m.status})` : m.id,
+              ),
+            )
+          : DASH,
+      modelsWarn:
+        info?.models.some(
+          (/** @type {any} */ m) => m.status !== undefined && m.status !== "ok",
+        ) === true,
       load:
         info !== undefined
           ? `${info.activeJobs} / ${info.maxConcurrentJobs}`
