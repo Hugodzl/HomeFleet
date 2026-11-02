@@ -216,6 +216,9 @@ function render(status, nodes, jobs, now) {
       if (key === "version") {
         return versionCell(row).className;
       }
+      if (key === "models" && row.modelsWarn) {
+        return "warn";
+      }
       return undefined;
     },
     (row) => {

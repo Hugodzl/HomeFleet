@@ -30,6 +30,8 @@ export interface NodeRow {
   skew: boolean;
   executors: string;
   models: string;
+  /** A peer model reports a catalog status other than "ok". */
+  modelsWarn: boolean;
   load: string;
   fullId: string;
   allowRemote: boolean;
