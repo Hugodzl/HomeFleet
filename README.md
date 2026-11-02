@@ -39,7 +39,9 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > and both machines self-upgraded 0.5.0 → 0.5.1 and rolled back a
 > deliberately broken build ([self-upgrade devlog](devlog/2026-10-22-first-self-upgrade.md)),
 > and the laptop pushed v0.5.3 to the tower with `homefleet fleet upgrade` in
-> 14 s ([fleet-push devlog](devlog/2026-10-23-first-fleet-push.md)).
+> 14 s ([fleet-push devlog](devlog/2026-10-23-first-fleet-push.md)), and its
+> dashboard pushed v0.6.1 to both nodes with **Upgrade all**, reloading itself
+> onto the new version ([dashboard-upgrade devlog](devlog/2026-11-02-dashboard-upgrade.md)).
 > Windows-first; not on the npm registry yet. The
 > [Quickstart](#quickstart) runs today on a single machine; pairing two real
 > machines is the [two-machine demo](#two-machine-demo).
