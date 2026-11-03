@@ -8,9 +8,11 @@
  * view-model.js; this file only wires them to the DOM.
  */
 import {
+  COLUMNS,
   confirmSummary,
   currentRollout,
   delegatedJobRows,
+  helpText,
   modelRows,
   nodeRows,
   progressRows,
@@ -123,26 +125,31 @@ function el(tag, text, className) {
 function renderKv(container, pairs) {
   const dl = el("dl", undefined, "kv");
   for (const [label, value] of pairs) {
-    dl.append(el("dt", label), el("dd", value));
+    const dt = el("dt", label);
+    dt.title = helpText(`self.${label}`);
+    dl.append(dt, el("dd", value));
   }
   container.replaceChildren(dl);
 }
 
 /**
- * @param columns Array<[key, header]>
+ * @param scope a COLUMNS key; headers and their tooltips come from there
  * @param rows objects whose values are strings
  * @param cellClass optional (key, row) => className | undefined
  * @param actions optional row => element | null, rendered in a last column
  */
-function renderTable(container, columns, rows, emptyText, cellClass, actions) {
+function renderTable(container, scope, rows, emptyText, cellClass, actions) {
   if (rows.length === 0) {
     container.replaceChildren(el("p", emptyText, "muted"));
     return;
   }
+  const columns = COLUMNS[scope];
   const table = el("table");
   const headRow = el("tr");
-  for (const [, header] of columns) {
-    headRow.append(el("th", header));
+  for (const [key, header] of columns) {
+    const th = el("th", header);
+    th.title = helpText(`${scope}.${key}`);
+    headRow.append(th);
   }
   if (actions !== undefined) {
     headRow.append(el("th", ""));
@@ -176,11 +183,7 @@ function render(status, nodes, jobs, now) {
   renderKv(document.getElementById("self"), selfRows(status));
   renderTable(
     document.getElementById("models"),
-    [
-      ["id", "Model"],
-      ["label", "Label"],
-      ["status", "Catalog status"],
-    ],
+    "models",
     modelRows(status.models),
     "No models advertised.",
     statusClass,
@@ -197,16 +200,7 @@ function render(status, nodes, jobs, now) {
   renderUpgradeControls();
   renderTable(
     document.getElementById("nodes"),
-    [
-      ["name", "Name"],
-      ["deviceId", "Device"],
-      ["endpoint", "Endpoint"],
-      ["reachable", "Reachable"],
-      ["version", "Version"],
-      ["executors", "Executors"],
-      ["models", "Models"],
-      ["load", "Load"],
-    ],
+    "nodes",
     peers,
     "No paired nodes yet. Pair one with `homefleet pair begin` / `pair connect`.",
     (key, row) => {
@@ -233,33 +227,14 @@ function render(status, nodes, jobs, now) {
   );
   renderTable(
     document.getElementById("worker-jobs"),
-    [
-      ["jobId", "Job"],
-      ["type", "Type"],
-      ["owner", "From"],
-      ["repoId", "Repo"],
-      ["status", "Status"],
-      ["created", "Created"],
-      ["started", "Started"],
-      ["finished", "Finished"],
-      ["error", "Error"],
-    ],
+    "workerJobs",
     workerJobRows(jobs.worker, now),
     "No worker jobs since the daemon started.",
     statusClass,
   );
   renderTable(
     document.getElementById("delegated-jobs"),
-    [
-      ["jobId", "Job"],
-      ["type", "Type"],
-      ["target", "To"],
-      ["repoId", "Repo"],
-      ["sent", "Sent"],
-      ["status", "Last seen status"],
-      ["seen", "Seen"],
-      ["branch", "Applied branch"],
-    ],
+    "delegatedJobs",
     delegatedJobRows(jobs.delegated, now),
     "No delegated jobs since the daemon started.",
     statusClass,
@@ -457,11 +432,7 @@ async function pollProgress() {
     }
     renderTable(
       document.getElementById("upgrade-progress-body"),
-      [
-        ["name", "Node"],
-        ["state", "State"],
-        ["reason", "Detail"],
-      ],
+      "progress",
       rows,
       "",
       statusClass,
@@ -531,5 +502,8 @@ forceBox().addEventListener("change", () => {
     renderDialog();
   }
 });
+for (const node of document.querySelectorAll("[data-help]")) {
+  node.title = helpText(node.dataset.help ?? "");
+}
 // A rollout may already be running (started elsewhere or before a reload).
 pollProgress();

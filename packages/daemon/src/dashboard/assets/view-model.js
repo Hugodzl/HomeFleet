@@ -409,3 +409,167 @@ export function shouldKeepWatching({
   }
   return confirmedSelfOrFleet && now - confirmedAt < SELF_WATCH_MS;
 }
+
+/**
+ * Table columns as [row key, header], per table. app.js renders headers from
+ * here and takes each header's tooltip from HELP under the same scope + key.
+ * @type {Record<string, Array<[string, string]>>}
+ */
+export const COLUMNS = {
+  models: [
+    ["id", "Model"],
+    ["label", "Label"],
+    ["status", "Catalog status"],
+  ],
+  nodes: [
+    ["name", "Name"],
+    ["deviceId", "Device"],
+    ["endpoint", "Endpoint"],
+    ["reachable", "Reachable"],
+    ["version", "Version"],
+    ["executors", "Executors"],
+    ["models", "Models"],
+    ["load", "Load"],
+  ],
+  workerJobs: [
+    ["jobId", "Job"],
+    ["type", "Type"],
+    ["owner", "From"],
+    ["repoId", "Repo"],
+    ["status", "Status"],
+    ["created", "Created"],
+    ["started", "Started"],
+    ["finished", "Finished"],
+    ["error", "Error"],
+  ],
+  delegatedJobs: [
+    ["jobId", "Job"],
+    ["type", "Type"],
+    ["target", "To"],
+    ["repoId", "Repo"],
+    ["sent", "Sent"],
+    ["status", "Last seen status"],
+    ["seen", "Seen"],
+    ["branch", "Applied branch"],
+  ],
+  progress: [
+    ["name", "Node"],
+    ["state", "State"],
+    ["reason", "Detail"],
+  ],
+};
+
+const JOB_TYPES =
+  "recon = read-only look at a repo; command = runs a command; write = makes code changes on a branch.";
+
+/**
+ * Every tooltip on the page, in one place for review. Table scopes match
+ * COLUMNS; `self` is keyed by selfRows label; `page` and `dialog` are named by
+ * data-help="scope.key" attributes in index.html.
+ * @type {Record<string, Record<string, string>>}
+ */
+export const HELP = {
+  page: {
+    updated:
+      "Time of the last successful refresh. The page refreshes every 3 s while this tab is visible.",
+    refresh: "Fetch status, nodes and jobs now.",
+    upgradeAll:
+      "Upgrade every eligible paired node to the newest signed release, then this node last. You confirm in a dialog first.",
+    upgradeSelf:
+      "Upgrade only this node to the newest signed release. The daemon restarts and this page reloads when it is back.",
+    progress:
+      "The upgrade rollout this node ran. 'Last rollout' means it has finished; that record may be days old.",
+    self: "The daemon serving this dashboard.",
+    models:
+      "Models in this node's catalog, advertised to peers so they can delegate jobs that name one.",
+    nodes:
+      "Devices paired with this node. On each refresh this node says hello to every one it has an address for; live details need a successful hello.",
+    workerJobs: "Jobs this node ran for peers.",
+    delegatedJobs: "Jobs this node sent to peers.",
+  },
+  self: {
+    Name: "Name this node advertises to peers (node.name in config, or the hostname).",
+    "Device ID":
+      "This node's identity: the SHA-256 fingerprint of its certificate. Peers pin it when they pair.",
+    Platform: "Operating system the daemon runs on.",
+    Version:
+      "daemon = installed HomeFleet release; protocol = version of the peer-to-peer protocol (HFP) it speaks.",
+    Ports:
+      "HFP = peer-to-peer port, open to the LAN; MCP = tools endpoint for local agents; control = this dashboard and the CLI. MCP and control are localhost only.",
+    Roles:
+      "Work this node accepts from peers, derived from its executors: inference (agent jobs: recon, write) and execution (command jobs).",
+    Executors:
+      "Job runners enabled in config (executors.*). All are off by default.",
+    Load: "Jobs running now / maxConcurrentJobs. At the limit, new jobs are refused as BUSY.",
+  },
+  models: {
+    id: "Model ID as the model server knows it; delegated jobs name this ID.",
+    label: "Optional friendly name from the catalog.",
+    status:
+      "Checked once at daemon startup: ok = the model server lists it; not_served = the server answered but does not list it (typo or drift); unreachable = no endpoint, or the probe failed. Restart the daemon to re-check.",
+  },
+  nodes: {
+    name: "Name the peer advertised when it paired.",
+    deviceId:
+      "Start of the peer's device ID (its pinned certificate fingerprint).",
+    endpoint:
+      "Last-known host:port, from LAN discovery or the known-nodes file. A dash means no address is known.",
+    reachable:
+      "yes = a hello to the peer just succeeded. no = no known address, or the hello failed or timed out (asleep, offline, wrong identity). The columns to the right need yes.",
+    version:
+      "Peer's daemon version. '(differs from ours)' = not the version this node runs. '⬆ X available' = this node can push that signed release to it (the peer has upgrade.allowRemote on and is older).",
+    executors: "Job runners the peer has enabled.",
+    models:
+      "Peer's catalog, each with its startup check: ok, not_served or unreachable (see This node's Catalog status). Amber when any is not ok; no status = older peer.",
+    load: "Peer's running jobs / its maxConcurrentJobs.",
+  },
+  workerJobs: {
+    jobId: "Start of the job ID.",
+    type: JOB_TYPES,
+    owner: "Peer that sent the job.",
+    repoId: "Repository the job works on.",
+    status: "queued, running, succeeded, failed or canceled.",
+    created: "When the job arrived.",
+    started: "When it began running.",
+    finished: "When it ended.",
+    error: "Error code, when the job failed.",
+  },
+  delegatedJobs: {
+    jobId: "Start of the job ID.",
+    type: JOB_TYPES,
+    target: "Peer the job was sent to.",
+    repoId: "Repository the job works on.",
+    sent: "When this node sent it.",
+    status:
+      "Last status an MCP tool (job_status / job_result) saw; not live. queued until one checks.",
+    seen: "When that status was seen.",
+    branch: "Local branch the job's changes were applied to, once applied.",
+  },
+  progress: {
+    name: "Node in the rollout. Peers go one at a time; this node goes last.",
+    state:
+      "pending, pushing, restarting, succeeded; refused = the node said no (busy, or remote upgrades off); too-old = no remote-upgrade support; rolled-back = the new version did not come up, old one restored; timeout = not back within 3 min; skipped = this node was not included.",
+    reason: "Why a step was refused or failed.",
+  },
+  dialog: {
+    title:
+      "The release is downloaded and its signature verified before anything starts. Nothing changes until you press Confirm.",
+    lines:
+      "will upgrade = takes the push; not eligible = cannot take it (reason in brackets); busy = running jobs, and a remote push never forces, so it will be refused.",
+    force:
+      "Upgrade this node even while it runs jobs. Only this node can be forced; the restart interrupts its running jobs.",
+  },
+};
+
+/**
+ * Tooltip text for "scope.key", or "" when there is none.
+ * @param {string} key
+ */
+export function helpText(key) {
+  const dot = key.indexOf(".");
+  if (dot < 0) {
+    return "";
+  }
+  const text = HELP[key.slice(0, dot)]?.[key.slice(dot + 1)];
+  return typeof text === "string" ? text : "";
+}

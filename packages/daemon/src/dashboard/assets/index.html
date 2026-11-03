@@ -10,42 +10,42 @@
   <body>
     <header>
       <h1>HomeFleet</h1>
-      <span id="updated" class="muted">Loading…</span>
-      <button id="upgrade-all" type="button" hidden>Upgrade all</button>
-      <button id="refresh" type="button">Refresh</button>
+      <span id="updated" class="muted" data-help="page.updated">Loading…</span>
+      <button id="upgrade-all" type="button" data-help="page.upgradeAll" hidden>Upgrade all</button>
+      <button id="refresh" type="button" data-help="page.refresh">Refresh</button>
     </header>
     <div id="banner" class="banner" hidden></div>
     <main>
       <section id="upgrade-progress" hidden>
-        <h2 id="upgrade-progress-title">Upgrade progress</h2>
+        <h2 id="upgrade-progress-title" data-help="page.progress">Upgrade progress</h2>
         <div id="upgrade-progress-body"></div>
       </section>
       <section>
-        <h2>This node</h2>
+        <h2 data-help="page.self">This node</h2>
         <div id="self"></div>
-        <p><button id="upgrade-self" type="button" hidden>Upgrade this node</button></p>
-        <h3>Models</h3>
+        <p><button id="upgrade-self" type="button" data-help="page.upgradeSelf" hidden>Upgrade this node</button></p>
+        <h3 data-help="page.models">Models</h3>
         <div id="models"></div>
       </section>
       <section>
-        <h2>Paired nodes</h2>
+        <h2 data-help="page.nodes">Paired nodes</h2>
         <div id="nodes"></div>
       </section>
       <section>
-        <h2>Worker jobs</h2>
+        <h2 data-help="page.workerJobs">Worker jobs</h2>
         <p class="muted">Jobs this node ran for peers. Kept in memory only; the list resets when the daemon restarts.</p>
         <div id="worker-jobs"></div>
       </section>
       <section>
-        <h2>Delegated jobs</h2>
+        <h2 data-help="page.delegatedJobs">Delegated jobs</h2>
         <p class="muted">Jobs this node sent out. Status is the last one the MCP tools saw; the dashboard never asks the worker itself. Only delegations made through the daemon's HTTP MCP endpoint are listed; jobs delegated via the homefleet-mcp-stdio shim use their own registry and do not appear here.</p>
         <div id="delegated-jobs"></div>
       </section>
     </main>
     <dialog id="upgrade-dialog">
-      <h2 id="upgrade-title">Upgrade</h2>
-      <div id="upgrade-lines"></div>
-      <label id="upgrade-force-row" hidden>
+      <h2 id="upgrade-title" data-help="dialog.title">Upgrade</h2>
+      <div id="upgrade-lines" data-help="dialog.lines"></div>
+      <label id="upgrade-force-row" data-help="dialog.force" hidden>
         <input id="upgrade-force" type="checkbox" />
         Force this node even if busy
       </label>

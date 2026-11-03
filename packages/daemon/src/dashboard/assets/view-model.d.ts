@@ -109,3 +109,6 @@ export function shouldKeepWatching(input: {
   now: number;
   rollout: RolloutStatus | null;
 }): boolean;
+export const COLUMNS: Record<string, Array<[string, string]>>;
+export const HELP: Record<string, Record<string, string>>;
+export function helpText(key: string): string;
