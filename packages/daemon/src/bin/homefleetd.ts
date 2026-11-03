@@ -9,21 +9,43 @@
  * `--version` prints its version line to stdout and exits without starting
  * the daemon.
  */
+import path from "node:path";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
 import { Daemon } from "../daemon.js";
 import { DAEMON_VERSION } from "../version.js";
+import {
+  DAEMON_LOG_FILE,
+  type DaemonLog,
+  installExitLogging,
+  openDaemonLog,
+} from "./daemon-log.js";
 import { isInvokedDirectly } from "./invoked-directly.js";
 import { asciiPunctuation } from "./log-line.js";
 
 /**
+ * The timestamped `<dataDir>/homefleetd.log` (see daemon-log.ts), opened as
+ * soon as the data dir is resolved; undefined before that and for
+ * `--version`.
+ */
+let daemonLog: DaemonLog | undefined;
+
+/**
  * Writes one line to stderr, passed through {@link asciiPunctuation} first —
- * see log-line.ts for why. This is the ONE place homefleetd writes to stderr
- * so every operator-facing line (the started line, onError, onDiagnostic, the
- * shutdown messages, the startup-failure handler) gets the same treatment.
+ * see log-line.ts for why — and appends it to {@link daemonLog}. This is the
+ * ONE place homefleetd writes to stderr so every operator-facing line (the
+ * started line, onError, onDiagnostic, the shutdown messages, the
+ * startup-failure handler) gets the same treatment.
  */
 function writeStderrLine(line: string): void {
-  process.stderr.write(`${asciiPunctuation(line)}\n`);
+  const clean = asciiPunctuation(line);
+  process.stderr.write(`${clean}\n`);
+  daemonLog?.line(clean);
+}
+
+/** The first line every daemon writes, so a log shows each (re)start. */
+export function startingLine(pid: number): string {
+  return `homefleetd ${DAEMON_VERSION} starting, pid ${pid}`;
 }
 
 /**
@@ -43,6 +65,10 @@ export function versionOutput(argv: string[]): string | undefined {
 
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
+  daemonLog = openDaemonLog({ path: path.join(dataDir, DAEMON_LOG_FILE) });
+  // File-only: Node prints a crash's stack to stderr itself.
+  installExitLogging(process, daemonLog);
+  writeStderrLine(startingLine(process.pid));
   const config = await loadDaemonConfig(dataDir);
   // Graceful shutdown: the first request stops once and exits 0; a second
   // one while teardown is still running force-exits 1 (the operator's
