@@ -313,6 +313,20 @@ export function progressTitle(rollout) {
   return rollout.state === "running" ? "Upgrade progress" : "Last rollout";
 }
 
+/**
+ * The line next to "Check for updates": the answer of the uncached
+ * `GET /control/upgrade/check`, or why it failed.
+ * @param {{current: string, latest: string, available: boolean} | Error} result
+ */
+export function checkSummary(result) {
+  if (result instanceof Error) {
+    return `Check failed: ${result.message}`;
+  }
+  return result.available
+    ? `⬆ ${result.latest} available`
+    : `Up to date (latest release: ${result.latest})`;
+}
+
 /** @param {{status?: number, code?: string, message: string}} error */
 export function startOutcome(error) {
   return error.code === "locked"
@@ -473,6 +487,8 @@ export const HELP = {
     updated:
       "Time of the last successful refresh. The page refreshes every 3 s while this tab is visible.",
     refresh: "Fetch status, nodes and jobs now.",
+    checkUpdates:
+      "Ask GitHub for the newest release now. The upgrade badge otherwise rechecks only every 6 hours.",
     upgradeAll:
       "Upgrade every eligible paired node to the newest signed release, then this node last. You confirm in a dialog first.",
     upgradeSelf:

@@ -6,6 +6,7 @@ import type { ControlJobs, ControlStatus } from "../control/control-server.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
   COLUMNS,
+  checkSummary,
   compareVersions,
   confirmSummary,
   currentRollout,
@@ -512,6 +513,23 @@ describe("progressTitle", () => {
     expect(progressTitle({ state: "running" })).toBe("Upgrade progress");
     expect(progressTitle({ state: "done" })).toBe("Last rollout");
     expect(progressTitle({ state: "stopped" })).toBe("Last rollout");
+  });
+});
+
+describe("checkSummary", () => {
+  test("a newer release reads as available; otherwise up to date, naming the latest", () => {
+    expect(
+      checkSummary({ current: "0.6.3", latest: "0.6.4", available: true }),
+    ).toBe("⬆ 0.6.4 available");
+    expect(
+      checkSummary({ current: "0.6.3", latest: "0.6.3", available: false }),
+    ).toBe("Up to date (latest release: 0.6.3)");
+  });
+
+  test("a failed check says so with the reason", () => {
+    expect(checkSummary(new Error("release lookup failed"))).toBe(
+      "Check failed: release lookup failed",
+    );
   });
 });
 

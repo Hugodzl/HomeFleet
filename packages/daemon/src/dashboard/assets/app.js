@@ -9,6 +9,7 @@
  */
 import {
   COLUMNS,
+  checkSummary,
   confirmSummary,
   currentRollout,
   delegatedJobRows,
@@ -84,7 +85,10 @@ async function getJson(path) {
     cache: "no-store",
   });
   if (!response.ok) {
-    throw new Error(`${path}: HTTP ${response.status}`);
+    const payload = await response.json().catch(() => ({}));
+    const reason =
+      typeof payload.error === "string" ? ` (${payload.error})` : "";
+    throw new Error(`${path}: HTTP ${response.status}${reason}`);
   }
   return response.json();
 }
@@ -464,6 +468,29 @@ function startProgress() {
   pollProgress();
 }
 
+/**
+ * "Check for updates": the uncached release lookup. The daemon stores its
+ * answer behind the badge too, so the refresh right after shows it.
+ */
+async function checkForUpdates() {
+  const button = document.getElementById("check-updates");
+  const result = document.getElementById("check-result");
+  button.disabled = true;
+  result.textContent = "Checking…";
+  result.hidden = false;
+  try {
+    result.textContent = checkSummary(await getJson("/control/upgrade/check"));
+  } catch (error) {
+    result.textContent = checkSummary(
+      error instanceof Error ? error : new Error("request failed"),
+    );
+  } finally {
+    button.disabled = false;
+  }
+  await refresh();
+  schedule();
+}
+
 function schedule() {
   clearTimeout(timer);
   if (!document.hidden) {
@@ -485,6 +512,9 @@ document.getElementById("refresh").addEventListener("click", () => {
   refresh().then(schedule);
 });
 refresh().then(schedule);
+document.getElementById("check-updates").addEventListener("click", () => {
+  checkForUpdates();
+});
 document.getElementById("upgrade-all").addEventListener("click", () => {
   openUpgrade("fleet");
 });

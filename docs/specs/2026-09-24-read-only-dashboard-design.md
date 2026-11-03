@@ -245,7 +245,10 @@ the page reloads once afterwards (see the fleet upgrade spec's decisions).
 `availableUpgrade` (the latest release, when newer than this daemon). The page
 marks each node that could take the push; a peer shows no badge when it is
 unreachable, too old for remote upgrade, has `allowRemote` off, or is already
-current.
+current. The lookup behind it is cached (6 h; 15 min after a failure), so
+**Check for updates** (added in v0.6.4) calls the uncached
+`GET /control/upgrade/check`. Its answer also refreshes the badge's cache, so
+the badge appears on the very next poll.
 
 ## Error handling
 
