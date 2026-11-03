@@ -31,6 +31,22 @@ control-token file than the running daemon wrote: check that both resolve the
 same data directory (HOMEFLEET_DATA_DIR, same user account, and not a shell
 whose AppData is virtualized).
 
+The directory also holds the daemon's logs:
+
+- `homefleetd.log` — written by the daemon itself however it was started
+  (a scheduled task, a shell, or the self-updater). Every line it writes to
+  stderr is appended, prefixed with an ISO-8601 UTC timestamp, along with a
+  `starting, pid <pid>` line with the version, an `exiting with code <n>`
+  line, and the stack of any uncaught exception or unhandled rejection.
+  Writes are synchronous, so the last lines before a crash reach the disk.
+  Past 5 MB the file is rotated once to `homefleetd.log.1`, which replaces the
+  previous `.1`. A forced kill (Task Manager, `Stop-Process -Force`,
+  `kill -9`) can't be logged; the last timestamped line dates it.
+- `homefleetd.err.log` — the raw stderr of a daemon relaunched by the
+  self-updater, untimestamped. It also catches output Node prints before the
+  daemon's own code runs (for example a broken install that can't load a
+  module).
+
 Setting `HOMEFLEET_DATA_DIR` is also how you run more than one daemon on the
 same machine (each instance needs its own data directory).
 

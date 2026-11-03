@@ -9,7 +9,7 @@
  */
 import { expect, test } from "vitest";
 import { DAEMON_VERSION } from "../version.js";
-import { versionOutput } from "./homefleetd.js";
+import { startingLine, versionOutput } from "./homefleetd.js";
 
 test("--version yields 'homefleetd <DAEMON_VERSION>'", () => {
   expect(versionOutput(["--version"])).toBe(`homefleetd ${DAEMON_VERSION}`);
@@ -18,4 +18,10 @@ test("--version yields 'homefleetd <DAEMON_VERSION>'", () => {
 test("normal argv (no --version) yields undefined, so the daemon starts as usual", () => {
   expect(versionOutput([])).toBeUndefined();
   expect(versionOutput(["--some-other-flag"])).toBeUndefined();
+});
+
+test("the starting line carries the version and pid", () => {
+  expect(startingLine(4242)).toBe(
+    `homefleetd ${DAEMON_VERSION} starting, pid 4242`,
+  );
 });
