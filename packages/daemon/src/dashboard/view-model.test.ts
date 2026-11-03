@@ -1,11 +1,17 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import type { ControlJobs, ControlStatus } from "../control/control-server.js";
 import type { NodeDirectoryEntry } from "../mcp/node-directory.js";
 import {
+  COLUMNS,
   compareVersions,
   confirmSummary,
   currentRollout,
   delegatedJobRows,
+  HELP,
+  helpText,
   modelRows,
   nodeRows,
   progressRows,
@@ -672,5 +678,69 @@ describe("stale rollout records and the self-only watch", () => {
         rollout: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("tooltips", () => {
+  test("helpText looks up a dotted path; unknown or non-leaf paths are empty", () => {
+    expect(helpText("nodes.reachable")).toBe(HELP.nodes?.reachable);
+    expect(helpText("nodes.reachable")).not.toBe("");
+    expect(helpText("nodes")).toBe("");
+    expect(helpText("nodes.nope")).toBe("");
+    expect(helpText("nope.nope")).toBe("");
+    expect(helpText("")).toBe("");
+  });
+
+  test("every table column has a header and a tooltip", () => {
+    for (const [scope, columns] of Object.entries(COLUMNS)) {
+      expect(columns.length).toBeGreaterThan(0);
+      for (const [key, header] of columns) {
+        expect({ scope, key, header: header.length > 0 }).toEqual({
+          scope,
+          key,
+          header: true,
+        });
+        expect({ scope, key, help: helpText(`${scope}.${key}`) }).not.toEqual({
+          scope,
+          key,
+          help: "",
+        });
+      }
+    }
+  });
+
+  test("every This node label has a tooltip", () => {
+    for (const [label] of selfRows(SELF)) {
+      expect({ label, help: helpText(`self.${label}`) }).not.toEqual({
+        label,
+        help: "",
+      });
+    }
+  });
+
+  test("every data-help key in index.html resolves to a tooltip", async () => {
+    const html = await readFile(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "assets",
+        "index.html",
+      ),
+      "utf8",
+    );
+    const keys = [...html.matchAll(/data-help="([^"]+)"/g)].map(
+      (m) => m[1] as string,
+    );
+    expect(keys.length).toBeGreaterThan(5);
+    for (const key of keys) {
+      expect({ key, help: helpText(key) }).not.toEqual({ key, help: "" });
+    }
+  });
+
+  test("tooltips are single-line plain text", () => {
+    for (const group of Object.values(HELP)) {
+      for (const text of Object.values(group)) {
+        expect(text).not.toMatch(/[\n<>]/);
+      }
+    }
   });
 });

@@ -165,3 +165,12 @@ dialog p {
   gap: 8px;
   margin-top: 16px;
 }
+/* Headers and labels with an explanation (title tooltip from HELP). */
+th[title],
+dt[title],
+h2[data-help],
+h3[data-help] {
+  cursor: help;
+  text-decoration: underline dotted var(--muted);
+  text-underline-offset: 3px;
+}
