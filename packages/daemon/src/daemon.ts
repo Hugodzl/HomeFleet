@@ -803,7 +803,13 @@ export class Daemon {
       },
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
-      checkUpgrade: () => upgrades.check(),
+      checkUpgrade: async () => {
+        const check = await upgrades.check();
+        // An explicit check (CLI or the dashboard's "Check for updates") is
+        // fresher than the 6 h cache behind the dashboard's badge.
+        availableUpgrade.record(check.latest);
+        return check;
+      },
       upgrade: (input) => fleetUpgrades.upgrade(input),
       prepareUpgrade: (input) => fleetUpgrades.prepare(input),
       upgrades: () => fleetUpgrades.upgrades(),

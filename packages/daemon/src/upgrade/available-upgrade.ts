@@ -24,6 +24,13 @@ export interface AvailableUpgrade {
   current(): string | undefined;
   /** Kick a background refresh if the cache is stale; never throws, one in flight at a time. */
   refreshIfStale(): void;
+  /**
+   * Store the answer of a lookup made elsewhere (the uncached
+   * `GET /control/upgrade/check`, i.e. the dashboard's "Check for updates"
+   * button), as if this cache had just looked it up. A non-semver value is
+   * ignored.
+   */
+  record(latest: string): void;
 }
 
 export function createAvailableUpgrade(
@@ -35,15 +42,19 @@ export function createAvailableUpgrade(
   let staleAt = 0;
   let inFlight = false;
 
+  function store(latest: string): void {
+    value =
+      compareSemver(latest, options.currentVersion) > 0 ? latest : undefined;
+    staleAt = now() + AVAILABLE_UPGRADE_TTL_MS;
+  }
+
   async function refresh(): Promise<void> {
     try {
       const latest = await options.latestVersion();
       if (!isSemver(latest)) {
         throw new Error("latest release is not a semver string");
       }
-      value =
-        compareSemver(latest, options.currentVersion) > 0 ? latest : undefined;
-      staleAt = now() + AVAILABLE_UPGRADE_TTL_MS;
+      store(latest);
     } catch {
       value = undefined;
       staleAt = now() + AVAILABLE_UPGRADE_FAILURE_TTL_MS;
@@ -60,6 +71,11 @@ export function createAvailableUpgrade(
       }
       inFlight = true;
       void refresh();
+    },
+    record: (latest) => {
+      if (isSemver(latest)) {
+        store(latest);
+      }
     },
   };
 }

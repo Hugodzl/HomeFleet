@@ -582,3 +582,23 @@ test("availableUpgrade: a plain status never looks it up; dashboard=1 looks up o
   expect(await status("")).not.toHaveProperty("availableUpgrade");
   expect(source.lookups).toBe(1);
 });
+
+test("availableUpgrade: an explicit upgrade check refreshes the cache, so the next dashboard poll shows it at once", async () => {
+  const source = new CountingSource(await releaseOrigin(), RELEASE);
+  const { daemon } = await startUpgradeDaemon("avail-check", source);
+
+  const check = await controlGet(daemon, "/control/upgrade/check", true);
+  expect(check.status).toBe(200);
+  expect(await check.json()).toMatchObject({
+    latest: RELEASE,
+    available: true,
+  });
+  expect(source.lookups).toBe(1);
+
+  // Served from the cache the check just filled: no cold first poll, no second lookup.
+  const res = await controlGet(daemon, "/control/status?dashboard=1", true);
+  expect(
+    ((await res.json()) as { availableUpgrade?: string }).availableUpgrade,
+  ).toBe(RELEASE);
+  expect(source.lookups).toBe(1);
+});

@@ -115,3 +115,33 @@ test("concurrent refreshes share one lookup", async () => {
   expect(h.cache.current()).toBe("0.6.2");
   expect(h.calls()).toBe(1);
 });
+
+test("record() stores a fresh check's answer for 6 hours, with no lookup", async () => {
+  const h = harness("0.6.0", () => "0.6.1");
+  h.cache.record("0.6.2");
+  expect(h.cache.current()).toBe("0.6.2");
+  h.clock.t += AVAILABLE_UPGRADE_TTL_MS - 1;
+  h.cache.refreshIfStale();
+  await settle();
+  expect(h.calls()).toBe(0);
+  h.clock.t += 1;
+  h.cache.refreshIfStale();
+  await settle();
+  expect(h.calls()).toBe(1);
+});
+
+test("record() of a version that is not newer clears the hint", async () => {
+  const h = harness("0.6.0", () => "0.6.1");
+  h.cache.refreshIfStale();
+  await settle();
+  expect(h.cache.current()).toBe("0.6.1");
+  h.cache.record("0.6.0");
+  expect(h.cache.current()).toBeUndefined();
+});
+
+test("record() ignores a non-semver value", async () => {
+  const h = harness("0.6.0", () => "0.6.1");
+  h.cache.record("0.6.1");
+  h.cache.record("latest");
+  expect(h.cache.current()).toBe("0.6.1");
+});
