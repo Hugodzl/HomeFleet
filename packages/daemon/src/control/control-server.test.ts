@@ -141,11 +141,13 @@ function send(
   const mergedHeaders: Record<string, string | undefined> = {
     host: options.hostHeader ?? `127.0.0.1:${port}`,
     [CONTROL_HEADER]: "1",
-    // Upgrade POSTs carry the per-boot token by default (as the real client
-    // does); a test passes `{ [CONTROL_TOKEN_HEADER]: undefined }` to drop it.
+    // Upgrade and shutdown POSTs carry the per-boot token by default (as the
+    // real client does); a test passes `{ [CONTROL_TOKEN_HEADER]: undefined }`
+    // to drop it.
     ...(options.method === "POST" &&
     (options.path === "/control/upgrade" ||
-      options.path.startsWith("/control/upgrade/"))
+      options.path.startsWith("/control/upgrade/") ||
+      options.path === "/control/shutdown")
       ? { [CONTROL_TOKEN_HEADER]: T }
       : {}),
     ...(body !== undefined
@@ -1294,4 +1296,59 @@ test("POST /control/upgrade/prepare rejects a bad body with 400", async () => {
     body: JSON.stringify({ version: "latest" }),
   });
   expect(response.status).toBe(400);
+});
+
+test("POST /control/shutdown returns 202 with the exiting pid", async () => {
+  let calls = 0;
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => {
+        calls += 1;
+        return { pid: 4242 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    body: "{}",
+  });
+  expect(response.status).toBe(202);
+  expect(response.json).toEqual({ pid: 4242 });
+  expect(calls).toBe(1);
+});
+
+test("POST /control/shutdown without the token is 403 and never reaches the surface", async () => {
+  let called = false;
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => {
+        called = true;
+        return { pid: 1 };
+      },
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    headers: { [CONTROL_TOKEN_HEADER]: undefined },
+    body: "{}",
+  });
+  expect(response.status).toBe(403);
+  expect(response.json).toMatchObject({ code: "bad-token" });
+  expect(called).toBe(false);
+});
+
+test.each([
+  ["no shutdown hook", { shutdown: () => undefined }],
+  ["a surface without shutdown", {}],
+] as const)("POST /control/shutdown with %s is 409 unsupported", async (_name, overrides) => {
+  const server = await start({ surface: fakeSurface(overrides) });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    body: "{}",
+  });
+  expect(response.status).toBe(409);
+  expect(response.json).toMatchObject({ code: "unsupported" });
 });

@@ -772,6 +772,7 @@ export class Daemon {
             return lastUpgrade !== undefined ? { lastUpgrade } : {};
           })(),
           ...(available !== undefined ? { availableUpgrade: available } : {}),
+          pid: process.pid,
         };
       },
       listNodes: () => nodeDirectory.list(),
@@ -803,6 +804,15 @@ export class Daemon {
       },
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
+      shutdown: () => {
+        const requestShutdown = this.requestShutdown;
+        if (requestShutdown === undefined) {
+          return undefined;
+        }
+        // Delay like the upgrade flow, so the 202 reaches the CLI first.
+        setTimeout(() => requestShutdown("stop requested"), 250);
+        return { pid: process.pid };
+      },
       checkUpgrade: async () => {
         const check = await upgrades.check();
         // An explicit check (CLI or the dashboard's "Check for updates") is

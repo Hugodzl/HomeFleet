@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import { type CliDeps, runCli } from "../cli/cli.js";
 import { ControlClient } from "../cli/control-client.js";
+import { realLifecycleDeps } from "../cli/daemon-lifecycle.js";
 import { openUrl } from "../cli/open-url.js";
 import { loadDaemonConfig } from "../config/config.js";
 import { resolveDataDir } from "../config/paths.js";
@@ -37,6 +38,7 @@ async function main(): Promise<number> {
     fileExists: existsSync,
     openUrl,
     readUpgradeResult: readUpgradeResultSync,
+    lifecycle: realLifecycleDeps(),
   };
   return runCli(process.argv.slice(2), deps);
 }

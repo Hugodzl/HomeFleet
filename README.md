@@ -126,11 +126,30 @@ v0.6.0 or later for upgrade commands: they now share a per-boot control token.
 
 Then scaffold the machine with `homefleet setup` (below).
 
+To run the daemon in the background, use `homefleet daemon`:
+
+```bash
+homefleet daemon start     # launch homefleetd detached and wait until it answers
+homefleet daemon status    # running or not, pid, version, log paths (exit 3 = not running)
+homefleet daemon stop      # graceful shutdown; refuses while jobs run unless --force
+homefleet daemon restart   # stop, then start (e.g. after editing config.json)
+```
+
+The daemon's own answer on the control API is how `status` finds it, so
+nothing goes stale across reboots. On Windows, `start` runs the
+`HomeFleet Daemon` autostart task when it is registered (and
+`HOMEFLEET_DATA_DIR` is unset). Otherwise it launches `homefleetd` directly.
+Its log is `homefleetd.log` in the data directory. `stop` needs a daemon
+from the release that added `homefleet daemon` or later; an older one has to
+be stopped by hand once, or upgraded.
+
 **Windows:** run `homefleetd` from the Task Scheduler task `homefleet setup`
 prints, or from your own terminal, not from a terminal inside a packaged
 desktop app such as the Claude desktop app. Windows gives that app's child
 processes a private `%LOCALAPPDATA%` (the daemon ends up with a separate
-identity) and stops them when the app closes. See
+identity) and stops them when the app closes. `homefleet daemon start`
+detects this and refuses, unless the autostart task is registered: a task
+runs outside the app. See
 [Data directory](docs/reference/configuration.md#data-directory).
 
 Working on HomeFleet itself? See [Development](#development) for running from

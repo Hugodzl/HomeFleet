@@ -92,6 +92,11 @@
  * cross-origin page cannot read it). The guard is a single check in the
  * dispatch, before any body is read. Every other route is unchanged.
  *
+ * `POST /control/shutdown` (`homefleet daemon stop`) sits behind the same
+ * token guard: it stops the daemon, and the token also proves the caller
+ * read THIS data dir's token file, so `stop` can never shut down a daemon
+ * of another data dir that happens to own the configured port.
+ *
  * `unpair` (the inverse trust-store write) is covered by the same sign-off:
  * a same-OS-user co-resident process can call it just as it can call
  * `pair/connect`. The worst it can do is REVOKE trust (a local denial of
@@ -169,6 +174,12 @@ export interface ControlStatus {
   lastUpgrade?: UpgradeResult;
   /** A newer release than this daemon, from the dashboard-gated cached check. */
   availableUpgrade?: string;
+  /**
+   * The daemon's own `process.pid` — how `homefleet daemon status|stop` find
+   * the live process without a pid file. Optional only because daemons
+   * before `homefleet daemon` (v0.6.4 and older) don't send it.
+   */
+  pid?: number;
 }
 
 /** One worker-side job (this node ran it for a peer), as `/control/jobs` reports it. */
@@ -284,6 +295,13 @@ export interface ControlSurface {
    * peer is not told (ADR-0004 addendum).
    */
   unpair(deviceId: string): Promise<UnpairSummary | undefined>;
+  /**
+   * Starts a graceful shutdown of THIS daemon (`homefleet daemon stop`):
+   * returns the pid that is about to exit, and shuts down shortly after so
+   * the reply goes out first. Returns `undefined` when the daemon has no
+   * shutdown hook (not started by homefleetd) — the route's 409.
+   */
+  shutdown?(): { pid: number } | undefined;
 }
 
 export interface ControlServerOptions {
@@ -302,7 +320,8 @@ export interface ControlServerOptions {
   dashboard?: boolean;
   /**
    * The per-boot control token (see ./control-token.ts). Embedded in the
-   * dashboard page and required on every `POST /control/upgrade*`. Absent =>
+   * dashboard page and required on every `POST /control/upgrade*` and
+   * `POST /control/shutdown`. Absent =>
    * those routes answer 403 `bad-token` (fail closed).
    */
   token?: string;
@@ -620,6 +639,19 @@ export async function startControlServer(
     respondJson(res, 200, { rollout: surface.upgrades() ?? null });
   }
 
+  function handleShutdown(res: ServerResponse): void {
+    const started = surface.shutdown?.();
+    if (started === undefined) {
+      respondJson(res, 409, {
+        error:
+          "this daemon was not started by homefleetd, so it cannot shut itself down",
+        code: "unsupported",
+      });
+      return;
+    }
+    respondJson(res, 202, started);
+  }
+
   /** Writes the 403 and returns false when the request lacks the token. */
   function requireControlToken(
     req: IncomingMessage,
@@ -786,12 +818,14 @@ export async function startControlServer(
       return;
     }
 
-    // ONE guard for every upgrade POST, before any handler reads a body, so a
-    // route added under /control/upgrade is protected by construction.
+    // ONE guard for every upgrade POST and the shutdown POST, before any
+    // handler reads a body, so a route added under /control/upgrade is
+    // protected by construction.
     if (
       method === "POST" &&
       (pathname === "/control/upgrade" ||
-        pathname.startsWith("/control/upgrade/")) &&
+        pathname.startsWith("/control/upgrade/") ||
+        pathname === "/control/shutdown") &&
       !requireControlToken(req, res)
     ) {
       return;
@@ -836,6 +870,10 @@ export async function startControlServer(
       }
       if (method === "POST" && pathname === "/control/upgrade/prepare") {
         await handlePrepareUpgrade(req, res);
+        return;
+      }
+      if (method === "POST" && pathname === "/control/shutdown") {
+        handleShutdown(res);
         return;
       }
       respondError(res, 404, "not found");
