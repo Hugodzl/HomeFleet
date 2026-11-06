@@ -6,6 +6,48 @@ the real tarball on Ubuntu and Windows (bins must print their exact version),
 then a GitHub Release with `homefleet-<version>.tgz` attached, titled and
 described from `docs/releases/<tag>.md`.
 
+## Release flow
+
+Any PR that changes shipped behaviour (code under `packages/`) ships in a
+release. Docs-only PRs (devlogs, specs, plans, this file) don't. A Claude
+session runs this flow every time, without being asked:
+
+1. **Pick the version** when the PR is ready to merge:
+   - **Patch** (`0.6.4` → `0.6.5`): fixes and small visible changes, with no
+     new command, route or protocol change.
+   - **Minor** (`0.6.x` → `0.7.0`): a new command, control or HFP route,
+     config section, or protocol version.
+   - **Major** (`1.0.0`): only when Hugo calls it.
+2. **Ask before any minor or major bump.** Ask once, together with the merge.
+   Say what ships, what upgrading does to the rig (daemon restart, new
+   permissions or config, version-skew limits), and what still needs a
+   hardware check. A patch bump doesn't need its own approval; it rides on
+   the merge approval.
+3. **Once approved, the prep is part of the job, not a separate request.**
+   - **Where:** add a "Release prep: vX.Y.Z" commit to the feature PR, as
+     v0.6.4 did. Use a separate prep PR only if the feature PR is already
+     merged.
+   - **What:** it covers steps 1–3 of [Cutting a release](#cutting-a-release):
+     the four version places plus the RFC example, `docs/releases/vX.Y.Z.md`,
+     and the README Status banner, Install note and Roadmap.
+   - **Before merging:** `git grep` for the previous version, and wait for CI
+     to pass on the prep commit.
+4. **Merge, then tag** (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `pack`
+   job waits for Hugo to approve the `release` environment. That approval is
+   the last human gate.
+5. **After the Release is published**, check:
+   - the three assets are present
+   - the repo About description is still accurate
+   - the bump is a milestone (a minor or major release), in which case
+     propose the devlog entry
+6. **Give Hugo the rig steps** in the closing message: upgrade (**Upgrade all**
+   or `homefleet fleet upgrade`) and any hardware check the PR lists. Claude
+   never upgrades or restarts the real rig daemons from its own shell.
+
+Risky PRs go through [Reviewing a risky change](#reviewing-a-risky-change)
+before step 1. A release-prep commit added after a clean review doesn't need
+another review.
+
 ## Reviewing a risky change
 
 Before merging a change that touches the control token or auth, kills or
