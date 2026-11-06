@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.6.4 — pre-alpha.** The product spine is complete — identity,
+> **Status: v0.7.0 — pre-alpha.** The product spine is complete — identity,
 > mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
 > workspace (git bundle) sync, the single-process daemon assembly, and the
 > `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
@@ -28,6 +28,10 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > v0.6 adds **upgrade from the dashboard** — Upgrade all, a per-node button or
 > this node's own button, with a verify-then-confirm dialog and live progress —
 > guarded by a per-boot control token.
+> v0.7.0 adds **`homefleet daemon start|stop|restart|status`** — run the
+> daemon in the background and stop it gracefully, without hand-written
+> `Start-Process` lines (on Windows through the autostart task when present;
+> its rig check is still pending).
 > All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
@@ -92,7 +96,7 @@ Workers can now *write* code, not just read it. Configure `executors.write` on a
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.6.4) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.7.0) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
@@ -140,8 +144,8 @@ nothing goes stale across reboots. On Windows, `start` runs the
 `HomeFleet Daemon` autostart task when it is registered (and
 `HOMEFLEET_DATA_DIR` is unset). Otherwise it launches `homefleetd` directly.
 Its log is `homefleetd.log` in the data directory. `stop` needs a daemon
-from the release that added `homefleet daemon` or later; an older one has to
-be stopped by hand once, or upgraded.
+from v0.7.0 or later; an older one has to be stopped by hand once, or
+upgraded.
 
 **Windows:** run `homefleetd` from the Task Scheduler task `homefleet setup`
 prints, or from your own terminal, not from a terminal inside a packaged

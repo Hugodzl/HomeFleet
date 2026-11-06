@@ -117,7 +117,7 @@ Keeping a node running is still hand work. The v0.5.0 rig rollout
 
 Brainstorm threads, roughly from cheapest to largest:
 
-- ~~**`homefleet daemon start|stop|restart|status`**~~ **built, unreleased**
+- ~~**`homefleet daemon start|stop|restart|status`**~~ **done, v0.7.0**
   ([spec](specs/2026-11-05-daemon-lifecycle-command-design.md)). The live
   daemon reports its own pid over the control API (no pid file), `stop` is a
   graceful `POST /control/shutdown`, and on Windows `start` runs the
