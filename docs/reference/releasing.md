@@ -6,6 +6,43 @@ the real tarball on Ubuntu and Windows (bins must print their exact version),
 then a GitHub Release with `homefleet-<version>.tgz` attached, titled and
 described from `docs/releases/<tag>.md`.
 
+## Reviewing a risky change
+
+Before merging a change that touches the control token or auth, kills or
+restarts the daemon, adds a control or HFP route, or runs concurrent work,
+get an independent review in a session that didn't write it. Then re-review
+the fix diff. Green CI only proves the tests that exist; PR 22 passed CI and
+still had two must-fix bugs. The reviewer's brief should include this
+checklist. Every item comes from a bug a review actually found:
+
+- **Enforced in the daemon, not only the CLI or the page.** If the daemon
+  must refuse something (busy jobs, a rollout in progress), the route refuses
+  it with a 409, the way `checkUpgradeGuards` does. A CLI-side check is a
+  convenience, not a guard. (PR 22: the jobs refusal was CLI-only.)
+- **The same request twice.** A second shutdown, prepare or rollout request
+  must be idempotent or refused, never escalate. (PR 22: a second shutdown
+  forced an exit mid-teardown.)
+- **Check, then act.** Anything read before acting can change in between: a
+  job count, a cached file another request is writing, a saved record from a
+  previous run. (v0.6.0: two prepares deleted each other's cache; the
+  dashboard took an old rollout record for the new one.)
+- **Reused ids.** A pid, port or rollout id can belong to something else by
+  the time you use it. Confirm identity before killing or matching. (PR 22:
+  the kill fallback.)
+- **Version skew both ways.** A new CLI against an older daemon, and a new
+  daemon against an older peer or CLI, must fail with a clear message.
+- **Mutating routes stay off the dashboard.** New POSTs need the per-boot
+  token, and `assets.scan.test.ts` must still pin which POSTs the page can
+  make.
+- **Windows specifics.** `process.kill` is TerminateProcess, so no shutdown
+  code runs; mode 0600 is ignored; a Claude desktop shell runs inside an MSIX
+  package with a virtualized `%LOCALAPPDATA%`.
+- **Docs match the code.** The spec, plan, README and `docs/backlog.md` name
+  only things that exist. Deferred findings go into the backlog.
+
+Reviews and tests never start, stop or restart the real rig daemon. Use temp
+data dirs. What needs hardware goes into the PR as steps for Hugo.
+
 ## Cutting a release
 
 1. Bump the version in **all four** places — the pack refuses a tag that
