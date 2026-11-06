@@ -130,10 +130,14 @@ export interface ControlClientLike {
   upgrades(): Promise<RolloutStatus | null>;
   /**
    * Asks the daemon to shut down gracefully (`POST /control/shutdown`);
-   * resolves the pid that is exiting. An older daemon without the route
-   * rejects with a {@link ControlRequestError} of status 404.
+   * resolves the pid that is exiting (`alreadyStopping` when an earlier
+   * request started it). Refusals reject with a {@link ControlRequestError}:
+   * 409 `busy` (jobs running, no force), `upgrading` or `unsupported`; 404
+   * from an older daemon without the route.
    */
-  shutdown(): Promise<{ pid: number }>;
+  shutdown(input?: {
+    force?: boolean;
+  }): Promise<{ pid: number; alreadyStopping: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,16 +511,18 @@ export class ControlClient implements ControlClientLike {
     return validatePreparedUpgrade(json);
   }
 
-  async shutdown(): Promise<{ pid: number }> {
+  async shutdown(
+    input: { force?: boolean } = {},
+  ): Promise<{ pid: number; alreadyStopping: boolean }> {
     const json = await controlRequest(
       this.options,
       "POST",
       "/control/shutdown",
-      {},
+      input.force === true ? { force: true } : {},
     );
     assertIsObject(json, "shutdown");
     assertNumber(json.pid, "pid", "shutdown");
-    return { pid: json.pid };
+    return { pid: json.pid, alreadyStopping: json.alreadyStopping === true };
   }
 
   async upgrades(): Promise<RolloutStatus | null> {

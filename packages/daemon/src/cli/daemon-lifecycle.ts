@@ -46,6 +46,11 @@ export interface LifecycleDeps {
     dataDir: string;
   }): LaunchedDaemon;
   isPidAlive(pid: number): boolean;
+  /**
+   * Whether `pid` is (still) a homefleetd process: its command line names
+   * homefleetd. False when that can't be determined; it gates a hard kill.
+   */
+  isHomefleetdProcess(pid: number): boolean;
   /** Hard kill (TerminateProcess on Windows). Never throws. */
   killPid(pid: number): void;
   /** Windows: whether this process runs inside an MSIX package (virtualized AppData). */
@@ -65,6 +70,51 @@ export function isPidAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * A process's command line: Win32_Process on Windows, /proc on Linux, `ps`
+ * elsewhere. Undefined when the process is gone or the lookup fails.
+ */
+export function processCommandLine(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined;
+  }
+  try {
+    if (platform === "win32") {
+      const result = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        ],
+        { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+      );
+      const line = result.status === 0 ? result.stdout.trim() : "";
+      return line === "" ? undefined : line;
+    }
+    if (platform === "linux") {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      const line = raw.split("\0").join(" ").trim();
+      return line === "" ? undefined : line;
+    }
+    const result = spawnSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf8",
+    });
+    const line = result.status === 0 ? result.stdout.trim() : "";
+    return line === "" ? undefined : line;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isHomefleetdProcess(pid: number): boolean {
+  return /homefleetd/i.test(processCommandLine(pid) ?? "");
 }
 
 export function killPid(pid: number): void {
@@ -181,6 +231,7 @@ export function realLifecycleDeps(
     defaultDataDir: override === undefined || override === "",
     launchDetached,
     isPidAlive,
+    isHomefleetdProcess,
     killPid,
     isPackagedApp: () => isPackagedApp(env.LOCALAPPDATA),
     taskExists,

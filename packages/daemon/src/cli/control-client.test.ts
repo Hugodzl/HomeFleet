@@ -477,16 +477,44 @@ test("prepareUpgrade() round-trips over real HTTP with the token", async () => {
   await expect(client.prepareUpgrade()).resolves.toMatchObject({ size: 77 });
 });
 
-test("shutdown() sends the token and resolves the exiting pid", async () => {
+test("shutdown() sends the token, passes force, and resolves the exiting pid", async () => {
+  const inputs: Array<{ force: boolean }> = [];
   const server = await start({
-    surface: fakeSurface({ shutdown: () => ({ pid: 777 }) }),
+    surface: fakeSurface({
+      shutdown: (input) => {
+        inputs.push(input);
+        return { ok: true, pid: 777, alreadyStopping: false };
+      },
+    }),
   });
   const client = new ControlClient({
     host: "127.0.0.1",
     port: server.port,
     token: T,
   });
-  await expect(client.shutdown()).resolves.toEqual({ pid: 777 });
+  await expect(client.shutdown()).resolves.toEqual({
+    pid: 777,
+    alreadyStopping: false,
+  });
+  await client.shutdown({ force: true });
+  expect(inputs).toEqual([{ force: false }, { force: true }]);
+});
+
+test("shutdown() refused busy rejects with the 409 code", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => ({ ok: false, code: "busy", message: "2 job(s)" }),
+    }),
+  });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
+  await expect(client.shutdown()).rejects.toMatchObject({
+    status: 409,
+    code: "busy",
+  });
 });
 
 test("shutdown() against a server without the route rejects with status 404", async () => {

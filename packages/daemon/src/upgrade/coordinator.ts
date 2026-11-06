@@ -107,6 +107,11 @@ export class UpgradeCoordinator {
 
   constructor(private readonly options: UpgradeCoordinatorOptions) {}
 
+  /** A self upgrade is starting or has handed the node to the updater. */
+  get busy(): boolean {
+    return this.inProgress || this.pending;
+  }
+
   async check(): Promise<UpgradeCheck> {
     const current = this.options.currentVersion;
     const latest = await this.resolveTarget(undefined);

@@ -4,9 +4,12 @@ import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
   DAEMON_ERR_LOG_FILE,
+  isHomefleetdProcess,
   isPackagedApp,
   isPidAlive,
+  killPid,
   launchDetached,
+  processCommandLine,
   realLifecycleDeps,
   tailFile,
 } from "./daemon-lifecycle.js";
@@ -104,4 +107,30 @@ test("launchDetached starts the entry, appends stderr to homefleetd.err.log, and
   expect(tailFile(path.join(dataDir, DAEMON_ERR_LOG_FILE), 1)).toEqual([
     "boom",
   ]);
+});
+
+test("isHomefleetdProcess: true for a live process whose command line names homefleetd, false otherwise", async () => {
+  const dir = tempDir();
+  const entry = path.join(dir, "fake-homefleetd.mjs");
+  writeFileSync(entry, "setInterval(() => {}, 1000);\n");
+  const launched = launchDetached({
+    nodePath: process.execPath,
+    entryPath: entry,
+    dataDir: dir,
+  });
+  try {
+    expect(processCommandLine(launched.pid)).toContain("fake-homefleetd.mjs");
+    expect(isHomefleetdProcess(launched.pid)).toBe(true);
+    // This test runner is a node process, but not homefleetd.
+    expect(isHomefleetdProcess(process.pid)).toBe(false);
+  } finally {
+    killPid(launched.pid);
+  }
+  const deadline = Date.now() + 10_000;
+  while (isPidAlive(launched.pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  // Gone: nothing to match, so never "homefleetd".
+  expect(isHomefleetdProcess(launched.pid)).toBe(false);
+  expect(processCommandLine(-1)).toBeUndefined();
 });

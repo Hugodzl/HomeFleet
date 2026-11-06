@@ -122,7 +122,28 @@ Brainstorm threads, roughly from cheapest to largest:
   daemon reports its own pid over the control API (no pid file), `stop` is a
   graceful `POST /control/shutdown`, and on Windows `start` runs the
   `HomeFleet Daemon` task when it is registered. Without the task, `start`
-  refuses inside a packaged (MSIX) app.
+  refuses inside a packaged (MSIX) app. Follow-ups from the PR 22 review:
+  - **Trust the task less.** The task path trusts the task by name: it
+    never checks that `/TR` points at this install, and any answering
+    daemon counts as success. Warn when `daemonVersion` differs from the
+    CLI, optionally compare `schtasks /Query /XML`, and on timeout print the
+    task's Last Result. A stale "Running" instance plus IgnoreNew makes
+    `/Run` succeed and start nothing.
+  - **Tell this data dir's daemon from another one.** The status probe is
+    unauthenticated, so a daemon of another data dir on the same control
+    port shows as "already running", and `stop` then gives a misleading
+    bad-token message. Add a non-secret data-dir fingerprint to status.
+  - **Keep polling on unexpected answers.** A foreign service on the port
+    makes `start` stop at the first non-Unreachable error, with no log
+    tails.
+  - **Test gaps.** The task path, MSIX detection in a real packaged shell,
+    and the kill fallback against a real hung daemon are covered only by
+    fakes (the integration test sets `HOMEFLEET_DATA_DIR`, so it never takes
+    the task path).
+  - **Packaged shell, stale config or token.** The task path is allowed
+    inside MSIX, but the CLI there reads the virtualized config and token,
+    and the packaged note prints only in `status`. Print it in `start` and
+    `stop` too, or refuse when the private copy of the data dir differs.
 - ~~**Re-probe models periodically**~~ **shipped in v0.5.5** (every 60 s; on-demand probing not done) so a late model server
   turns `ok` without a daemon restart.
 - **Show versions and model status in the CLI** (`nodes`, `status`).

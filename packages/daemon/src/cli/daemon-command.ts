@@ -222,18 +222,28 @@ async function runDaemonStop(
     deps.stdout("homefleetd is not running.");
     return 0;
   }
-  if (status.activeJobs > 0 && !force) {
-    deps.stderr(
-      `Refused: homefleetd is running ${status.activeJobs} job(s). ` +
-        "Wait for them to finish, or pass --force to stop anyway.",
-    );
-    return 1;
-  }
+  // The daemon enforces the jobs rule itself (409 busy), so there is no
+  // window between a status read here and the stop.
   let pid: number;
   try {
-    ({ pid } = await client.shutdown());
+    ({ pid } = await client.shutdown({ force }));
   } catch (error) {
     if (error instanceof ControlRequestError) {
+      if (error.code === "busy") {
+        deps.stderr(
+          `Refused: homefleetd is running jobs (${error.message}). ` +
+            "Wait for them to finish, or pass --force to stop anyway.",
+        );
+        return 1;
+      }
+      if (error.code === "upgrading") {
+        deps.stderr(
+          "Refused: an upgrade is in progress, and it restarts homefleetd " +
+            "itself. Wait for it to finish (`homefleet daemon status`), then " +
+            "stop it.",
+        );
+        return 1;
+      }
       if (error.status === 404) {
         deps.stderr(
           `This daemon (v${status.daemonVersion}) predates \`homefleet daemon stop\`. ` +
@@ -260,8 +270,19 @@ async function runDaemonStop(
     deps.stdout("homefleetd stopped.");
     return 0;
   }
-  // The daemon itself reported this pid moments ago, so it can't be a
-  // reused one: safe to kill.
+  // The pid was the daemon's 30 s ago, but if it exited near the deadline
+  // the OS may have handed the number to another process. Kill only a pid
+  // that still runs homefleetd.
+  if (!session.lifecycle.isPidAlive(pid)) {
+    deps.stdout("homefleetd stopped.");
+    return 0;
+  }
+  if (!session.lifecycle.isHomefleetdProcess(pid)) {
+    deps.stdout(
+      `homefleetd stopped (pid ${pid} now belongs to another process; not killing it).`,
+    );
+    return 0;
+  }
   session.lifecycle.killPid(pid);
   if (await waitForExit(session, pid, KILL_WAIT_MS)) {
     deps.stdout(

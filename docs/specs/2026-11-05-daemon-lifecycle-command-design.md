@@ -1,6 +1,6 @@
 # `homefleet daemon start|stop|restart|status` — design
 
-**Status:** proposed (2026-11-05). First slice of the backlog item "Node
+**Status:** implemented (2026-11-05, PR #22; review fixes 2026-11-06). First slice of the backlog item "Node
 lifecycle automation (daemon + model server)" (`docs/backlog.md`).
 
 ## Why
@@ -58,31 +58,48 @@ Port collision (a daemon for *another* data dir on the same control port)
 can't be told apart by `status`. `stop` is safe anyway, because the shutdown
 route requires this data dir's per-boot control token.
 
-`status` output: `running` / `not running`, then pid, version, the control
-URL, the data dir, `homefleetd.log` / `homefleetd.err.log` paths, and (on
-Windows) whether the `HomeFleet Daemon` task is registered. Exit 0 when
+`status` output: `running (pid N, vX)` or `not running`, then the control
+URL (only the control port; HFP and MCP ports are in `homefleet status`),
+the data dir, the `homefleetd.log` / `homefleetd.err.log` paths, the last
+log line when not running, and on Windows whether the `HomeFleet Daemon`
+task is registered, plus a note when the shell runs inside a packaged app. Exit 0 when
 running, 3 when not (the LSB convention for "not running"), so scripts can
 branch on it.
 
 ### Graceful stop (`stop`)
 
-New route `POST /control/shutdown`. It requires the control header and the
-per-boot token, like the upgrade POSTs. It answers `202 { pid }` and then
-calls the same `requestShutdown` that SIGINT and the upgrade flow use, after
-the same 250 ms delay so the reply goes out first. A daemon not started by
-`homefleetd` (embedders, tests without the hook) answers `409 unsupported`.
+New route `POST /control/shutdown`, body `{ force? }`. It requires the
+control header and the per-boot token, like the upgrade POSTs. The daemon
+decides (`decideShutdown`, in order):
+
+1. `409 unsupported`: not started by `homefleetd` (embedders, tests).
+2. `409 upgrading`: a self upgrade is starting or has handed off to the
+   updater, or a fleet rollout is running. The upgrade restarts the daemon
+   itself, and a stop would race the updater's relaunch.
+3. Already stopping: `202 { pid, alreadyStopping: true }`, and nothing is
+   requested again. homefleetd treats a *second* shutdown request as "force
+   exit now", which would cut teardown short. One `shutdownRequested` flag
+   covers both stop and the upgrade coordinator.
+4. `409 busy`: jobs are running and `force` is not set. The daemon enforces
+   this, like `checkUpgradeGuards`, so a CLI-side status read can't race it.
+5. Otherwise `202 { pid, alreadyStopping: false }`, then the same
+   `requestShutdown` that SIGINT uses, after 250 ms so the reply goes out
+   first.
 
 `stop`:
 
 1. If the daemon doesn't answer, print `not running`, exit 0 (idempotent).
-2. If `activeJobs > 0` and there is no `--force`, refuse (exit 1). This
-   mirrors `upgrade`.
-3. POST `/control/shutdown`. A 404 means an older daemon: print a hint
+2. POST `/control/shutdown` with `force` from `--force`. The CLI explains
+   `busy` and `upgrading`. A 404 means an older daemon: print a hint
    (`homefleet upgrade` restarts it into a version that has the route, or
    stop it by hand once) and exit 1.
-4. Wait up to 30 s for the reported pid to exit. If it is still alive, kill
-   that pid. That is safe: the daemon itself reported the pid seconds ago,
-   so it can't be a reused one. Then report.
+3. Wait up to 30 s for the reported pid to exit.
+4. If the pid is still alive, it may no longer be the daemon: the daemon
+   could have exited near the deadline and the OS reused the number. So
+   before killing, `stop` reads the process's command line (Win32_Process on
+   Windows, `/proc` on Linux, `ps` elsewhere) and kills only if it names
+   `homefleetd`. Otherwise it reports the daemon as stopped and kills
+   nothing. A lookup failure counts as "not homefleetd": no kill.
 
 ### Detached launch (`start`)
 
@@ -147,6 +164,6 @@ verification is Hugo's step (see the PR).
 - Exit code 3 for "not running" in `status`.
 - The task path is taken automatically when it applies. There is no
   `--direct` flag yet.
-- `stop` refuses with active jobs unless `--force`.
+- `stop` refuses with active jobs unless `--force`, enforced by the daemon.
 - `--allow-packaged` escape hatch.
 - No pid file at all (rather than a pid file that is cross-checked).

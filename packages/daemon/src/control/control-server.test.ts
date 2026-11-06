@@ -1298,24 +1298,31 @@ test("POST /control/upgrade/prepare rejects a bad body with 400", async () => {
   expect(response.status).toBe(400);
 });
 
-test("POST /control/shutdown returns 202 with the exiting pid", async () => {
-  let calls = 0;
+test("POST /control/shutdown returns 202 with the exiting pid and passes force through", async () => {
+  const inputs: Array<{ force: boolean }> = [];
   const server = await start({
     surface: fakeSurface({
-      shutdown: () => {
-        calls += 1;
-        return { pid: 4242 };
+      shutdown: (input) => {
+        inputs.push(input);
+        return { ok: true, pid: 4242, alreadyStopping: inputs.length > 1 };
       },
     }),
   });
-  const response = await send(server.port, {
+  const first = await send(server.port, {
     method: "POST",
     path: "/control/shutdown",
     body: "{}",
   });
-  expect(response.status).toBe(202);
-  expect(response.json).toEqual({ pid: 4242 });
-  expect(calls).toBe(1);
+  expect(first.status).toBe(202);
+  expect(first.json).toEqual({ pid: 4242, alreadyStopping: false });
+  const second = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    body: JSON.stringify({ force: true }),
+  });
+  expect(second.status).toBe(202);
+  expect(second.json).toEqual({ pid: 4242, alreadyStopping: true });
+  expect(inputs).toEqual([{ force: false }, { force: true }]);
 });
 
 test("POST /control/shutdown without the token is 403 and never reaches the surface", async () => {
@@ -1324,7 +1331,7 @@ test("POST /control/shutdown without the token is 403 and never reaches the surf
     surface: fakeSurface({
       shutdown: () => {
         called = true;
-        return { pid: 1 };
+        return { ok: true, pid: 1, alreadyStopping: false };
       },
     }),
   });
@@ -1340,10 +1347,28 @@ test("POST /control/shutdown without the token is 403 and never reaches the surf
 });
 
 test.each([
-  ["no shutdown hook", { shutdown: () => undefined }],
-  ["a surface without shutdown", {}],
-] as const)("POST /control/shutdown with %s is 409 unsupported", async (_name, overrides) => {
-  const server = await start({ surface: fakeSurface(overrides) });
+  "busy",
+  "upgrading",
+  "unsupported",
+] as const)("POST /control/shutdown refused as %s is 409 with that code", async (code) => {
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => ({ ok: false, code, message: `refused: ${code}` }),
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    body: "{}",
+  });
+  expect(response.status).toBe(409);
+  expect(response.json).toEqual({ error: `refused: ${code}`, code });
+});
+
+test("POST /control/shutdown on a surface without shutdown is 409 unsupported", async () => {
+  const surface = fakeSurface();
+  delete surface.shutdown;
+  const server = await start({ surface });
   const response = await send(server.port, {
     method: "POST",
     path: "/control/shutdown",
@@ -1351,4 +1376,18 @@ test.each([
   });
   expect(response.status).toBe(409);
   expect(response.json).toMatchObject({ code: "unsupported" });
+});
+
+test("POST /control/shutdown rejects a bad body with 400", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => ({ ok: true, pid: 1, alreadyStopping: false }),
+    }),
+  });
+  const response = await send(server.port, {
+    method: "POST",
+    path: "/control/shutdown",
+    body: JSON.stringify({ force: "yes" }),
+  });
+  expect(response.status).toBe(400);
 });

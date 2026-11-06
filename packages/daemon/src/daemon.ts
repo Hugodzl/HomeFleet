@@ -21,6 +21,7 @@ import {
   type ControlStatus,
   type ControlSurface,
   type PairConnectSummary,
+  type ShutdownResult,
   startControlServer,
   type UnpairSummary,
 } from "./control/control-server.js";
@@ -28,6 +29,7 @@ import {
   generateControlToken,
   writeControlToken,
 } from "./control/control-token.js";
+import { decideShutdown } from "./control/shutdown.js";
 import { DiscoveryAggregator } from "./discovery/aggregator.js";
 import { KnownNodesRegistry } from "./discovery/known-nodes.js";
 import { loadOrCreateIdentity } from "./identity/identity.js";
@@ -661,6 +663,19 @@ export class Daemon {
     // closure) never observes a stale 0 once the server can actually be
     // reached.
     let controlPort = 0;
+    // Set by the FIRST shutdown request (a stop or an upgrade). homefleetd
+    // treats a second requestShutdown as "force exit now", mid-teardown, so
+    // every caller in this daemon goes through this flag.
+    let shutdownRequested = false;
+    const rawShutdown = this.requestShutdown;
+    const requestShutdownOnce =
+      rawShutdown === undefined
+        ? undefined
+        : (reason: string) => {
+            if (shutdownRequested) return;
+            shutdownRequested = true;
+            rawShutdown(reason);
+          };
     const releaseSource = this.releaseSource ?? new GitHubReleaseSource();
     const availableUpgrade = createAvailableUpgrade({
       currentVersion: this.daemonVersion,
@@ -673,8 +688,8 @@ export class Daemon {
       source: releaseSource,
       activeJobs: () => jobManager.activeJobs,
       controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
-      ...(this.requestShutdown !== undefined
-        ? { requestShutdown: this.requestShutdown }
+      ...(requestShutdownOnce !== undefined
+        ? { requestShutdown: requestShutdownOnce }
         : {}),
       allowRemote: config.upgrade.allowRemote,
       resolvePeer: (id) => {
@@ -804,14 +819,24 @@ export class Daemon {
       },
       unpair: (deviceId) =>
         unpairPeer({ trustStore, jobManager, knownNodes, deviceId }),
-      shutdown: () => {
-        const requestShutdown = this.requestShutdown;
-        if (requestShutdown === undefined) {
-          return undefined;
+      shutdown: ({ force }): ShutdownResult => {
+        const { result, request } = decideShutdown({
+          pid: process.pid,
+          hasShutdownHook: rawShutdown !== undefined,
+          upgrading:
+            upgrades.busy || fleetUpgrades.upgrades()?.state === "running",
+          alreadyRequested: shutdownRequested,
+          activeJobs: jobManager.activeJobs,
+          force,
+        });
+        if (request && requestShutdownOnce !== undefined) {
+          // Claim the flag now, so a repeat stop (or an upgrade) inside the
+          // delay can't request a second shutdown.
+          shutdownRequested = true;
+          // Delay like the upgrade flow, so the 202 reaches the CLI first.
+          setTimeout(() => rawShutdown?.("stop requested"), 250);
         }
-        // Delay like the upgrade flow, so the 202 reaches the CLI first.
-        setTimeout(() => requestShutdown("stop requested"), 250);
-        return { pid: process.pid };
+        return result;
       },
       checkUpgrade: async () => {
         const check = await upgrades.check();

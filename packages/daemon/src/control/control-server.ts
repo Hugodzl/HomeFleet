@@ -136,6 +136,7 @@ import {
   PairConnectRequestSchema,
   type PrepareUpgradeRequest,
   PrepareUpgradeRequestSchema,
+  ShutdownRequestSchema,
   UnpairRequestSchema,
   type UpgradeRequest,
   UpgradeRequestSchema,
@@ -296,13 +297,22 @@ export interface ControlSurface {
    */
   unpair(deviceId: string): Promise<UnpairSummary | undefined>;
   /**
-   * Starts a graceful shutdown of THIS daemon (`homefleet daemon stop`):
-   * returns the pid that is about to exit, and shuts down shortly after so
-   * the reply goes out first. Returns `undefined` when the daemon has no
-   * shutdown hook (not started by homefleetd) — the route's 409.
+   * Starts a graceful shutdown of THIS daemon (`homefleet daemon stop`) and
+   * shuts down shortly after, so the reply goes out first. Idempotent: a
+   * repeat call while already stopping answers `alreadyStopping` without
+   * triggering anything (homefleetd treats a second shutdown request as
+   * "force exit now"). Refusals are results, not throws: see
+   * {@link ShutdownResult}. Absent = `unsupported`.
    */
-  shutdown?(): { pid: number } | undefined;
+  shutdown?(input: { force: boolean }): ShutdownResult;
 }
+
+/** Why `POST /control/shutdown` refused (all answered 409 with this `code`). */
+export type ShutdownRefusal = "unsupported" | "busy" | "upgrading";
+
+export type ShutdownResult =
+  | { ok: true; pid: number; alreadyStopping: boolean }
+  | { ok: false; code: ShutdownRefusal; message: string };
 
 export interface ControlServerOptions {
   /** The daemon operations this server fronts (see {@link ControlSurface}). */
@@ -639,17 +649,39 @@ export async function startControlServer(
     respondJson(res, 200, { rollout: surface.upgrades() ?? null });
   }
 
-  function handleShutdown(res: ServerResponse): void {
-    const started = surface.shutdown?.();
-    if (started === undefined) {
-      respondJson(res, 409, {
-        error:
-          "this daemon was not started by homefleetd, so it cannot shut itself down",
-        code: "unsupported",
-      });
+  async function handleShutdown(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const body = await readJsonBody(req, res);
+    if (!body.ok) {
       return;
     }
-    respondJson(res, 202, started);
+    const parsed = ShutdownRequestSchema.safeParse(body.value);
+    if (!parsed.success) {
+      respondError(
+        res,
+        400,
+        `invalid shutdown request: ${describeIssues(parsed.error.issues)}`,
+      );
+      return;
+    }
+    const result: ShutdownResult = surface.shutdown?.({
+      force: parsed.data.force ?? false,
+    }) ?? {
+      ok: false,
+      code: "unsupported",
+      message:
+        "this daemon was not started by homefleetd, so it cannot shut itself down",
+    };
+    if (!result.ok) {
+      respondJson(res, 409, { error: result.message, code: result.code });
+      return;
+    }
+    respondJson(res, 202, {
+      pid: result.pid,
+      alreadyStopping: result.alreadyStopping,
+    });
   }
 
   /** Writes the 403 and returns false when the request lacks the token. */
@@ -873,7 +905,7 @@ export async function startControlServer(
         return;
       }
       if (method === "POST" && pathname === "/control/shutdown") {
-        handleShutdown(res);
+        await handleShutdown(req, res);
         return;
       }
       respondError(res, 404, "not found");

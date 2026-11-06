@@ -36,6 +36,15 @@ export const UnpairRequestSchema = z.object({
 export type UnpairRequest = z.infer<typeof UnpairRequestSchema>;
 
 /**
+ * Body of `POST /control/shutdown` (`homefleet daemon stop`). `force` stops
+ * the daemon even while jobs run; the daemon, not the CLI, enforces that.
+ */
+export const ShutdownRequestSchema = z.strictObject({
+  force: z.boolean().optional(),
+});
+export type ShutdownRequest = z.infer<typeof ShutdownRequestSchema>;
+
+/**
  * Body of `POST /control/upgrade` (fleet-upgrade spec). `targets` is "self"
  * (this node, the default), "fleet" (every reachable older peer, then this
  * node), or an explicit list of FULL paired device IDs (the CLI resolves

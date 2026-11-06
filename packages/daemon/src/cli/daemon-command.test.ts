@@ -33,7 +33,9 @@ interface World {
   /** What a launch does: come up after `upAfterMs`, or exit with a code. */
   launch: { upAfterMs: number } | { exitCode: number } | "hang";
   /** shutdown(): exit gracefully, ignore it, or answer an error status. */
-  shutdown: "graceful" | "ignore" | 404 | 409 | "bad-token";
+  shutdown: "graceful" | "ignore" | "upgrading" | 404 | 409 | "bad-token";
+  /** Pids whose number now belongs to some other process (not homefleetd). */
+  foreign: Set<number>;
   logs: Record<string, string[]>;
   calls: string[];
 }
@@ -49,6 +51,7 @@ function world(overrides: Partial<World> = {}): World {
     taskRunOk: true,
     launch: { upAfterMs: 1000 },
     shutdown: "graceful",
+    foreign: new Set(),
     logs: {},
     calls: [],
     ...overrides,
@@ -97,9 +100,14 @@ function harness(w: World) {
       tick();
       return status(w);
     },
-    shutdown: async () => {
-      w.calls.push("shutdown");
+    shutdown: async (input?: { force?: boolean }) => {
+      w.calls.push(input?.force === true ? "shutdown force" : "shutdown");
       const pid = w.daemon?.pid ?? -1;
+      // The daemon, not the CLI, enforces the jobs rule.
+      if ((w.daemon?.activeJobs ?? 0) > 0 && input?.force !== true)
+        throw new ControlRequestError(409, "2 job(s) running", "busy");
+      if (w.shutdown === "upgrading")
+        throw new ControlRequestError(409, "upgrading", "upgrading");
       if (w.shutdown === 404) throw new ControlRequestError(404, "not found");
       if (w.shutdown === 409)
         throw new ControlRequestError(409, "cannot", "unsupported");
@@ -116,7 +124,7 @@ function harness(w: World) {
       } else {
         w.daemon = undefined; // stops answering, but the process lingers
       }
-      return { pid };
+      return { pid, alreadyStopping: false };
     },
   } as unknown as ControlClientLike;
 
@@ -159,6 +167,7 @@ function harness(w: World) {
       tick();
       return w.alive.has(pid);
     },
+    isHomefleetdProcess: (pid) => w.alive.has(pid) && !w.foreign.has(pid),
     killPid: (pid) => {
       w.calls.push(`kill ${pid}`);
       w.alive.delete(pid);
@@ -354,14 +363,40 @@ describe("daemon stop", () => {
     expect(h.out.at(-1)).toBe("homefleetd stopped.");
   });
 
-  test("refuses with active jobs unless --force", async () => {
+  test("the daemon's busy refusal is explained; --force is passed through", async () => {
     const w = world({ daemon: { pid: 42, version: "0.7.0", activeJobs: 2 } });
     w.alive.add(42);
     const h = harness(w);
     expect(await h.run("stop")).toBe(1);
-    expect(h.err[0]).toContain("2 job(s)");
-    expect(w.calls).toEqual([]);
+    expect(h.err[0]).toContain("Refused: homefleetd is running jobs");
+    expect(h.err[0]).toContain("--force");
     expect(await harness(w).run("stop", "--force")).toBe(0);
+    expect(w.calls).toEqual(["shutdown", "shutdown force"]);
+  });
+
+  test("an upgrade in progress is refused with a clear message", async () => {
+    const w = world({
+      daemon: { pid: 42, version: "0.7.0", activeJobs: 0 },
+      shutdown: "upgrading",
+    });
+    w.alive.add(42);
+    const h = harness(w);
+    expect(await h.run("stop")).toBe(1);
+    expect(h.err[0]).toContain("an upgrade is in progress");
+    expect(w.calls).toEqual(["shutdown"]);
+  });
+
+  test("the kill fallback skips a pid that no longer runs homefleetd", async () => {
+    const w = world({
+      daemon: { pid: 42, version: "0.7.0", activeJobs: 0 },
+      shutdown: "ignore",
+    });
+    w.alive.add(42);
+    w.foreign.add(42); // the daemon exited and the number was reused
+    const h = harness(w);
+    expect(await h.run("stop")).toBe(0);
+    expect(w.calls).toEqual(["shutdown"]); // no kill
+    expect(h.out.at(-1)).toContain("now belongs to another process");
   });
 
   test("a daemon that ignores the shutdown is killed after the wait", async () => {
@@ -406,6 +441,13 @@ describe("daemon restart", () => {
     const w = world({ daemon: { pid: 42, version: "0.7.0", activeJobs: 1 } });
     w.alive.add(42);
     expect(await harness(w).run("restart")).toBe(1);
-    expect(w.calls).toEqual([]);
+    expect(w.calls).toEqual(["shutdown"]); // refused busy; no launch
+  });
+
+  test("restart --force passes force to the stop", async () => {
+    const w = world({ daemon: { pid: 42, version: "0.7.0", activeJobs: 1 } });
+    w.alive.add(42);
+    expect(await harness(w).run("restart", "--force")).toBe(0);
+    expect(w.calls[0]).toBe("shutdown force");
   });
 });
