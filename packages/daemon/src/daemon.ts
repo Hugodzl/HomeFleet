@@ -665,14 +665,18 @@ export class Daemon {
     let controlPort = 0;
     // Set by the FIRST shutdown request (a stop or an upgrade). homefleetd
     // treats a second requestShutdown as "force exit now", mid-teardown, so
-    // every caller in this daemon goes through this flag.
+    // every caller in this daemon goes through this flag. A SIGINT/SIGTERM
+    // reaches homefleetd's shutdown directly, but it calls `stop()`, which
+    // sets `state` synchronously, so `isStopping` covers that path too.
     let shutdownRequested = false;
+    const isStopping = (): boolean =>
+      shutdownRequested || this.state === "stopped";
     const rawShutdown = this.requestShutdown;
     const requestShutdownOnce =
       rawShutdown === undefined
         ? undefined
         : (reason: string) => {
-            if (shutdownRequested) return;
+            if (isStopping()) return;
             shutdownRequested = true;
             rawShutdown(reason);
           };
@@ -688,6 +692,7 @@ export class Daemon {
       source: releaseSource,
       activeJobs: () => jobManager.activeJobs,
       controlEndpoint: () => ({ host: config.control.host, port: controlPort }),
+      isShuttingDown: isStopping,
       ...(requestShutdownOnce !== undefined
         ? { requestShutdown: requestShutdownOnce }
         : {}),
@@ -825,7 +830,7 @@ export class Daemon {
           hasShutdownHook: rawShutdown !== undefined,
           upgrading:
             upgrades.busy || fleetUpgrades.upgrades()?.state === "running",
-          alreadyRequested: shutdownRequested,
+          alreadyRequested: isStopping(),
           activeJobs: jobManager.activeJobs,
           force,
         });
@@ -834,7 +839,11 @@ export class Daemon {
           // delay can't request a second shutdown.
           shutdownRequested = true;
           // Delay like the upgrade flow, so the 202 reaches the CLI first.
-          setTimeout(() => rawShutdown?.("stop requested"), 250);
+          // A signal inside the delay already began stopping: requesting
+          // again then would be homefleetd's force-exit.
+          setTimeout(() => {
+            if (this.state !== "stopped") rawShutdown?.("stop requested");
+          }, 250);
         }
         return result;
       },

@@ -78,8 +78,13 @@ decides (`decideShutdown`, in order):
    itself, and a stop would race the updater's relaunch.
 3. Already stopping: `202 { pid, alreadyStopping: true }`, and nothing is
    requested again. homefleetd treats a *second* shutdown request as "force
-   exit now", which would cut teardown short. One `shutdownRequested` flag
-   covers both stop and the upgrade coordinator.
+   exit now", which would cut teardown short. "Stopping" means the shared
+   `shutdownRequested` flag (set by a stop or an upgrade) or the daemon's
+   own `stopped` state. `stop()` sets that state synchronously, which covers
+   SIGINT/SIGTERM: they reach homefleetd's shutdown directly. The stop's
+   delayed request checks the state again before it fires. While stopping,
+   the upgrade coordinator refuses new upgrades (local or pushed) as
+   `locked`.
 4. `409 busy`: jobs are running and `force` is not set. The daemon enforces
    this, like `checkUpgradeGuards`, so a CLI-side status read can't race it.
 5. Otherwise `202 { pid, alreadyStopping: false }`, then the same
@@ -97,9 +102,16 @@ decides (`decideShutdown`, in order):
 4. If the pid is still alive, it may no longer be the daemon: the daemon
    could have exited near the deadline and the OS reused the number. So
    before killing, `stop` reads the process's command line (Win32_Process on
-   Windows, `/proc` on Linux, `ps` elsewhere) and kills only if it names
-   `homefleetd`. Otherwise it reports the daemon as stopped and kills
-   nothing. A lookup failure counts as "not homefleetd": no kill.
+   Windows, `/proc` on Linux, `ps` elsewhere) and acts on one of four
+   answers:
+   - `homefleetd`: kill it, wait 5 s, and report.
+   - `other` (a different program has the number): the daemon is gone.
+     Report it stopped, kill nothing, exit 0.
+   - `gone`: the process exited during the check. Report it stopped.
+   - `unknown` (alive, but the command line can't be read: the lookup was
+     blocked or timed out, or the daemon runs elevated and the shell
+     doesn't): kill nothing and exit 1, telling the user to end pid N
+     themselves. `restart` then doesn't start a second daemon.
 
 ### Detached launch (`start`)
 

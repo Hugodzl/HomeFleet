@@ -144,6 +144,10 @@ Brainstorm threads, roughly from cheapest to largest:
     inside MSIX, but the CLI there reads the virtualized config and token,
     and the packaged note prints only in `status`. Print it in `start` and
     `stop` too, or refuse when the private copy of the data dir differs.
+  - **Shutdown body schema is strict.** `POST /control/shutdown` parses
+    `{ force? }` with a strict schema, so a future CLI that adds a field gets
+    400 from this daemon. That's a choice for now; loosen it (or version
+    the body) the first time the request grows.
 - ~~**Re-probe models periodically**~~ **shipped in v0.5.5** (every 60 s; on-demand probing not done) so a late model server
   turns `ok` without a daemon restart.
 - **Show versions and model status in the CLI** (`nodes`, `status`).

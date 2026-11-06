@@ -231,7 +231,7 @@ async function runDaemonStop(
     if (error instanceof ControlRequestError) {
       if (error.code === "busy") {
         deps.stderr(
-          `Refused: homefleetd is running jobs (${error.message}). ` +
+          `Refused: homefleetd has ${error.message}. ` +
             "Wait for them to finish, or pass --force to stop anyway.",
         );
         return 1;
@@ -273,15 +273,28 @@ async function runDaemonStop(
   // The pid was the daemon's 30 s ago, but if it exited near the deadline
   // the OS may have handed the number to another process. Kill only a pid
   // that still runs homefleetd.
-  if (!session.lifecycle.isPidAlive(pid)) {
+  const identity = session.lifecycle.isPidAlive(pid)
+    ? session.lifecycle.identifyProcess(pid)
+    : "gone";
+  if (identity === "gone") {
     deps.stdout("homefleetd stopped.");
     return 0;
   }
-  if (!session.lifecycle.isHomefleetdProcess(pid)) {
+  if (identity === "other") {
     deps.stdout(
       `homefleetd stopped (pid ${pid} now belongs to another process; not killing it).`,
     );
     return 0;
+  }
+  if (identity === "unknown") {
+    deps.stderr(
+      `Could not stop homefleetd: pid ${pid} is still alive after ` +
+        `${STOP_WAIT_MS / 1000} s, but its command line can't be read to ` +
+        "confirm it is homefleetd, so it was not killed. End it yourself " +
+        "(Task Manager, `Stop-Process -Id` or `kill`), from an elevated " +
+        "shell if the daemon runs elevated.",
+    );
+    return 1;
   }
   session.lifecycle.killPid(pid);
   if (await waitForExit(session, pid, KILL_WAIT_MS)) {

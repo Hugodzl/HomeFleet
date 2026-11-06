@@ -86,6 +86,12 @@ export interface UpgradeCoordinatorOptions {
   publicKeys?: readonly string[];
   /** Delay before shutdown so the 202 reaches the caller. Default 250 ms. */
   shutdownDelayMs?: number;
+  /**
+   * True once this daemon is shutting down (a `homefleet daemon stop`, a
+   * signal). Upgrades are then refused `locked`: one started now would turn
+   * the stop into an upgrade-restart. Default: never.
+   */
+  isShuttingDown?: () => boolean;
   /** `upgrade.allowRemote`: whether a paired peer may push an upgrade. Default false (fail closed). */
   allowRemote?: boolean;
   /** Maps a paired peer's device id to where to reach it; undefined when unknown. */
@@ -130,10 +136,17 @@ export class UpgradeCoordinator {
 
   /** Marks a run as started, or refuses if one already is. Never awaits. */
   private claim(): void {
+    this.refuseIfShuttingDown();
     if (this.inProgress || this.pending) {
       throw new UpgradeError("locked", "an upgrade is already in progress");
     }
     this.pending = true;
+  }
+
+  private refuseIfShuttingDown(): void {
+    if (this.options.isShuttingDown?.() === true) {
+      throw new UpgradeError("locked", "this daemon is shutting down");
+    }
   }
 
   /** The upgrade itself; the caller must hold the {@link claim}. */
@@ -248,6 +261,7 @@ export class UpgradeCoordinator {
         "this daemon was not started by homefleetd, so it cannot restart itself",
       );
     }
+    this.refuseIfShuttingDown();
     const busy = () =>
       new UpgradeError("locked", "an upgrade is already in progress");
     if (this.inProgress || this.pending) {

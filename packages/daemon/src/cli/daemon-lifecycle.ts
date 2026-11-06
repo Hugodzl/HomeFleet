@@ -35,6 +35,8 @@ export interface TaskRunResult {
   output: string;
 }
 
+export type ProcessIdentity = "homefleetd" | "other" | "gone" | "unknown";
+
 export interface LifecycleDeps {
   platform: NodeJS.Platform;
   /** True when the data dir is the per-platform default (no `HOMEFLEET_DATA_DIR`). */
@@ -47,10 +49,13 @@ export interface LifecycleDeps {
   }): LaunchedDaemon;
   isPidAlive(pid: number): boolean;
   /**
-   * Whether `pid` is (still) a homefleetd process: its command line names
-   * homefleetd. False when that can't be determined; it gates a hard kill.
+   * What `pid` runs now, from its command line: `homefleetd`, some `other`
+   * program, `gone`, or `unknown` when the process is alive but its command
+   * line can't be read (lookup blocked or timed out, or an elevated process
+   * seen from an unelevated shell). It gates a hard kill: only
+   * `homefleetd` may be killed.
    */
-  isHomefleetdProcess(pid: number): boolean;
+  identifyProcess(pid: number): ProcessIdentity;
   /** Hard kill (TerminateProcess on Windows). Never throws. */
   killPid(pid: number): void;
   /** Windows: whether this process runs inside an MSIX package (virtualized AppData). */
@@ -113,8 +118,17 @@ export function processCommandLine(
   }
 }
 
-export function isHomefleetdProcess(pid: number): boolean {
-  return /homefleetd/i.test(processCommandLine(pid) ?? "");
+export function identifyProcess(
+  pid: number,
+  readCommandLine: (pid: number) => string | undefined = processCommandLine,
+  alive: (pid: number) => boolean = isPidAlive,
+): ProcessIdentity {
+  const line = readCommandLine(pid);
+  if (line !== undefined) {
+    return /homefleetd/i.test(line) ? "homefleetd" : "other";
+  }
+  // No command line: either the process is gone, or it can't be read.
+  return alive(pid) ? "unknown" : "gone";
 }
 
 export function killPid(pid: number): void {
@@ -231,7 +245,7 @@ export function realLifecycleDeps(
     defaultDataDir: override === undefined || override === "",
     launchDetached,
     isPidAlive,
-    isHomefleetdProcess,
+    identifyProcess: (pid) => identifyProcess(pid),
     killPid,
     isPackagedApp: () => isPackagedApp(env.LOCALAPPDATA),
     taskExists,

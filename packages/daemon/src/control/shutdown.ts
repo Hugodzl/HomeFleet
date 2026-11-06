@@ -49,10 +49,7 @@ export function decideShutdown(facts: ShutdownFacts): {
     };
   }
   if (facts.activeJobs > 0 && !facts.force) {
-    return refuse(
-      "busy",
-      `${facts.activeJobs} job(s) running; pass force to stop anyway`,
-    );
+    return refuse("busy", `${facts.activeJobs} job(s) running`);
   }
   return {
     result: { ok: true, pid: facts.pid, alreadyStopping: false },

@@ -36,6 +36,8 @@ interface World {
   shutdown: "graceful" | "ignore" | "upgrading" | 404 | 409 | "bad-token";
   /** Pids whose number now belongs to some other process (not homefleetd). */
   foreign: Set<number>;
+  /** Pids whose command line can't be read (blocked lookup, elevation). */
+  unreadable: Set<number>;
   logs: Record<string, string[]>;
   calls: string[];
 }
@@ -52,6 +54,7 @@ function world(overrides: Partial<World> = {}): World {
     launch: { upAfterMs: 1000 },
     shutdown: "graceful",
     foreign: new Set(),
+    unreadable: new Set(),
     logs: {},
     calls: [],
     ...overrides,
@@ -167,7 +170,14 @@ function harness(w: World) {
       tick();
       return w.alive.has(pid);
     },
-    isHomefleetdProcess: (pid) => w.alive.has(pid) && !w.foreign.has(pid),
+    identifyProcess: (pid) =>
+      !w.alive.has(pid)
+        ? "gone"
+        : w.unreadable.has(pid)
+          ? "unknown"
+          : w.foreign.has(pid)
+            ? "other"
+            : "homefleetd",
     killPid: (pid) => {
       w.calls.push(`kill ${pid}`);
       w.alive.delete(pid);
@@ -368,8 +378,9 @@ describe("daemon stop", () => {
     w.alive.add(42);
     const h = harness(w);
     expect(await h.run("stop")).toBe(1);
-    expect(h.err[0]).toContain("Refused: homefleetd is running jobs");
-    expect(h.err[0]).toContain("--force");
+    expect(h.err[0]).toBe(
+      "Refused: homefleetd has 2 job(s) running. Wait for them to finish, or pass --force to stop anyway.",
+    );
     expect(await harness(w).run("stop", "--force")).toBe(0);
     expect(w.calls).toEqual(["shutdown", "shutdown force"]);
   });
@@ -423,6 +434,33 @@ describe("daemon stop", () => {
     const h = harness(w);
     expect(await h.run("stop")).toBe(1);
     expect(h.text()).toContain(message);
+  });
+});
+
+describe("daemon stop: unreadable pid", () => {
+  test("a live pid that can't be identified is not killed; stop exits 1", async () => {
+    const w = world({
+      daemon: { pid: 42, version: "0.7.0", activeJobs: 0 },
+      shutdown: "ignore",
+    });
+    w.alive.add(42);
+    w.unreadable.add(42);
+    const h = harness(w);
+    expect(await h.run("stop")).toBe(1);
+    expect(w.calls).toEqual(["shutdown"]); // no kill
+    expect(h.err.at(-1)).toContain("pid 42 is still alive");
+    expect(h.err.at(-1)).toContain("End it yourself");
+  });
+
+  test("restart does not start a second daemon after that", async () => {
+    const w = world({
+      daemon: { pid: 42, version: "0.7.0", activeJobs: 0 },
+      shutdown: "ignore",
+    });
+    w.alive.add(42);
+    w.unreadable.add(42);
+    expect(await harness(w).run("restart")).toBe(1);
+    expect(w.calls).toEqual(["shutdown"]); // no kill, no launch
   });
 });
 

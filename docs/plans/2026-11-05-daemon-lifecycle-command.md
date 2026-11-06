@@ -20,7 +20,7 @@ TDD: test first for each task. Run `pnpm lint`, `pnpm typecheck`, and
    A 404 (older daemon) and the 409 codes arrive as `ControlRequestError`
    with `status` / `code`, which `stop` maps to messages.
 3. **Real lifecycle deps** in `src/cli/daemon-lifecycle.ts`:
-   `launchDetached`, `isPidAlive`, `isHomefleetdProcess` (command line via
+   `launchDetached`, `isPidAlive`, `identifyProcess` (homefleetd / other / gone / unknown, from the command line via
    Win32_Process, /proc or ps), `killPid`, `isPackagedApp` (LOCALAPPDATA
    probe), `taskExists` / `runTask` (schtasks), `tailFile`. Tests with temp
    dirs and real child processes. The packaged probe gets a fake
@@ -29,7 +29,8 @@ TDD: test first for each task. Run `pnpm lint`, `pnpm typecheck`, and
    into `dispatch` and USAGE. cli.test.ts-style tests with fakes cover every
    branch in the spec: start (already running / packaged refuse / task path
    / direct ok / early exit / timeout), stop (not running / busy + --force /
-   upgrading / 404 / graceful / kill after timeout / reused pid not killed),
+   upgrading / 404 / graceful / kill after timeout / reused pid not killed /
+   unreadable pid not killed, exit 1),
    restart, status (running / old daemon / not running = exit 3).
 5. **Bin wiring** in bin/homefleet.ts.
 6. **Integration test:** build the bins into a private dir under

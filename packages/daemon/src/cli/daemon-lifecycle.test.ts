@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
   DAEMON_ERR_LOG_FILE,
-  isHomefleetdProcess,
+  identifyProcess,
   isPackagedApp,
   isPidAlive,
   killPid,
@@ -109,7 +109,7 @@ test("launchDetached starts the entry, appends stderr to homefleetd.err.log, and
   ]);
 });
 
-test("isHomefleetdProcess: true for a live process whose command line names homefleetd, false otherwise", async () => {
+test("identifyProcess: homefleetd for a live process whose command line names it, other for a different one, gone after exit", async () => {
   const dir = tempDir();
   const entry = path.join(dir, "fake-homefleetd.mjs");
   writeFileSync(entry, "setInterval(() => {}, 1000);\n");
@@ -120,9 +120,9 @@ test("isHomefleetdProcess: true for a live process whose command line names home
   });
   try {
     expect(processCommandLine(launched.pid)).toContain("fake-homefleetd.mjs");
-    expect(isHomefleetdProcess(launched.pid)).toBe(true);
+    expect(identifyProcess(launched.pid)).toBe("homefleetd");
     // This test runner is a node process, but not homefleetd.
-    expect(isHomefleetdProcess(process.pid)).toBe(false);
+    expect(identifyProcess(process.pid)).toBe("other");
   } finally {
     killPid(launched.pid);
   }
@@ -130,7 +130,26 @@ test("isHomefleetdProcess: true for a live process whose command line names home
   while (isPidAlive(launched.pid) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  // Gone: nothing to match, so never "homefleetd".
-  expect(isHomefleetdProcess(launched.pid)).toBe(false);
+  expect(identifyProcess(launched.pid)).toBe("gone");
   expect(processCommandLine(-1)).toBeUndefined();
+});
+
+test("identifyProcess: a live process whose command line can't be read is unknown, never other", () => {
+  const unreadable = () => undefined;
+  expect(identifyProcess(42, unreadable, () => true)).toBe("unknown");
+  expect(identifyProcess(42, unreadable, () => false)).toBe("gone");
+  expect(
+    identifyProcess(
+      42,
+      () => "node homefleetd.js",
+      () => true,
+    ),
+  ).toBe("homefleetd");
+  expect(
+    identifyProcess(
+      42,
+      () => "notepad.exe",
+      () => true,
+    ),
+  ).toBe("other");
 });
