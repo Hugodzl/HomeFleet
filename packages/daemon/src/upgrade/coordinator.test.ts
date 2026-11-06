@@ -515,3 +515,41 @@ test("a failed local upgrade frees the node for the next one", async () => {
     to: "0.5.1",
   });
 });
+
+test("upgradeSelf is refused locked while the daemon is shutting down, before any download", async () => {
+  let stopping = false;
+  const { coordinator, source, spawned, shutdowns } = await setup({
+    isShuttingDown: () => stopping,
+  });
+  stopping = true;
+  expect(await codeOf(coordinator.upgradeSelf({}))).toBe("locked");
+  expect(source.fetchCount).toBe(0);
+  expect(spawned).toEqual([]);
+  expect(shutdowns).toEqual([]);
+  // And not stuck: once no longer stopping, an upgrade goes through.
+  stopping = false;
+  await expect(coordinator.upgradeSelf({})).resolves.toMatchObject({
+    to: "0.5.1",
+  });
+});
+
+test("acceptRemote is refused locked while the daemon is shutting down", async () => {
+  const { coordinator } = await setup({
+    allowRemote: true,
+    isShuttingDown: () => true,
+  });
+  const error = await coordinator
+    .acceptRemote({
+      request: {
+        version: "0.5.1",
+        manifest: "",
+        signature: "",
+      } as unknown as HfpUpgradeRequest,
+      requesterDeviceId: "d".repeat(64),
+      client: { fetchUpgradeTarball: vi.fn() },
+    })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(UpgradeError);
+  expect((error as UpgradeError).code).toBe("locked");
+  expect((error as UpgradeError).message).toContain("shutting down");
+});

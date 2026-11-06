@@ -476,3 +476,77 @@ test("prepareUpgrade() round-trips over real HTTP with the token", async () => {
   expect(received).toEqual({ version: "0.5.2" });
   await expect(client.prepareUpgrade()).resolves.toMatchObject({ size: 77 });
 });
+
+test("shutdown() sends the token, passes force, and resolves the exiting pid", async () => {
+  const inputs: Array<{ force: boolean }> = [];
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: (input) => {
+        inputs.push(input);
+        return { ok: true, pid: 777, alreadyStopping: false };
+      },
+    }),
+  });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
+  await expect(client.shutdown()).resolves.toEqual({
+    pid: 777,
+    alreadyStopping: false,
+  });
+  await client.shutdown({ force: true });
+  expect(inputs).toEqual([{ force: false }, { force: true }]);
+});
+
+test("shutdown() refused busy rejects with the 409 code", async () => {
+  const server = await start({
+    surface: fakeSurface({
+      shutdown: () => ({ ok: false, code: "busy", message: "2 job(s)" }),
+    }),
+  });
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: server.port,
+    token: T,
+  });
+  await expect(client.shutdown()).rejects.toMatchObject({
+    status: 409,
+    code: "busy",
+  });
+});
+
+test("shutdown() against a server without the route rejects with status 404", async () => {
+  const fake = (async () =>
+    new Response(JSON.stringify({ error: "not found" }), {
+      status: 404,
+    })) as typeof fetch;
+  const client = new ControlClient({
+    host: "127.0.0.1",
+    port: 1,
+    token: T,
+    fetch: fake,
+  });
+  const error = await client.shutdown().catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ControlRequestError);
+  expect(error).toMatchObject({ status: 404 });
+});
+
+test("status() passes a pid through and rejects a non-number pid", async () => {
+  const base = fakeSurface().status();
+  const ok = await start({
+    surface: fakeSurface({ status: () => ({ ...base, pid: 99 }) }),
+  });
+  await expect(
+    new ControlClient({ host: "127.0.0.1", port: ok.port }).status(),
+  ).resolves.toMatchObject({ pid: 99 });
+  const bad = await start({
+    surface: fakeSurface({
+      status: () => ({ ...base, pid: "99" }) as unknown as ControlStatus,
+    }),
+  });
+  await expect(
+    new ControlClient({ host: "127.0.0.1", port: bad.port }).status(),
+  ).rejects.toThrow(/"pid"/);
+});

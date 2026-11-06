@@ -39,6 +39,8 @@ import {
   ControlRequestError,
   DaemonUnreachableError,
 } from "./control-client.js";
+import { runDaemon } from "./daemon-command.js";
+import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import {
   generateAutostartCreateCommand,
   generateFirewallAllowCommands,
@@ -110,6 +112,11 @@ export interface CliDeps {
    * `upgrade`'s last resort when the daemon never came back to report it.
    */
   readUpgradeResult?: (dataDir: string) => UpgradeResult | undefined;
+  /**
+   * The OS side of `homefleet daemon` (real: ./daemon-lifecycle.ts
+   * `realLifecycleDeps`). Absent means the subcommand is unavailable.
+   */
+  lifecycle?: LifecycleDeps;
 }
 
 const USAGE = `homefleet - HomeFleet operator CLI
@@ -159,6 +166,24 @@ Usage:
       prefixes); --force-local upgrades this node even while jobs run.
       Peers must have "upgrade.allowRemote" enabled.
 
+  homefleet daemon start [--allow-packaged]
+      Start THIS data dir's daemon in the background and wait until it
+      answers. On Windows it runs the "HomeFleet Daemon" autostart task when
+      one is registered (and HOMEFLEET_DATA_DIR is unset); otherwise it
+      launches homefleetd detached. Refuses inside a packaged (MSIX) app
+      such as the Claude desktop app unless --allow-packaged.
+
+  homefleet daemon stop [--force]
+      Shut the running daemon down gracefully and wait until it has exited.
+      Refuses while jobs are running unless --force.
+
+  homefleet daemon restart [--force] [--allow-packaged]
+      stop, then start.
+
+  homefleet daemon status
+      Whether a daemon answers for this data dir, its pid and version, and
+      where its logs are. Exit code 3 when it is not running.
+
   homefleet --help
       Show this usage text.
 
@@ -179,7 +204,7 @@ function defaultDaemonEntryPath(): string {
   return fileURLToPath(new URL("./homefleetd.js", import.meta.url));
 }
 
-/** The one explanation both upgrade commands print when the daemon rejects the control token. */
+/** The one explanation the upgrade and daemon commands print when the daemon rejects the control token. */
 function badTokenMessage(deps: CliDeps): string {
   const tokenPath = path.join(deps.dataDir, CONTROL_TOKEN_FILE);
   return (
@@ -1089,6 +1114,11 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       return runUpgrade(rest, deps);
     case "fleet":
       return runFleet(rest, deps);
+    case "daemon":
+      return runDaemon(rest, deps, {
+        daemonEntryPath: deps.daemonEntryPath ?? defaultDaemonEntryPath(),
+        badTokenMessage: badTokenMessage(deps),
+      });
     default:
       deps.stderr(USAGE);
       return 2;

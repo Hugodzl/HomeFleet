@@ -103,6 +103,7 @@ function fakeControlClient(
       size: 1234,
     }),
     upgrades: async () => null,
+    shutdown: async () => ({ pid: 1234, alreadyStopping: false }),
     ...overrides,
   };
 }

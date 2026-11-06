@@ -128,6 +128,16 @@ export interface ControlClientLike {
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
   prepareUpgrade(input?: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   upgrades(): Promise<RolloutStatus | null>;
+  /**
+   * Asks the daemon to shut down gracefully (`POST /control/shutdown`);
+   * resolves the pid that is exiting (`alreadyStopping` when an earlier
+   * request started it). Refusals reject with a {@link ControlRequestError}:
+   * 409 `busy` (jobs running, no force), `upgrading` or `unsupported`; 404
+   * from an older daemon without the route.
+   */
+  shutdown(input?: {
+    force?: boolean;
+  }): Promise<{ pid: number; alreadyStopping: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +252,9 @@ function validateControlStatus(json: unknown): ControlStatus {
   if (json.availableUpgrade !== undefined) {
     assertString(json.availableUpgrade, "availableUpgrade", "status");
   }
+  if (json.pid !== undefined) {
+    assertNumber(json.pid, "pid", "status");
+  }
   return json as unknown as ControlStatus;
 }
 
@@ -323,7 +336,7 @@ function validateUnpairSummary(json: unknown): UnpairSummary {
   };
 }
 
-/** The token header, for upgrade POSTs only — never on a GET. */
+/** The token header, for the upgrade and shutdown POSTs only — never on a GET. */
 function tokenHeader(
   options: ControlClientOptions,
   method: string,
@@ -331,7 +344,11 @@ function tokenHeader(
 ): Record<string, string> {
   if (
     method !== "POST" ||
-    !(path === "/control/upgrade" || path.startsWith("/control/upgrade/"))
+    !(
+      path === "/control/upgrade" ||
+      path.startsWith("/control/upgrade/") ||
+      path === "/control/shutdown"
+    )
   ) {
     return {};
   }
@@ -492,6 +509,20 @@ export class ControlClient implements ControlClientLike {
       input,
     );
     return validatePreparedUpgrade(json);
+  }
+
+  async shutdown(
+    input: { force?: boolean } = {},
+  ): Promise<{ pid: number; alreadyStopping: boolean }> {
+    const json = await controlRequest(
+      this.options,
+      "POST",
+      "/control/shutdown",
+      input.force === true ? { force: true } : {},
+    );
+    assertIsObject(json, "shutdown");
+    assertNumber(json.pid, "pid", "shutdown");
+    return { pid: json.pid, alreadyStopping: json.alreadyStopping === true };
   }
 
   async upgrades(): Promise<RolloutStatus | null> {

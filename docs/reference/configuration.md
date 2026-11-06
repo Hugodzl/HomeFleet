@@ -63,6 +63,13 @@ your own terminal. If a daemon already lived inside a package, copy that
 private folder into `%LOCALAPPDATA%\homefleet` from a process outside the
 app (e.g. a scheduled task) before starting it normally.
 
+`homefleet daemon start` checks for this. It writes a probe file to
+`%LOCALAPPDATA%` and looks for it under `%LOCALAPPDATA%\Packages\*\LocalCache\Local`.
+If the probe shows up there, `start` refuses, unless it can run the
+`HomeFleet Daemon` task (the task runs outside any package).
+`homefleet daemon status` prints a note when it runs inside a package.
+`--allow-packaged` starts the daemon anyway.
+
 ## Parsing rules (read this before editing `config.json`)
 
 - **A missing `config.json` is fine.** No file yields every default below — a
