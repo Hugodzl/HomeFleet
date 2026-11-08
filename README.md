@@ -31,7 +31,7 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
 > v0.7.0 adds **`homefleet daemon start|stop|restart|status`** — run the
 > daemon in the background and stop it gracefully, without hand-written
 > `Start-Process` lines (on Windows through the autostart task when present;
-> its rig check is still pending).
+> checked on the laptop, [daemon devlog](devlog/2026-11-08-daemon-command.md)).
 > All of it has run on real hardware, laptop ↔ tower against a local
 > Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
 > ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
