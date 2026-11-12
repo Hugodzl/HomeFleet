@@ -12,7 +12,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "pack:release": "tsx scripts/pack-release.ts",
-    "sign:release": "tsx scripts/sign-release.ts",
+    "sign:release": "node scripts/sign-release.mjs",
     "verify:release": "tsx scripts/verify-release.ts",
     "release:keygen": "tsx scripts/release-keygen.ts"
   },
