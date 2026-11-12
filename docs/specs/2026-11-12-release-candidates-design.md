@@ -138,7 +138,26 @@ is the product change plus the RC workflow.
    the environment's branch policy, so the approval is the only stop.
    Reword it to say that, and say what Hugo should check before approving
    (the run's commit is on `main`).
-8. **Immutable releases.** Hugo turns the repo setting on (Settings →
+8. **Make CI gate merges into `main`.** Checked in the browser on
+   2026-11-12: the classic rule on `main` blocks force-pushes and deletion
+   (admins included), but requires no PR and no status checks. A red CI
+   therefore doesn't block a merge, and any session holding Hugo's
+   credentials can push straight to `main`. Hugo changes the rule (Settings
+   → Branches → `main` → Edit) once PR 1's new jobs have run at least once,
+   because GitHub only offers checks it has seen:
+   - **Require a pull request before merging**, with **0 required
+     approvals**. GitHub never lets an author approve their own PR, so any
+     higher number would block every merge in a solo repo.
+   - **Require status checks to pass**, listing `test (ubuntu-latest)`,
+     `test (windows-latest)` and the zizmor job. Keep "Require branches to
+     be up to date before merging" on.
+   - Keep the force-push and deletion blocks and "Do not allow bypassing".
+
+   Tags are unaffected: `v*` tags are still pushed directly. Release-prep
+   commits already go on the feature PR (`releasing.md`), so the flow
+   doesn't change. `releasing.md` records the rule, so a session that hits
+   "push to main rejected" knows why.
+9. **Immutable releases.** Hugo turns the repo setting on (Settings →
    General → Releases). The publish step must attach all assets at creation:
    an immutable Release can't get assets after it is published. The builder
    verifies how `gh release create` with files behaves under immutability
@@ -306,6 +325,9 @@ today. The first real candidate is the next release that needs one.
   running; there is none when those are unknown.
 - Candidate pushes never fall back to GitHub.
 - `zizmor` blocks merges; Dependabot runs weekly, grouped.
+- Branch rule: "Require branches to be up to date" stays on.
+
+Decided by Hugo: `main` requires a PR (0 approvals) and passing CI checks.
 - PR 1 before PR 2.
 
 ## Left to the builder
