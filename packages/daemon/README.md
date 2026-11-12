@@ -178,21 +178,71 @@ homefleet pair connect <host> <port> <code> [--expect <deviceId>]
 homefleet nodes
     List this node's paired peers (from the running daemon).
 
+homefleet unpair <name|deviceId> [--yes]
+    Revoke THIS node's trust in a paired peer, on the running daemon: the
+    peer's requests are refused from now on and its jobs here are
+    canceled. <deviceId> may be a unique prefix (8+ hex chars). Without
+    --yes, prints what it would unpair and changes nothing. One-sided:
+    run it on the peer too to end trust both ways.
+
 homefleet status
     Show this node's live status (from the running daemon).
 
+homefleet dashboard [--no-open]
+    Print the running daemon's read-only dashboard URL and open it in
+    the default browser (--no-open: print only).
+
+homefleet upgrade [--to <version>] [--check] [--force]
+    Upgrade THIS node's running daemon to the latest signed release (or
+    --to <version>), restart it in the background, and wait until it is
+    back. Rolls back automatically if the new version fails to start.
+    --check only reports whether an upgrade is available; --force
+    upgrades even while jobs are running.
+
+homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]
+    Roll the latest signed release (or --to <version>) out across the
+    fleet: paired peers one at a time, THIS node last, stopping at the
+    first failure. --nodes limits it to the named peers (names or id
+    prefixes); --force-local upgrades this node even while jobs run.
+    Peers must have "upgrade.allowRemote" enabled.
+
+homefleet daemon start [--allow-packaged]
+    Start THIS data dir's daemon in the background and wait until it
+    answers. On Windows it runs the "HomeFleet Daemon" autostart task when
+    one is registered (and HOMEFLEET_DATA_DIR is unset); otherwise it
+    launches homefleetd detached. Refuses inside a packaged (MSIX) app
+    such as the Claude desktop app unless --allow-packaged.
+
+homefleet daemon stop [--force]
+    Shut the running daemon down gracefully and wait until it has exited.
+    Refuses while jobs are running unless --force.
+
+homefleet daemon restart [--force] [--allow-packaged]
+    stop, then start.
+
+homefleet daemon status
+    Whether a daemon answers for this data dir, its pid and version, and
+    where its logs are. Exit code 3 when it is not running.
+
 homefleet --help
     Show this usage text.
+
+homefleet --version
+    Print the CLI version and exit.
 ```
 
 `setup` only prints commands and reads local config/identity — no daemon
-needed. `pair`, `nodes`, and `status` all talk to the **running daemon's
-control API** (below), because pairing state and live status/node data only
-exist in that running process.
+needed. Every other command talks to the **running daemon's control API**
+(below), because pairing state, live status, node data, jobs and upgrades only
+exist in that running process. `daemon start` is the exception that launches
+one: it starts the daemon, then polls the control API until it answers.
+
+This block is the CLI's own `--help` text. `pnpm check:docs` (and `pnpm test`)
+fails when the two drift, so a new command has to land here too.
 
 ## Control API
 
-`pair`/`nodes`/`status` reach the daemon over a small loopback-only HTTP API
+The CLI reaches the daemon over a small loopback-only HTTP API
 (`control.host`/`control.port`, default `127.0.0.1:56373` — see
 [ADR-0006](../../docs/adr/0006-daemon-assembly-and-control-channel.md) for why
 this is a separate channel from MCP and HFP). It is not meant to be called
