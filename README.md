@@ -6,49 +6,47 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.7.0 — pre-alpha.** The product spine is complete — identity,
-> mTLS transport, LAN discovery, executors, job dispatch, the MCP front door,
-> workspace (git bundle) sync, the single-process daemon assembly, and the
-> `homefleet` operator CLI. v0.2 added **code-writing delegation**: a worker's
-> local model edits code in a throwaway worktree and the change comes back as a
-> reviewable `homefleet/<id>` branch in your own repo, landed by a non-forced
-> fetch that never touches your branches or working tree. v0.3 made it a
-> **packaged install** — one `npm i -g` of a GitHub Release tarball, no clone or
-> build — and gave each node an enforced **per-node model catalog** (HFP 0.3.0).
-> v0.4 added a **read-only web dashboard** — `homefleet dashboard` opens this
-> node, paired nodes, and jobs in both directions in a browser, served on the
-> existing loopback control port, polling every 3 s with no mutating request
-> (v0.6 added the upgrade buttons).
-> v0.5 added **signed releases and self-upgrade** — `homefleet upgrade`
-> verifies a release against a pinned Ed25519 key, installs it, restarts the
-> daemon and rolls back if the new version fails — plus `homefleet unpair`.
-> v0.5.2 adds **fleet push** (HFP 0.4.0) — `homefleet fleet upgrade` rolls a
-> release across your paired nodes from one terminal. Peers opt in with
-> `"upgrade": { "allowRemote": true }`.
-> v0.6 adds **upgrade from the dashboard** — Upgrade all, a per-node button or
-> this node's own button, with a verify-then-confirm dialog and live progress —
-> guarded by a per-boot control token.
-> v0.7.0 adds **`homefleet daemon start|stop|restart|status`** — run the
-> daemon in the background and stop it gracefully, without hand-written
-> `Start-Process` lines (on Windows through the autostart task when present;
-> checked on the laptop, [daemon devlog](devlog/2026-11-08-daemon-command.md)).
-> All of it has run on real hardware, laptop ↔ tower against a local
-> Qwen3.6-35B-A3B: recon returned an accurate architecture summary in ~105 s
-> ([rig devlog](devlog/2026-07-09-m8-rig-bringup.md)), a scoped write task
-> wrote a new test file that landed and passed in ~169 s
-> ([write-delegation rig devlog](devlog/2026-07-15-v02-rig-smoke.md)), both
-> rig machines installed v0.3 from its public release URL and passed delegation
-> in both directions, and the dashboard showed a live delegated job reach
-> `succeeded` against the tower ([dashboard devlog](devlog/2026-09-24-read-only-dashboard.md)),
-> and both machines self-upgraded 0.5.0 → 0.5.1 and rolled back a
-> deliberately broken build ([self-upgrade devlog](devlog/2026-10-22-first-self-upgrade.md)),
-> and the laptop pushed v0.5.3 to the tower with `homefleet fleet upgrade` in
-> 14 s ([fleet-push devlog](devlog/2026-10-23-first-fleet-push.md)), and its
-> dashboard pushed v0.6.1 to both nodes with **Upgrade all**, reloading itself
-> onto the new version ([dashboard-upgrade devlog](devlog/2026-11-02-dashboard-upgrade.md)).
-> Windows-first; not on the npm registry yet. The
-> [Quickstart](#quickstart) runs today on a single machine; pairing two real
-> machines is the [two-machine demo](#two-machine-demo).
+> **Status: v0.7.0 — pre-alpha.** Windows-first; installed from a GitHub
+> Release, not from the npm registry yet. The [Quickstart](#quickstart) runs on a
+> single machine; pairing two real machines is the
+> [two-machine demo](#two-machine-demo). What changed in each version is on the
+> [Releases page](https://github.com/Hugodzl/HomeFleet/releases).
+
+## What it does today
+
+- **Delegates three kinds of job** to a paired machine: read-only repo
+  **recon** driven by its local model, allowlisted **command** runs (test
+  suites, builds), and code-**writing** tasks whose result comes back as a
+  reviewable `homefleet/<id>` branch in your own repo. See [Job types](#job-types).
+- **Pairs machines on your LAN** with mDNS discovery, a short pairing code and
+  mutual TLS. There is no CA and no account. `homefleet unpair` revokes a
+  pairing.
+- **Enforces a per-node model catalog.** Each node advertises the models it
+  serves, and a job asking for a model the node doesn't have is denied.
+- **Shows the fleet in a web dashboard** (`homefleet dashboard`): this node,
+  paired nodes, and jobs in both directions, served by the local daemon on
+  127.0.0.1.
+- **Upgrades itself from signed releases.** `homefleet upgrade` checks a
+  release against a pinned Ed25519 key, installs it, restarts the daemon and
+  rolls back if the new version fails to start. `homefleet fleet upgrade`, or
+  **Upgrade all** in the dashboard, rolls a release across the fleet.
+- **Runs in the background** with `homefleet daemon start|stop|restart|status`.
+
+### Proven on real hardware
+
+Each milestone ran on a two-machine rig (a laptop and a tower) against a
+local Qwen3.6-35B-A3B:
+
+| Version | What ran | Devlog |
+|---|---|---|
+| v0.1 | Recon returned an accurate architecture summary in ~105 s | [rig bring-up](devlog/2026-07-09-m8-rig-bringup.md) |
+| v0.2 | A write task added a test file that landed and passed in ~169 s | [write-delegation smoke](devlog/2026-07-15-v02-rig-smoke.md) |
+| v0.3 | Both machines installed from the public release URL; delegation worked in both directions | [packaging](devlog/2026-09-22-s1-packaging.md) |
+| v0.4 | The dashboard showed a live delegated job reach `succeeded` on the tower | [dashboard](devlog/2026-09-24-read-only-dashboard.md) |
+| v0.5 | Both machines self-upgraded 0.5.0 → 0.5.1 and rolled back a deliberately broken build | [self-upgrade](devlog/2026-10-22-first-self-upgrade.md) |
+| v0.5.3 | The laptop pushed the release to the tower with `homefleet fleet upgrade` in 14 s | [fleet push](devlog/2026-10-23-first-fleet-push.md) |
+| v0.6.1 | **Upgrade all** in the dashboard upgraded both nodes, and the page reloaded onto the new version | [dashboard upgrade](devlog/2026-11-02-dashboard-upgrade.md) |
+| v0.7.0 | `homefleet daemon` started and stopped the daemon through the autostart task (laptop) | [daemon command](devlog/2026-11-08-daemon-command.md) |
 
 Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
 [ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),
@@ -81,18 +79,22 @@ HomeFleet is that missing thin layer:
 
 One daemon per machine. On your machine it faces your agent as an MCP server; on workers it executes delegated jobs — read-only repo recon driven by a local model, allowlisted commands (test suites, builds), or code-**writing** tasks that come back as reviewable `homefleet/<id>` branches (v0.2). Code travels as git bundles; nothing needs a shared remote.
 
-## v0.1 scope
+## Job types
 
-- Delegate **recon** tasks ("explore this repo, summarize the auth flow") to a worker's local model
-- Delegate **command** runs ("run the test suite") to any paired machine
-- Live node list with capability info, job status/streaming, cancellation
-- Windows-first reference setup; code is cross-platform TypeScript
+- **Recon** ("explore this repo, summarize the auth flow"): the worker's
+  local model reads a synced copy of the repo and writes back a report.
+- **Command** ("run the test suite"): the worker runs a command from its
+  allowlist. No model needed.
+- **Write** ("add a test for X"): the worker's local model changes the code,
+  and the change comes back as a branch for you to review.
 
-Explicit non-goals for v0.1: code-**writing** delegation (added in v0.2, below), GUI, cloud relay. See the [design doc](docs/specs/2026-07-06-homefleet-design.md) and [roadmap](#roadmap).
+Out of scope for now: a cloud relay (jobs never leave your LAN). See the
+[design doc](docs/specs/2026-07-06-homefleet-design.md) and the
+[roadmap](#roadmap).
 
-## v0.2: code-writing delegation
+### Code-writing delegation
 
-Workers can now *write* code, not just read it. Configure `executors.write` on a worker (a [catalog](docs/reference/configuration.md#catalog) `defaultModel` plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
+Workers can write code, not just read it. Configure `executors.write` on a worker (a [catalog](docs/reference/configuration.md#catalog) `defaultModel` plus an optional command allowlist) and `delegate_task` accepts `type: "write"` tasks. From there the flow is three steps: the worker's local model makes the requested change in an isolated, throwaway worktree of the synced repo; the daemon commits the result as `HomeFleet Worker`; and the next `job_result` call lands the change in *your* clone as a branch named `homefleet/<jobId12>` — your own branches and working tree are never touched. Review it with the exact command `job_result` returns (`git diff <base>...homefleet/<id>`), then merge or delete the branch. An optional allowlisted `verifyCommand` runs after the commit and reports its outcome without ever failing the job. Config shape, the git-in-allowlist caveat, and the artifact-lifecycle rules are in the [configuration reference](docs/reference/configuration.md#executorswrite).
 
 ## Install
 
@@ -261,7 +263,9 @@ rates, and the Windows MAX_PATH lesson it surfaced are in the
    `workspace.allowedRepoIds`; give the delegating machine a `repos` mapping
    naming the same repoId (see the Quickstart's examples and the
    [configuration reference](docs/reference/configuration.md)). Only then
-   start `homefleetd` — config is read once at startup, not reloaded.
+   start the daemon with `homefleet daemon start` (or run `homefleetd` in a
+   terminal to watch it in the foreground). Config is read once at startup:
+   after editing it, run `homefleet daemon restart`.
 2. **Pair them.** On machine B (the worker), open a pairing window:
    ```bash
    homefleet pair begin
@@ -334,9 +338,29 @@ Everything is testable on a single machine — integration tests run multiple da
 
 ## Roadmap
 
-v0.1 (recon + command delegation) → v0.2 code-writing delegation (branches back — done) → per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md) — done, v0.3) → packaging ([S1](docs/specs/2026-07-12-s1-packaging-design.md) — done, v0.3) → painless install → dashboard ([read-only](docs/specs/2026-09-24-read-only-dashboard-design.md) — done, v0.4; mutations next as S2 + A1) → unpair a node ([A1's first mutation](docs/specs/2026-09-25-unpair-node-design.md) — done, v0.5) → fleet upgrade ([spec](docs/specs/2026-09-25-fleet-upgrade-design.md) — signed releases + local `homefleet upgrade` done, v0.5; fleet push `homefleet fleet upgrade` done, v0.5.2; dashboard trigger done, v0.6) → remote model install. The post-v0.2 ordering was approved 2026-07-12 — see the [backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md); A2 landed ahead of that sequencing.
+Done:
 
-Longer horizon, not yet sequenced against the above: macOS/Linux polish, multi-node fan-out, model-pool orchestration on the same fabric.
+- **v0.1** recon and command delegation
+- **v0.2** code-writing delegation (branches come back to your repo)
+- **v0.3** per-node model catalog ([A2](docs/specs/2026-07-21-model-catalog-design.md))
+  and packaged install from a GitHub Release ([S1](docs/specs/2026-07-12-s1-packaging-design.md))
+- **v0.4** [read-only dashboard](docs/specs/2026-09-24-read-only-dashboard-design.md)
+- **v0.5** [unpair a node](docs/specs/2026-09-25-unpair-node-design.md), signed
+  releases and `homefleet upgrade` ([fleet upgrade spec](docs/specs/2026-09-25-fleet-upgrade-design.md));
+  v0.5.2 added `homefleet fleet upgrade`
+- **v0.6** upgrades from the dashboard
+- **v0.7** `homefleet daemon start|stop|restart|status` ([spec](docs/specs/2026-11-05-daemon-lifecycle-command-design.md)),
+  the first step of node lifecycle automation
+
+Still open from the approved order ([backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md),
+2026-07-12): painless install and fleet expansion (B1, beyond the v0.3
+packaging), the rest of the fleet-management mutations (A1), and remote model
+install (A3). The rest of node lifecycle automation (autostart for real,
+supervising the model server, versions in `homefleet nodes`) is in the
+[backlog](docs/backlog.md).
+
+Longer horizon, not yet sequenced: macOS/Linux polish, multi-node fan-out,
+model-pool orchestration on the same fabric.
 
 Unordered ideas and known follow-ups live in the [backlog](docs/backlog.md).
 
