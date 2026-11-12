@@ -1,37 +1,34 @@
 /**
- * Structural guards on .github/workflows (spec 2026-11-12, PR 1). Plain text
- * parsing, no YAML dependency: jobs are the 2-space-indented keys under
- * `jobs:`. These pin the properties a future edit could silently undo —
- * above all that the job holding the release key installs nothing.
+ * Structural guards on the real .github/workflows files (spec 2026-11-12,
+ * PR 1). The guards live in workflow-guards.ts and are tested on bad text in
+ * workflow-guards.test.ts. These pin the properties a future edit could
+ * silently undo — above all that the job holding the release key installs
+ * nothing and is the only one that can read it.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
+import { expect, test } from "vitest";
+import {
+  parseJobs,
+  releaseEnvironmentHolders,
+  releaseKeyUsers,
+  signJobViolations,
+  topLevelPermissions,
+} from "./workflow-guards.js";
 
 const dir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../.github/workflows",
 );
 const workflows = readdirSync(dir)
-  .filter((f) => f.endsWith(".yml"))
+  .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
   .map((f) => ({
     name: f,
     text: readFileSync(path.join(dir, f), "utf8").replaceAll("\r\n", "\n"),
   }));
 const release = workflows.find((w) => w.name === "release.yml")?.text ?? "";
-
-function jobs(text: string): Map<string, string> {
-  const body = text.slice(text.indexOf("\njobs:\n") + 7);
-  const result = new Map<string, string>();
-  const header = /^ {2}([a-z][\w-]*):\s*$/gm;
-  const marks = [...body.matchAll(header)];
-  marks.forEach((m, i) => {
-    const end = marks[i + 1]?.index ?? body.length;
-    result.set(m[1] as string, body.slice(m.index, end));
-  });
-  return result;
-}
+const ci = workflows.find((w) => w.name === "ci.yml")?.text ?? "";
 
 /** The lines of a `- uses:` step block, up to the next sibling step or key. */
 function stepBlocks(text: string, action: string): string[] {
@@ -64,59 +61,72 @@ test("every remote action is pinned to a commit SHA", () => {
   }
 });
 
-describe("the job holding the release environment installs nothing", () => {
-  const all = jobs(release);
-  const holders = [...all].filter(([, t]) => /environment: release\b/.test(t));
+test("only release.yml's sign job uses the release environment", () => {
+  expect(releaseEnvironmentHolders(workflows)).toEqual(["release.yml#sign"]);
+});
 
-  test("exactly one job, named sign", () => {
-    expect(holders.map(([id]) => id)).toEqual(["sign"]);
-  });
+test("only release.yml's sign job can reach the release key", () => {
+  expect(releaseKeyUsers(workflows)).toEqual(["release.yml#sign"]);
+});
 
-  test("no install, no dependency cache, no pnpm", () => {
-    const sign = all.get("sign") ?? "";
-    for (const banned of [
-      "pnpm install",
-      "npm i",
-      "npm ci",
-      "pnpm/action-setup",
-    ]) {
-      expect(sign, banned).not.toContain(banned);
-    }
-    // No `cache: <pm>`, and setup-node's automatic cache explicitly off.
-    expect(sign).not.toMatch(/^\s+cache:/m);
-    expect(sign).toContain("package-manager-cache: false");
-  });
+test("the sign job is minimal: allowed actions, one signer command, no cache", () => {
+  expect(signJobViolations(parseJobs(release).get("sign") ?? "")).toEqual([]);
+});
 
-  test("checks out exactly the signer and version.ts", () => {
-    const sign = all.get("sign") ?? "";
-    const lines = sign.split("\n");
-    const at = lines.findIndex((l) => /sparse-checkout: \|/.test(l));
-    expect(at).toBeGreaterThan(-1);
-    const indent = (lines[at] as string).search(/\S/);
-    const paths: string[] = [];
-    for (const l of lines.slice(at + 1)) {
-      if (l.trim() === "" || l.search(/\S/) <= indent) break;
-      paths.push(l.trim());
-    }
-    expect(paths.sort()).toEqual([
-      "packages/protocol/src/version.ts",
-      "scripts/sign-release.mjs",
-    ]);
-  });
+test("the sign job checks out exactly the signer and version.ts", () => {
+  const lines = (parseJobs(release).get("sign") ?? "").split("\n");
+  const at = lines.findIndex((l) => /sparse-checkout: \|/.test(l));
+  expect(at).toBeGreaterThan(-1);
+  const indent = (lines[at] as string).search(/\S/);
+  const paths: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() === "" || l.search(/\S/) <= indent) break;
+    paths.push(l.trim());
+  }
+  expect(paths.sort()).toEqual([
+    "packages/protocol/src/version.ts",
+    "scripts/sign-release.mjs",
+  ]);
+});
+
+test("workflow-level permissions are exactly contents: read", () => {
+  for (const { name, text } of workflows) {
+    expect(topLevelPermissions(text), name).toEqual(["contents: read"]);
+  }
 });
 
 test("only the release job can write", () => {
   for (const { name, text } of workflows) {
-    expect(text, name).toMatch(/^permissions:\n {2}contents: read$/m);
-    for (const [id, body] of jobs(text)) {
+    for (const [id, body] of parseJobs(text)) {
       if (name === "release.yml" && id === "release") continue;
-      expect(body, `${name} job ${id}`).not.toMatch(/:\s*write\b/);
+      expect(body, `${name} job ${id}`).not.toMatch(/:\s*write\b|write-all/);
     }
   }
 });
 
 test("pack checks the tag is on main before anything is signed", () => {
-  expect(jobs(release).get("pack")).toContain("merge-base --is-ancestor");
+  expect(parseJobs(release).get("pack")).toContain("merge-base --is-ancestor");
+});
+
+test("only a tag push publishes; release runs never overlap", () => {
+  const job = parseJobs(release).get("release") ?? "";
+  expect(job).toMatch(
+    /^ {4}if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)$/m,
+  );
+  expect(release).toMatch(
+    /^concurrency:\n {2}group: release-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: false$/m,
+  );
+});
+
+test("publish treats only 'release not found' as no release", () => {
+  const job = parseJobs(release).get("release") ?? "";
+  expect(job).toContain("release not found");
+  expect(job).not.toMatch(/gh release view[^\n]*2>\/dev\/null/);
+});
+
+test("the zizmor gate runs a pinned zizmor version", () => {
+  const job = parseJobs(ci).get("zizmor") ?? "";
+  expect(job).toMatch(/^\s+version: \d+\.\d+\.\d+$/m);
 });
 
 test("every checkout drops its credentials", () => {

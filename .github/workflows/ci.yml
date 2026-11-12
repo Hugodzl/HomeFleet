@@ -33,7 +33,10 @@ jobs:
 
   # Static analysis of the workflows themselves (unpinned actions, excess
   # permissions, template injection, cache poisoning…). Findings fail the
-  # job: advanced-security off = plain output with a real exit code.
+  # job: advanced-security off = plain output with a real exit code. The
+  # zizmor version is pinned because this workflow is also the release gate:
+  # a new upstream audit must not fail an already-pushed tag. Bump it
+  # deliberately, in a PR.
   zizmor:
     runs-on: ubuntu-latest
     steps:
@@ -43,3 +46,4 @@ jobs:
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
           advanced-security: false
+          version: 1.32.0

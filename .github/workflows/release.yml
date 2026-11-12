@@ -1,9 +1,9 @@
 name: Release
 
-# A v* tag packs, signs, verifies, smokes and publishes a GitHub Release. Run
-# it by hand (workflow_dispatch) on main to exercise everything except the
-# Release itself. Job chain: gate → pack → sign → verify + smoke → release
-# (docs/reference/releasing.md).
+# A v* tag push packs, signs, verifies, smokes and publishes a GitHub Release.
+# Run it by hand (workflow_dispatch) on main to exercise everything except the
+# Release itself: a manual run never publishes, on any ref. Job chain:
+# gate → pack → sign → verify + smoke → release (docs/reference/releasing.md).
 on:
   push:
     tags: ["v*"]
@@ -11,6 +11,12 @@ on:
 
 permissions:
   contents: read
+
+# One run per ref at a time, queued, never cancelled: two runs for the same
+# tag must not race the draft delete/create in `release`.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   gate:
@@ -180,7 +186,8 @@ jobs:
 
   release:
     needs: [verify, smoke]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A manual run never publishes, even when dispatched on a tag ref.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -211,11 +218,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
-          if draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+          # Only gh's "release not found" means there is no Release yet; any
+          # other failure (network, auth, rate limit) stops the run.
+          if draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>"$RUNNER_TEMP/view.err")"; then
             if [ "$draft" != "true" ]; then
               echo "::error::release $tag is already published"; exit 1
             fi
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
+          elif ! grep -q "release not found" "$RUNNER_TEMP/view.err"; then
+            cat "$RUNNER_TEMP/view.err" >&2
+            echo "::error::could not check for an existing release $tag"; exit 1
           fi
           notes="docs/releases/$tag.md"
           tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
