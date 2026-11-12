@@ -1,8 +1,9 @@
 name: Release
 
-# A v* tag packs, smokes and publishes a GitHub Release. Run it by hand
-# (workflow_dispatch) to exercise pack + smoke on the current branch without
-# creating a Release.
+# A v* tag packs, signs, verifies, smokes and publishes a GitHub Release. Run
+# it by hand (workflow_dispatch) on main to exercise everything except the
+# Release itself. Job chain: gate → pack → sign → verify + smoke → release
+# (docs/reference/releasing.md).
 on:
   push:
     tags: ["v*"]
@@ -13,24 +14,27 @@ permissions:
 
 jobs:
   gate:
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
 
+  # Builds the tarball. Holds NO secret: everything with installed
+  # dependencies runs here or in `verify`, never next to the signing key.
   pack:
     needs: gate
     runs-on: ubuntu-latest
-    # The signing key is an ENVIRONMENT secret, not a repo secret: only runs
-    # from main or a v* tag may use this environment, and each one waits for
-    # a maintainer's approval, so a workflow edited on any other branch can
-    # never read the key (docs/reference/releasing.md).
-    environment: release
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+          fetch-depth: 0
+          persist-credentials: false
+      # Catches a tag pushed on a branch commit by mistake. Not a defense
+      # against an edited workflow (it could drop this step): Hugo's approval
+      # of the `release` environment is that gate.
+      - name: The tagged commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
       # Fail before packing, not after the smoke: a Release must never go out
       # with a missing or mis-titled notes file (see docs/reference/releasing.md).
       - name: Release notes exist and are titled "# HomeFleet <tag> — …"
@@ -40,6 +44,14 @@ jobs:
           test -f "$notes" || { echo "::error::missing $notes"; exit 1; }
           head -n 1 "$notes" | grep -q "^# HomeFleet $GITHUB_REF_NAME — ." \
             || { echo "::error::$notes must start with '# HomeFleet $GITHUB_REF_NAME — <theme>'"; exit 1; }
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      # No dependency cache in any release job (package-manager-cache: false):
+      # a cache written by an untrusted run must never feed the build that ships.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
       - name: Pack (tag must match the daemon version)
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -47,25 +59,77 @@ jobs:
           else
             pnpm pack:release
           fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: homefleet-tarball
+          path: release/homefleet-*.tgz
+          if-no-files-found: error
+
+  # The ONLY job that can read the signing key. The key is an ENVIRONMENT
+  # secret: the environment admits only main and v* tags and waits for
+  # Hugo's approval. This job installs nothing — no pnpm, no node_modules, no
+  # cache — and checks out just the dependency-free signer and the file it
+  # reads the HFP version from, so no npm dependency ever runs next to the
+  # key. scripts/lib/workflows.test.ts pins all of this.
+  sign:
+    needs: pack
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: |
+            scripts/sign-release.mjs
+            packages/protocol/src/version.ts
+          sparse-checkout-cone-mode: false
+          path: src
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homefleet-tarball
+          path: release
       # Signed manifest + detached Ed25519 signature (fleet-upgrade spec,
-      # Phase 1). Verified straight away against the key PINNED in the
-      # daemon source, so a secret/key mismatch fails here, before publish.
+      # Phase 1).
       - name: Sign the tarball
         env:
           HOMEFLEET_RELEASE_KEY: ${{ secrets.HOMEFLEET_RELEASE_KEY }}
-        run: pnpm sign:release release/homefleet-*.tgz
-      - name: Verify the signature against the pinned public key
-        run: pnpm verify:release release/homefleet-*.tgz
-      - uses: actions/upload-artifact@v4
+        run: node src/scripts/sign-release.mjs release/homefleet-*.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: homefleet-tarball
+          name: homefleet-release
           path: release/homefleet-*
           if-no-files-found: error
+
+  # Verified against the key PINNED in the daemon source, so a secret/key
+  # mismatch fails here, before publish. Has dependencies, no secret.
+  verify:
+    needs: sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homefleet-release
+          path: release
+      - name: Verify the signature against the pinned public key
+        run: pnpm verify:release release/homefleet-*.tgz
 
   # Install the REAL artifact the way a user does: no checkout, no pnpm,
   # deps from the registry, npm-generated shims. Node 20 = the documented floor.
   smoke:
-    needs: pack
+    needs: sign
     strategy:
       fail-fast: false
       matrix:
@@ -75,15 +139,18 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
-      - uses: actions/download-artifact@v4
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: homefleet-tarball
+          name: homefleet-release
           path: release
       - name: Global install
-        run: npm i -g ./release/homefleet-*.tgz
+        # Deliberately ad hoc: install the artifact exactly as a user does,
+        # deps resolved from the registry.
+        run: npm i -g ./release/homefleet-*.tgz # zizmor: ignore[adhoc-packages]
       - name: Bins print their exact version (exit 0 alone is not enough)
         run: |
           version="$(basename release/homefleet-*.tgz .tgz)"
@@ -92,11 +159,12 @@ jobs:
           test "$(homefleetd --version)" = "homefleetd $version"
           command -v homefleet-mcp-stdio
       # Only the smoke script — still no pnpm install on this runner.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           sparse-checkout: scripts/smoke-installed.mjs
           sparse-checkout-cone-mode: false
           path: src
+          persist-credentials: false
       - name: Run the installed product (daemon, CLI, stdio MCP shim)
         run: |
           version="$(basename release/homefleet-*.tgz .tgz)"
@@ -111,27 +179,48 @@ jobs:
           if ((homefleetd --version) -ne "homefleetd $version") { exit 1 }
 
   release:
-    needs: smoke
+    needs: [verify, smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           sparse-checkout: docs/releases
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: homefleet-tarball
+          name: homefleet-release
           path: release
+      # Build provenance (SLSA Build L2): which commit and workflow run built
+      # these bytes. Check with `gh attestation verify <file> -R <repo>`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/homefleet-*.tgz
+            release/homefleet-*.manifest.json
+      # Draft first, assets attached, then publish: an immutable Release
+      # can't gain assets once published. A re-run after a failed publish
+      # replaces the leftover draft; a PUBLISHED Release is never touched.
       # Title = the notes file's first line without "# "; body = the rest.
-      - name: Create the GitHub Release
+      - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="docs/releases/$GITHUB_REF_NAME.md"
+          tag="$GITHUB_REF_NAME"
+          if draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$draft" != "true" ]; then
+              echo "::error::release $tag is already published"; exit 1
+            fi
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          notes="docs/releases/$tag.md"
           tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" release/homefleet-* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag \
+          gh release create "$tag" release/homefleet-* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$(head -n 1 "$notes" | sed 's/^# //')" \
             --notes-file "$RUNNER_TEMP/notes.md"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
