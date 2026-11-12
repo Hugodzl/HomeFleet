@@ -88,6 +88,11 @@ async function main() {
   }
 
   const { sha256, size } = await hashFile(tarballPath);
+  // ReleaseManifestSchema requires a positive size: never sign what the
+  // verifier would reject.
+  if (size === 0) {
+    throw new Error(`${tarballPath} is empty`);
+  }
   // Same fixed key order + trailing newline as serializeManifest().
   const manifestBytes = Buffer.from(
     `${JSON.stringify({ version, file, sha256, size, hfpVersion: await hfpVersion() })}\n`,

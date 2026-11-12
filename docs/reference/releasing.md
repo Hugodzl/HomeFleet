@@ -169,7 +169,8 @@ Anyone can check a downloaded release two ways:
 - **The provenance attestation:**
   `gh attestation verify homefleet-X.Y.Z.tgz -R Hugodzl/HomeFleet` (also
   works for the `.manifest.json`). That proves which commit and which
-  workflow run built them (SLSA Build L2).
+  workflow run built them (SLSA Build L2). Releases up to v0.7.0 have no
+  attestation; the first release cut after this pipeline change does.
 
 Neither one replaces the other.
 

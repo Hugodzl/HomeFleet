@@ -184,6 +184,15 @@ test("refuses a tarball not named homefleet-X.Y.Z.tgz", async () => {
   expect(out.stderr).toMatch(/homefleet-X\.Y\.Z\.tgz/);
 });
 
+test("refuses an empty tarball", async () => {
+  const box = await sandbox();
+  await writeFile(box.tarball, "");
+  const out = run(box, [box.tarball], generateReleaseKeyPair().privateKeyPem);
+  expect(out.code).toBe(1);
+  expect(out.stderr).toMatch(/^sign-release: .*empty/);
+  expect(existsSync(manifestOf(box))).toBe(false);
+});
+
 test("reads the HFP version from a CRLF version.ts", async () => {
   const box = await sandbox();
   const lf = (await readFile(box.versionTs, "utf8")).replaceAll("\r\n", "\n");

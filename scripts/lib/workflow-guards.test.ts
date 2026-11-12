@@ -73,9 +73,9 @@ describe("releaseKeyUsers", () => {
       {
         name: "b.yml",
         text: wf(
-          "  leak:\n    steps:\n      - env:\n          K: ${{ secrets.HOMEFLEET_RELEASE_KEY }}\n" +
+          `  leak:\n    steps:\n      - env:\n          K: \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n` +
             "  inherit:\n    uses: $/.github/workflows/x.yml\n    secrets: inherit\n" +
-            "  dyn:\n    steps:\n      - run: echo ${{ toJSON(secrets) }}\n",
+            `  dyn:\n    steps:\n      - run: echo \${{ toJSON(secrets) }}\n`,
         ),
       },
     ]);
@@ -162,6 +162,6 @@ describe("topLevelPermissions", () => {
 
 test("parseJobs splits jobs at 2-space keys under jobs:", () => {
   expect([
-    ...parseJobs(wf(goodSign + "  b:\n    runs-on: x\n")).keys(),
+    ...parseJobs(wf(`${goodSign}  b:\n    runs-on: x\n`)).keys(),
   ]).toEqual(["sign", "b"]);
 });

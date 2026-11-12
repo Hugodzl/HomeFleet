@@ -103,14 +103,17 @@ npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homef
 ```
 
 (the exact URL is on the [Releases page](https://github.com/Hugodzl/HomeFleet/releases)).
-Every release is signed and carries a build-provenance attestation: anyone can
-check a downloaded tarball with `gh attestation verify homefleet-<version>.tgz -R Hugodzl/HomeFleet`.
 That puts `homefleetd`, `homefleet` and `homefleet-mcp-stdio` on your PATH.
 To update an installed node (v0.5.0 or later), run `homefleet upgrade`: it
 downloads the latest release, checks its signature, installs it, restarts
 the daemon in the background and rolls back automatically if the new
 version fails to start. `homefleet upgrade --check` only reports what is
 available. Upgrading *to* v0.5.0 is the last manual `npm i -g`.
+
+Every release is signed (that's what `homefleet upgrade` checks). Releases
+after v0.7.0 also carry a build-provenance attestation, so anyone can check
+which commit and workflow built a downloaded tarball with
+`gh attestation verify homefleet-<version>.tgz -R Hugodzl/HomeFleet`.
 
 To upgrade the whole fleet from one node, run `homefleet fleet upgrade`
 (optionally `--to <version>`, or `--nodes <name|id>…` to pick peers). The
