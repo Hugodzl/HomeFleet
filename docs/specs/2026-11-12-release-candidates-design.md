@@ -1,7 +1,8 @@
 # Release candidates and release-pipeline hardening — design
 
-**Status:** proposed (2026-11-12). Brainstormed with Hugo after a research
-pass on current CI/release practice (summary in [Background](#background)).
+**Status:** PR 1 (hardening) implemented 2026-11-12, PR #25; PR 2 (release
+candidates) not started. Brainstormed with Hugo after a research pass on
+current CI/release practice (summary in [Background](#background)).
 
 ## Why
 
