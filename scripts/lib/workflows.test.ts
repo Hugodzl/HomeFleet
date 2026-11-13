@@ -124,9 +124,25 @@ test("publish treats only 'release not found' as no release", () => {
   expect(job).not.toMatch(/gh release view[^\n]*2>\/dev\/null/);
 });
 
-test("the zizmor gate runs a pinned zizmor version", () => {
+test("every workflow parses into jobs (a guard that sees no jobs checks nothing)", () => {
+  for (const { name, text } of workflows) {
+    expect(parseJobs(text).size, name).toBeGreaterThan(0);
+  }
+});
+
+test("the zizmor gate runs a pinned zizmor version, offline", () => {
   const job = parseJobs(ci).get("zizmor") ?? "";
   expect(job).toMatch(/^\s+version: \d+\.\d+\.\d+$/m);
+  // ci.yml is also the release gate: a new online advisory must not fail an
+  // already-pushed tag.
+  expect(job).toMatch(/^\s+online-audits: false$/m);
+});
+
+test("online zizmor audits run on pull requests only, never in the release gate", () => {
+  const job = parseJobs(ci).get("zizmor-online") ?? "";
+  expect(job).toMatch(/^ {4}if: github\.event_name == 'pull_request'$/m);
+  expect(job).toMatch(/^\s+version: \d+\.\d+\.\d+$/m);
+  expect(job).not.toMatch(/online-audits: false/);
 });
 
 test("every checkout drops its credentials", () => {

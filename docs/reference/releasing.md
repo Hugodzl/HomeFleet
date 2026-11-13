@@ -180,7 +180,9 @@ Neither one replaces the other.
 lets an author approve their own PR. The checks `test (ubuntu-latest)`,
 `test (windows-latest)` and `zizmor` must pass, and the branch must be up to
 date. Force-pushes and deletion are blocked, admins included. So a rejected
-direct push to `main` is this rule, not a fault: open a PR. Tags aren't
+direct push to `main` is this rule, not a fault: open a PR. The `zizmor-online`
+check (zizmor's network audits, pull requests only) is advisory, not
+required: the release gate runs zizmor offline so it stays deterministic. Tags aren't
 covered, and `v*` tags are still pushed directly.
 
 ## If the tag was wrong
