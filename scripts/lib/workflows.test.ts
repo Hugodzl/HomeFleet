@@ -14,6 +14,7 @@ import {
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
+  reusableWorkflowViolations,
   signJobViolations,
   topLevel,
   topLevelPermissions,
@@ -84,6 +85,10 @@ test("only release.yml's sign job uses the release environment", () => {
 
 test("only release.yml's sign job can reach the release key", () => {
   expect(releaseKeyUsers(workflows)).toEqual(["release.yml#sign"]);
+});
+
+test("reusable workflow calls name only workflows these tests scan", () => {
+  expect(reusableWorkflowViolations(workflows)).toEqual([]);
 });
 
 test("the sign job is minimal: allowlisted actions and inputs, one signer command", () => {

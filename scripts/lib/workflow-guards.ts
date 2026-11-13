@@ -30,10 +30,12 @@ const SIGN_SPARSE = [
 ];
 
 /**
- * The only actions the `sign` job may use, each with the only `with:` inputs
- * it may set. `required` inputs must have exactly that value. Anything else —
- * a checkout `repository`/`ref`/`token`, a cache, a download from another
- * run — is a violation.
+ * The only actions the `sign` job may use (each at most once), each with the
+ * only `with:` inputs it may set. `required` inputs must be present with
+ * exactly that value, so paths and artifact names are pinned: nothing
+ * downloaded can land where the signer command looks for its script.
+ * Anything else — a checkout `repository`/`ref`/`token`, a cache, a download
+ * from another run, an expression value — is a violation.
  */
 const SIGN_ACTIONS: Record<
   string,
@@ -46,16 +48,23 @@ const SIGN_ACTIONS: Record<
       "path",
       "persist-credentials",
     ],
-    required: { "persist-credentials": false },
+    required: {
+      "persist-credentials": false,
+      path: "src",
+      "sparse-checkout-cone-mode": false,
+    },
   },
   "actions/setup-node": {
     allowed: ["node-version", "package-manager-cache"],
     required: { "package-manager-cache": false },
   },
-  "actions/download-artifact": { allowed: ["name", "path"], required: {} },
+  "actions/download-artifact": {
+    allowed: ["name", "path"],
+    required: { name: "homefleet-tarball", path: "release" },
+  },
   "actions/upload-artifact": {
     allowed: ["name", "path", "if-no-files-found"],
-    required: {},
+    required: { name: "homefleet-release" },
   },
 };
 
@@ -173,7 +182,7 @@ export function releaseEnvironmentHolders(workflows: Workflow[]): string[] {
 }
 
 const KEY_REFERENCE =
-  /secrets\s*\.\s*HOMEFLEET_RELEASE_KEY|secrets\s*\[|toJSON\(\s*secrets\s*\)/i;
+  /secrets\s*\.\s*HOMEFLEET_RELEASE_KEY|secrets\s*\.\s*\*|secrets\s*\[|toJSON\(\s*secrets\s*\)/i;
 
 /** Every string key and value inside a parsed value. */
 function strings(value: unknown): string[] {
@@ -232,6 +241,11 @@ function actionStepViolations(step: YamlMap, i: number): string[] {
     if (!rules.allowed.includes(key))
       problems.push(`${where}: ${action} input ${key} not allowed`);
   }
+  for (const [key, value] of Object.entries(inputs)) {
+    if (typeof value === "string" && value.includes("${{")) {
+      problems.push(`${where}: ${action} input ${key} must be a literal`);
+    }
+  }
   for (const [key, value] of Object.entries(rules.required)) {
     if (inputs[key] !== value) {
       problems.push(
@@ -239,7 +253,7 @@ function actionStepViolations(step: YamlMap, i: number): string[] {
       );
     }
   }
-  if ("sparse-checkout" in inputs) {
+  if (action === "actions/checkout") {
     const paths =
       typeof inputs["sparse-checkout"] === "string"
         ? inputs["sparse-checkout"]
@@ -300,7 +314,17 @@ export function signJobViolations(job: unknown): string[] {
   const steps = Array.isArray(job.steps) ? job.steps : [];
   if (steps.length === 0) problems.push("no steps");
   let runSteps = 0;
+  const actionsSeen = new Set<string>();
   steps.forEach((step: unknown, i: number) => {
+    const action =
+      isPlainMap(step) && typeof step.uses === "string"
+        ? step.uses.split("@")[0]
+        : undefined;
+    if (action !== undefined) {
+      if (actionsSeen.has(action))
+        problems.push(`step ${i + 1}: ${action} used twice`);
+      actionsSeen.add(action);
+    }
     if (!isPlainMap(step)) {
       problems.push(`step ${i + 1}: not a map`);
     } else if ("uses" in step && !("run" in step)) {
@@ -314,5 +338,35 @@ export function signJobViolations(job: unknown): string[] {
   });
   if (runSteps !== 1)
     problems.push(`expected exactly one run step, found ${runSteps}`);
+  return problems;
+}
+
+const LOCAL_WORKFLOW =
+  /^[.$]\/\.github\/workflows\/([\w-]+(?:\.[\w-]+)*\.ya?ml)$/;
+
+/**
+ * A job-level `uses:` (a reusable workflow) may only name a workflow of this
+ * repo that the guards themselves scan: `./` or `$/` + `.github/workflows/`
+ * + one of the scanned file names. A remote workflow — even this repo's at
+ * another SHA — could hold the `release` environment unseen, since a called
+ * workflow's environment resolves against the caller's repo.
+ */
+export function reusableWorkflowViolations(workflows: Workflow[]): string[] {
+  const scanned = new Set(workflows.map((w) => w.name));
+  const problems: string[] = [];
+  for (const { name, text } of workflows) {
+    for (const [id, job] of parseJobs(text)) {
+      if (!isPlainMap(job) || !("uses" in job)) continue;
+      const file =
+        typeof job.uses === "string"
+          ? LOCAL_WORKFLOW.exec(job.uses)?.[1]
+          : undefined;
+      if (file === undefined || !scanned.has(file)) {
+        problems.push(
+          `${name}#${id}: reusable workflow not allowed: ${String(job.uses)}`,
+        );
+      }
+    }
+  }
   return problems;
 }

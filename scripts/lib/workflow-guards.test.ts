@@ -9,6 +9,7 @@ import {
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
+  reusableWorkflowViolations,
   SIGN_RUN,
   signJobViolations,
   topLevelPermissions,
@@ -53,9 +54,15 @@ const goodSign = `  sign:
           if-no-files-found: error
 `;
 
-/** signJobViolations of the `sign` job in `text` (a whole workflow). */
-const signOf = (text: string): string =>
-  signJobViolations(parseJobs(text).get("sign")).join("\n");
+/**
+ * signJobViolations of the `sign` job in `text` (a whole workflow). The text
+ * must parse cleanly, so a case proves the check it names instead of passing
+ * through a YAML syntax error.
+ */
+const signOf = (text: string): string => {
+  expect(workflowProblems(text), "test YAML must parse cleanly").toEqual([]);
+  return signJobViolations(parseJobs(text).get("sign")).join("\n");
+};
 
 const holders = (text: string) =>
   releaseEnvironmentHolders([{ name: "a.yml", text }]);
@@ -221,7 +228,7 @@ describe("signJobViolations", () => {
     [
       "a flow-map env",
       `        env:\n          HOMEFLEET_RELEASE_KEY: \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n`,
-      `        env:\n          { HOMEFLEET_RELEASE_KEY: \${{ secrets.HOMEFLEET_RELEASE_KEY }}, NODE_OPTIONS: x }\n`,
+      `        env:\n          { HOMEFLEET_RELEASE_KEY: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}", NODE_OPTIONS: x }\n`,
     ],
     [
       "a key taken from somewhere else",
@@ -323,7 +330,12 @@ describe("signJobViolations", () => {
       "        env:\n",
       "        env:\r          NODE_OPTIONS: x\r",
     );
-    expect(signOf(wf(sneaky))).not.toBe("");
+    // YAML reads a lone CR as a line break: the parse or the sign check fails.
+    const text = wf(sneaky);
+    const caught =
+      workflowProblems(text).length > 0 ||
+      signJobViolations(parseJobs(text).get("sign")).length > 0;
+    expect(caught).toBe(true);
   });
 
   test("a block-scalar step name does not hide the keys after it", () => {
@@ -391,4 +403,105 @@ describe("workflowLevelViolations: nothing at the top level may reach every job"
       0,
     );
   });
+});
+
+// Review loop, round 1.
+describe("reusableWorkflowViolations: a job may only call a workflow of this repo that the guards scan", () => {
+  const scanned = (calls: string) => [
+    { name: "a.yml", text: wf(`  x:\n    uses: ${calls}\n`) },
+    { name: "ci.yml", text: wf("  t:\n    runs-on: x\n") },
+  ];
+
+  test.each([
+    ["./.github/workflows/ci.yml"],
+    ["$/.github/workflows/ci.yml"],
+  ])("accepts %s", (ref) => {
+    expect(reusableWorkflowViolations(scanned(ref))).toEqual([]);
+  });
+
+  test.each([
+    [`evil/repo/.github/workflows/w.yml@${SHA}`],
+    [`Hugodzl/HomeFleet/.github/workflows/w.yml@${SHA}`],
+    ["./.github/workflows/unscanned.yml"],
+    ["$/.github/workflows/../workflows/ci.yml"],
+    ["./other/ci.yml"],
+  ])("flags %s", (ref) => {
+    expect(reusableWorkflowViolations(scanned(ref)).length).toBeGreaterThan(0);
+  });
+});
+
+describe("sign job: paths, artifacts and the sparse checkout are pinned", () => {
+  test.each([
+    [
+      "checkout into another path",
+      "          path: src\n",
+      "          path: other\n",
+    ],
+    [
+      "download into the script dir",
+      "          name: homefleet-tarball\n          path: release\n",
+      "          name: homefleet-tarball\n          path: src/scripts\n",
+    ],
+    [
+      "download another artifact",
+      "          name: homefleet-tarball\n",
+      "          name: something-else\n",
+    ],
+    ["download every artifact", "          name: homefleet-tarball\n", ""],
+    [
+      "upload under another name",
+      "          name: homefleet-release\n",
+      "          name: other\n",
+    ],
+    [
+      "no sparse checkout at all",
+      "          sparse-checkout: |\n            scripts/sign-release.mjs\n            packages/protocol/src/version.ts\n",
+      "",
+    ],
+    [
+      "cone mode on",
+      "          sparse-checkout-cone-mode: false\n",
+      "          sparse-checkout-cone-mode: true\n",
+    ],
+    [
+      "cone mode left to its default",
+      "          sparse-checkout-cone-mode: false\n",
+      "",
+    ],
+    [
+      "an expression input",
+      "          node-version: 22\n",
+      `          node-version: \${{ inputs.node }}\n`,
+    ],
+  ])("flags %s", (_label, from, to) => {
+    expect(goodSign).toContain(from);
+    expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
+  });
+
+  test("flags a second checkout step", () => {
+    const second = `      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          path: other\n          persist-credentials: false\n`;
+    expect(
+      signOf(
+        wf(
+          goodSign.replace(
+            "      - name: Sign the tarball\n",
+            `${second}      - name: Sign the tarball\n`,
+          ),
+        ),
+      ),
+    ).not.toBe("");
+  });
+});
+
+test("releaseKeyUsers finds secrets.* (every secret at once)", () => {
+  expect(
+    releaseKeyUsers([
+      {
+        name: "a.yml",
+        text: wf(
+          `  x:\n    steps:\n      - run: echo "\${{ join(secrets.*, ',') }}"\n`,
+        ),
+      },
+    ]),
+  ).toEqual(["a.yml#x"]);
 });
