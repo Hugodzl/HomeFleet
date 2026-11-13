@@ -11,6 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
+  actionRefMismatches,
+  dangerousTriggers,
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
@@ -27,7 +29,7 @@ const dir = path.resolve(
   "../../.github/workflows",
 );
 const workflows = readdirSync(dir)
-  .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+  .filter((f) => /\.ya?ml$/i.test(f))
   .map((f) => ({ name: f, text: readFileSync(path.join(dir, f), "utf8") }));
 const text = (name: string) =>
   workflows.find((w) => w.name === name)?.text ?? "";
@@ -89,6 +91,23 @@ test("only release.yml's sign job can reach the release key", () => {
 
 test("reusable workflow calls name only workflows these tests scan", () => {
   expect(reusableWorkflowViolations(workflows)).toEqual([]);
+});
+
+test("every action runs at one single ref across all workflows", () => {
+  expect(actionRefMismatches(workflows)).toEqual([]);
+});
+
+test("no workflow runs on pull_request_target or workflow_run", () => {
+  for (const { name, text } of workflows) {
+    expect(dangerousTriggers(text), name).toEqual([]);
+  }
+});
+
+test("release.yml runs only on a v* tag push or by hand", () => {
+  expect(topLevel(release, "on")).toEqual({
+    push: { tags: ["v*"] },
+    workflow_dispatch: null,
+  });
 });
 
 test("the sign job is minimal: allowlisted actions and inputs, one signer command", () => {

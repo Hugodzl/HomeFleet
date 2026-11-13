@@ -6,6 +6,8 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  actionRefMismatches,
+  dangerousTriggers,
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
@@ -504,4 +506,136 @@ test("releaseKeyUsers finds secrets.* (every secret at once)", () => {
       },
     ]),
   ).toEqual(["a.yml#x"]);
+});
+
+// Review loop, round 2.
+describe("characters where YAML parsers disagree on line breaks are rejected", () => {
+  test.each([
+    ["NEL U+0085", "\u0085"],
+    ["LS U+2028", "\u2028"],
+    ["PS U+2029", "\u2029"],
+    ["a C0 control", "\u0007"],
+    ["a C1 control", "\u0090"],
+    ["a bidi override", "\u202E"],
+    ["a bidi isolate", "\u2066"],
+    ["a BOM after the start", "\uFEFF"],
+  ])("flags %s", (_label, ch) => {
+    const text = wf(goodSign).replace(
+      "      - name: Sign the tarball\n",
+      `      - name: Sign the tarball # x${ch}        shell: npx -y evil {0}\n`,
+    );
+    expect(workflowProblems(text).length).toBeGreaterThan(0);
+  });
+
+  test("ordinary non-ASCII text in comments is fine", () => {
+    expect(
+      workflowProblems(
+        wf(`${goodSign}  b: # gate — then pack…\n    runs-on: x\n`),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("releaseKeyUsers: any secrets use in an expression outside sign counts", () => {
+  test.each([
+    ["parentheses", `\${{ (secrets).HOMEFLEET_RELEASE_KEY }}`],
+    ["toJSON with parentheses", `\${{ toJSON((secrets)) }}`],
+    ["another secret name", `\${{ secrets.OTHER }}`],
+    ["upper case", `\${{ SECRETS.HOMEFLEET_RELEASE_KEY }}`],
+  ])("finds %s", (_label, expr) => {
+    expect(
+      releaseKeyUsers([
+        { name: "a.yml", text: wf(`  x:\n    env:\n      K: "${expr}"\n`) },
+      ]),
+    ).toEqual(["a.yml#x"]);
+  });
+
+  test("secrets.GITHUB_TOKEN alone is allowed", () => {
+    expect(
+      releaseKeyUsers([
+        {
+          name: "a.yml",
+          text: wf(`  x:\n    env:\n      K: "\${{ secrets.GITHUB_TOKEN }}"\n`),
+        },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("sign job: environment and upload are pinned", () => {
+  test.each([
+    [
+      "an expression environment",
+      "    environment: release\n",
+      `    environment: \${{ needs.pack.outputs.e }}\n`,
+    ],
+    [
+      "an environment map with a url",
+      "    environment: release\n",
+      "    environment:\n      name: release\n      url: https://x\n",
+    ],
+    [
+      "uploading src",
+      "          path: release/homefleet-*\n",
+      "          path: src\n",
+    ],
+    [
+      "upload not failing on no files",
+      "          if-no-files-found: error\n",
+      "          if-no-files-found: warn\n",
+    ],
+  ])("flags %s", (_label, from, to) => {
+    expect(goodSign).toContain(from);
+    expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
+  });
+});
+
+describe("actionRefMismatches: one ref per action across all workflows", () => {
+  const OTHER = "1111111111111111111111111111111111111111";
+  test("the same ref everywhere passes", () => {
+    expect(
+      actionRefMismatches([
+        { name: "a.yml", text: wf(goodSign) },
+        {
+          name: "b.yml",
+          text: wf(`  c:\n    steps:\n      - uses: actions/checkout@${SHA}\n`),
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("an action at two different SHAs is flagged", () => {
+    expect(
+      actionRefMismatches([
+        { name: "a.yml", text: wf(goodSign) },
+        {
+          name: "b.yml",
+          text: wf(
+            `  c:\n    steps:\n      - uses: actions/checkout@${OTHER}\n`,
+          ),
+        },
+      ]).length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("dangerousTriggers", () => {
+  test.each([
+    ["pull_request_target", "on:\n  pull_request_target:\n"],
+    ["workflow_run", "on:\n  workflow_run:\n    workflows: [x]\n"],
+    ["a list form", "on: [push, pull_request_target]\n"],
+    ["a string form", "on: workflow_run\n"],
+  ])("flags %s", (_label, on) => {
+    expect(
+      dangerousTriggers(`name: x\n${on}jobs:\n  a:\n    runs-on: x\n`).length,
+    ).toBeGreaterThan(0);
+  });
+
+  test("push, pull_request and workflow_dispatch are fine", () => {
+    expect(
+      dangerousTriggers(
+        "name: x\non:\n  push:\n  pull_request:\n  workflow_dispatch:\njobs:\n  a:\n    runs-on: x\n",
+      ),
+    ).toEqual([]);
+  });
 });

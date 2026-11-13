@@ -64,7 +64,11 @@ const SIGN_ACTIONS: Record<
   },
   "actions/upload-artifact": {
     allowed: ["name", "path", "if-no-files-found"],
-    required: { name: "homefleet-release" },
+    required: {
+      name: "homefleet-release",
+      path: "release/homefleet-*",
+      "if-no-files-found": "error",
+    },
   },
 };
 
@@ -81,9 +85,24 @@ const WORKFLOW_KEYS = new Set([
 const isPlainMap = (v: unknown): v is YamlMap =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
+/**
+ * Characters where YAML parsers disagree: `yaml` (YAML 1.2) does not break
+ * lines on NEL/LS/PS, but GitHub's and zizmor's libyaml-style parsers do, so
+ * text hidden after one in a comment would be YAML to GitHub only. Also C0/C1
+ * controls, bidi overrides/isolates (Trojan Source) and a BOM after the
+ * start. Tab, LF and CR are fine; so is ordinary non-ASCII text.
+ */
+const DIVERGENT_CHARS =
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]|[\s\S]\uFEFF/;
+
 function load(text: string): { root: unknown; problems: string[] } {
   const doc = parseDocument(text, { uniqueKeys: true, merge: false });
   const problems = [
+    ...(DIVERGENT_CHARS.test(text)
+      ? [
+          "a control, line-separator or bidi character where YAML parsers disagree",
+        ]
+      : []),
     ...doc.errors.map((e) => `YAML error: ${e.message}`),
     ...doc.warnings.map((w) => `YAML warning: ${w.message}`),
   ];
@@ -194,8 +213,24 @@ function strings(value: unknown): string[] {
   return [];
 }
 
+/**
+ * True for an expression that uses `secrets` in any way except
+ * `secrets.GITHUB_TOKEN`: grouping like `(secrets).X` or `toJSON((secrets))`
+ * can't then slip past a pattern.
+ */
+function usesSecrets(s: string): boolean {
+  for (const m of s.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    const expr = (m[1] as string).replace(
+      /\bsecrets\s*\.\s*GITHUB_TOKEN\b/gi,
+      "",
+    );
+    if (/\bsecrets\b/i.test(expr)) return true;
+  }
+  return false;
+}
+
 const reachesKey = (value: unknown): boolean =>
-  strings(value).some((s) => KEY_REFERENCE.test(s)) ||
+  strings(value).some((s) => KEY_REFERENCE.test(s) || usesSecrets(s)) ||
   (isPlainMap(value) && value.secrets === "inherit");
 
 /**
@@ -306,6 +341,11 @@ export function signJobViolations(job: unknown): string[] {
   for (const key of Object.keys(job)) {
     if (!SIGN_JOB_KEYS.has(key)) problems.push(`job-level ${key} not allowed`);
   }
+  if (job.environment !== "release") {
+    problems.push(
+      `environment must be exactly release, found ${JSON.stringify(job.environment)}`,
+    );
+  }
   if (job["runs-on"] !== "ubuntu-latest") {
     problems.push(
       `runs-on must be ubuntu-latest, found ${JSON.stringify(job["runs-on"])}`,
@@ -369,4 +409,53 @@ export function reusableWorkflowViolations(workflows: Workflow[]): string[] {
     }
   }
   return problems;
+}
+
+/**
+ * Every remote action must use one single ref across all workflows, so the
+ * sign job's actions are the same reviewed commits the rest of CI runs (and
+ * an impostor SHA in one place stands out). Dependabot bumps them together.
+ */
+export function actionRefMismatches(workflows: Workflow[]): string[] {
+  const refs = new Map<string, Set<string>>();
+  for (const { text } of workflows) {
+    for (const job of parseJobs(text).values()) {
+      if (!isPlainMap(job)) continue;
+      const uses = [
+        job.uses,
+        ...(Array.isArray(job.steps)
+          ? job.steps.map((st) => (isPlainMap(st) ? st.uses : undefined))
+          : []),
+      ];
+      for (const ref of uses) {
+        if (typeof ref !== "string" || /^[.$]\//.test(ref)) continue;
+        const [action = ref] = ref.split("@");
+        refs.set(action, (refs.get(action) ?? new Set()).add(ref));
+      }
+    }
+  }
+  return [...refs]
+    .filter(([, set]) => set.size > 1)
+    .map(
+      ([action, set]) =>
+        `${action} used at ${set.size} refs: ${[...set].join(", ")}`,
+    );
+}
+
+const DANGEROUS_TRIGGERS = ["pull_request_target", "workflow_run"];
+
+/** Triggers that run a workflow with this repo's secrets on another party's input. */
+export function dangerousTriggers(text: string): string[] {
+  const on = rootOf(text).on;
+  const events =
+    typeof on === "string"
+      ? [on]
+      : Array.isArray(on)
+        ? on.map(String)
+        : isPlainMap(on)
+          ? Object.keys(on)
+          : [];
+  return events
+    .filter((e) => DANGEROUS_TRIGGERS.includes(e))
+    .map((e) => `trigger ${e} not allowed`);
 }
