@@ -200,3 +200,53 @@ test("every checkout drops its credentials", () => {
     expect(step.with?.["persist-credentials"], where).toBe(false);
   }
 });
+
+// Review loop, round 5: pin the verify-before-publish link.
+const downloads = (id: string) =>
+  (job(release, id).steps ?? [])
+    .filter((s) => actionOf(s.uses) === "actions/download-artifact")
+    .map((s) => s.with?.name);
+
+test("verify, smoke and release use the tarball and the signature, signature last", () => {
+  for (const id of ["verify", "smoke", "release"]) {
+    expect(downloads(id), id).toEqual([
+      "homefleet-tarball",
+      "homefleet-signature",
+    ]);
+  }
+  expect(job(release, "release").needs).toEqual(["verify", "smoke"]);
+});
+
+test("verify checks the real tarball against the signed manifest", () => {
+  const runs = (job(release, "verify").steps ?? []).map((s) => s.run ?? "");
+  expect(runs).toContain("pnpm verify:release release/homefleet-*.tgz");
+});
+
+test("the Release gets only the three signed-release file kinds", () => {
+  const runs = (job(release, "release").steps ?? []).map((s) => s.run ?? "");
+  const publish = runs.find((r) => r.includes("gh release create")) ?? "";
+  const create = publish.slice(publish.indexOf("gh release create"));
+  const files = create
+    .slice(0, create.indexOf("--repo"))
+    .split(/\s+/)
+    .filter((w) => w.startsWith("release/"));
+  expect(files).toEqual([
+    "release/homefleet-*.tgz",
+    "release/homefleet-*.manifest.json",
+    "release/homefleet-*.manifest.sig",
+  ]);
+});
+
+test("the signature artifact expires after a day", () => {
+  const upload = (job(release, "sign").steps ?? []).find(
+    (s) => actionOf(s.uses) === "actions/upload-artifact",
+  );
+  expect(upload?.with?.["retention-days"]).toBe(1);
+});
+
+test("pack's digest step fails when no tarball matches", () => {
+  const step = (job(release, "pack").steps ?? []).find(
+    (s) => s.id === "digest",
+  );
+  expect(step?.run).toContain("shopt -s nullglob");
+});

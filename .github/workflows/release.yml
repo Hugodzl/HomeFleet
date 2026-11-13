@@ -74,14 +74,17 @@ jobs:
         id: digest
         run: |
           set -euo pipefail
+          shopt -s nullglob
           files=(release/homefleet-*.tgz)
           [ "${#files[@]}" -eq 1 ] || { echo "::error::expected exactly one tarball"; exit 1; }
           f="${files[0]}"
           v="${f#release/homefleet-}"
+          sha256="$(sha256sum "$f" | cut -d' ' -f1)"
+          size="$(stat -c %s "$f")"
           {
             echo "version=${v%.tgz}"
-            echo "sha256=$(sha256sum "$f" | cut -d' ' -f1)"
-            echo "size=$(stat -c %s "$f")"
+            echo "sha256=$sha256"
+            echo "size=$size"
           } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -130,6 +133,9 @@ jobs:
             release/homefleet-*.manifest.json
             release/homefleet-*.manifest.sig
           if-no-files-found: error
+          # A signed manifest is a credential: keep it only as long as the
+          # run needs it (a re-run after a day starts from the tag again).
+          retention-days: 1
 
   # Verified against the key PINNED in the daemon source, so a secret/key
   # mismatch fails here, before publish. Has dependencies, no secret.

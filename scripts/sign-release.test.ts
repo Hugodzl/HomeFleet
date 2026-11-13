@@ -73,7 +73,11 @@ function run(
   key?: string,
   extraEnv: Record<string, string> = {},
 ): { code: number; stdout: string; stderr: string } {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // The suite itself runs in CI, where GITHUB_REF may name a tag: only the
+  // test's own extraEnv decides it here.
+  delete env.GITHUB_REF;
+  Object.assign(env, extraEnv);
   delete env.HOMEFLEET_RELEASE_KEY;
   if (key !== undefined) env.HOMEFLEET_RELEASE_KEY = key;
   try {
@@ -340,5 +344,37 @@ describe("--digest <dir>: sign a version, sha256 and size, no file", () => {
     );
     expect(out.code).toBe(1);
     expect(out.stderr).toMatch(/usage/);
+  });
+});
+
+describe("--digest on a tag run: the version must be the tag's", () => {
+  async function signWith(ref: string | undefined) {
+    const box = await sandbox();
+    const { sha256, size } = await hashFile(box.tarball);
+    return run(
+      box,
+      ["--digest", path.join(box.root, "signed")],
+      generateReleaseKeyPair().privateKeyPem,
+      {
+        HOMEFLEET_RELEASE_VERSION: "0.5.0",
+        HOMEFLEET_RELEASE_SHA256: sha256,
+        HOMEFLEET_RELEASE_SIZE: String(size),
+        ...(ref === undefined ? {} : { GITHUB_REF: ref }),
+      },
+    );
+  }
+
+  test("a different tag is refused", async () => {
+    const out = await signWith("refs/tags/v0.6.0");
+    expect(out.code).toBe(1);
+    expect(out.stderr).toMatch(/tag/);
+  });
+
+  test.each([
+    ["refs/tags/v0.5.0"],
+    ["refs/heads/main"],
+    [undefined],
+  ])("%s is accepted", async (ref) => {
+    expect((await signWith(ref)).code).toBe(0);
   });
 });

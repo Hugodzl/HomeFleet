@@ -83,6 +83,14 @@ function digestFromEnv() {
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
     throw new Error("HOMEFLEET_RELEASE_SHA256 is not 64 lower-case hex digits");
   }
+  // On a tag run (GitHub sets GITHUB_REF), sign only the tag's own version:
+  // a compromised pack can't get some other version signed by the approved run.
+  const ref = process.env.GITHUB_REF ?? "";
+  if (ref.startsWith("refs/tags/v") && ref !== `refs/tags/v${version}`) {
+    throw new Error(
+      `HOMEFLEET_RELEASE_VERSION ${version} is not the tag ${ref}`,
+    );
+  }
   const size = Number(sizeText);
   if (!/^[1-9]\d*$/.test(sizeText) || size > MAX_SIZE) {
     throw new Error(

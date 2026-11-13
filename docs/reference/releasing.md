@@ -147,7 +147,10 @@ verifies under a key pinned in
   value), so no file `pack` produced, whose job does run dependencies, can
   land next to the key and overwrite the signer or the Node it runs on. A
   `pack` that lies about the digest gets it signed but fails `verify`, which
-  hashes the real tarball before anything is published.
+  hashes the real tarball before anything is published. On a tag run the
+  signer signs only the tag's own version, and the signature artifact
+  expires after a day, so a bogus signed manifest can't linger. Re-running
+  the release more than a day later means re-running the whole workflow.
 - `scripts/lib/workflows.test.ts` pins all of this, reading the workflows
   with a real YAML parser (`yaml`, a dev dependency that never runs in
   `sign`).

@@ -55,6 +55,7 @@ const goodSign = `  sign:
             release/homefleet-*.manifest.json
             release/homefleet-*.manifest.sig
           if-no-files-found: error
+          retention-days: 1
 `;
 
 /**
@@ -752,4 +753,20 @@ test("a BOM at the very start is fine, a second one is not", () => {
   expect(
     workflowProblems(`\uFEFF\uFEFF${wf(goodSign)}`).length,
   ).toBeGreaterThan(0);
+});
+
+test("sign's signature upload must expire after a day", () => {
+  expect(
+    signOf(wf(goodSign.replace("          retention-days: 1\n", ""))),
+  ).not.toBe("");
+  expect(
+    signOf(
+      wf(
+        goodSign.replace(
+          "          retention-days: 1\n",
+          "          retention-days: 90\n",
+        ),
+      ),
+    ),
+  ).not.toBe("");
 });

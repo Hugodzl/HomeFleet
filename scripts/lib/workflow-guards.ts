@@ -71,10 +71,11 @@ const SIGN_ACTIONS: Record<
     required: { "node-version": 22, "package-manager-cache": false },
   },
   "actions/upload-artifact": {
-    allowed: ["name", "path", "if-no-files-found"],
+    allowed: ["name", "path", "if-no-files-found", "retention-days"],
     required: {
       name: "homefleet-signature",
       "if-no-files-found": "error",
+      "retention-days": 1,
     },
   },
 };
