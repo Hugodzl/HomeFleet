@@ -1,282 +1,318 @@
 /**
- * Text-level guards over GitHub workflow files (spec 2026-11-12, PR 1; PR 25
- * review and re-reviews). No YAML dependency, so the guards FAIL CLOSED:
- * workflows must be plain 2-space YAML (indentationProblems), structure is
- * read with `#` comments stripped, but key references are searched in the
- * RAW text, and any environment value that is not a plain name counts as
- * the release environment. Each guard is tested on bad text in
+ * Structural guards over GitHub workflow files (spec 2026-11-12, PR 1; PR 25
+ * review and re-reviews). The files are read with a real YAML parser
+ * (`yaml`, a test-only dev dependency), so quoting, spacing, flow maps,
+ * comments and line endings can't hide anything: the guards check the parsed
+ * structure, which is what GitHub runs. To keep that true they also reject
+ * YAML features where parsers may disagree (anchors, aliases, tags, merge
+ * keys, duplicate keys). Each guard is tested on bad text in
  * workflow-guards.test.ts and run on the real files in workflows.test.ts.
  */
+import { isAlias, isMap, isNode, isScalar, parseDocument, visit } from "yaml";
 
 export interface Workflow {
   name: string;
   text: string;
 }
 
+type YamlMap = Record<string, unknown>;
+
 /** The only command the key-holding `sign` job may run. */
 export const SIGN_RUN =
   "node src/scripts/sign-release.mjs release/homefleet-*.tgz";
 
-/** The only env var the key-holding `sign` job may set. */
-const SIGN_ENV = "HOMEFLEET_RELEASE_KEY";
-
-/** The only actions the key-holding `sign` job may use. */
-const SIGN_ACTIONS = new Set([
-  "actions/checkout",
-  "actions/setup-node",
-  "actions/download-artifact",
-  "actions/upload-artifact",
-]);
-
-/** Drop a `#` comment that starts the line or follows whitespace, outside quotes. */
-function stripComment(line: string): string {
-  let quote: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote !== undefined) {
-      if (c === quote) quote = undefined;
-    } else if (c === "'" || c === '"') {
-      quote = c;
-    } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1] as string))) {
-      return line.slice(0, i).trimEnd();
-    }
-  }
-  return line.trimEnd();
-}
-
-const indentOf = (line: string): number =>
-  line.length - line.trimStart().length;
-
-const toLines = (text: string): string[] =>
-  text.replaceAll("\r\n", "\n").split("\n");
-
-/** Comments stripped, CRLF removed. Indentation is left as is: see indentationProblems. */
-export function normalize(text: string): string {
-  return toLines(text).map(stripComment).join("\n");
-}
-
-const BLOCK_SCALAR = /:\s*[|>][-+0-9]*$/;
+const SIGN_KEY_ENV = "HOMEFLEET_RELEASE_KEY";
+// biome-ignore lint/suspicious/noTemplateCurlyInString: a literal GitHub expression
+const SIGN_KEY_VALUE = "${{ secrets.HOMEFLEET_RELEASE_KEY }}";
+const SIGN_SPARSE = [
+  "packages/protocol/src/version.ts",
+  "scripts/sign-release.mjs",
+];
 
 /**
- * Why this file is not plain 2-space YAML; empty when it is. Every
- * structural line is indented by an even number of spaces and at most one
- * level (2 spaces) deeper than the line it nests under; block-scalar bodies
- * (`run: |`) are free-form. The other guards assume this layout, so a file
- * that breaks it fails instead of being half-read.
+ * The only actions the `sign` job may use, each with the only `with:` inputs
+ * it may set. `required` inputs must have exactly that value. Anything else —
+ * a checkout `repository`/`ref`/`token`, a cache, a download from another
+ * run — is a violation.
  */
-export function indentationProblems(text: string): string[] {
-  const problems: string[] = [];
-  const lines = toLines(text).map(stripComment);
-  let parent = 0;
-  let scalarParent: number | undefined;
-  lines.forEach((line, i) => {
-    if (line.trim() === "") return;
-    const indent = indentOf(line);
-    if (scalarParent !== undefined) {
-      if (indent > scalarParent) return;
-      scalarParent = undefined;
-    }
-    if (indent % 2 !== 0) {
-      problems.push(`line ${i + 1}: odd indentation (${indent})`);
-    } else if (indent > parent + 2) {
-      problems.push(
-        `line ${i + 1}: indented ${indent - parent} spaces under its parent, not 2`,
-      );
-    }
-    const dash = /^\s*-\s+/.exec(line);
-    // Keys of a list item ("- uses: x" then "with:") sit 2 deeper than the dash.
-    parent = dash !== null ? indent + 2 : indent;
-    if (BLOCK_SCALAR.test(line)) scalarParent = indent;
+const SIGN_ACTIONS: Record<
+  string,
+  { allowed: string[]; required: Record<string, unknown> }
+> = {
+  "actions/checkout": {
+    allowed: [
+      "sparse-checkout",
+      "sparse-checkout-cone-mode",
+      "path",
+      "persist-credentials",
+    ],
+    required: { "persist-credentials": false },
+  },
+  "actions/setup-node": {
+    allowed: ["node-version", "package-manager-cache"],
+    required: { "package-manager-cache": false },
+  },
+  "actions/download-artifact": { allowed: ["name", "path"], required: {} },
+  "actions/upload-artifact": {
+    allowed: ["name", "path", "if-no-files-found"],
+    required: {},
+  },
+};
+
+const SIGN_JOB_KEYS = new Set(["needs", "runs-on", "environment", "steps"]);
+const WORKFLOW_KEYS = new Set([
+  "name",
+  "run-name",
+  "on",
+  "permissions",
+  "concurrency",
+  "jobs",
+]);
+
+const isPlainMap = (v: unknown): v is YamlMap =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+function load(text: string): { root: unknown; problems: string[] } {
+  const doc = parseDocument(text, { uniqueKeys: true, merge: false });
+  const problems = [
+    ...doc.errors.map((e) => `YAML error: ${e.message}`),
+    ...doc.warnings.map((w) => `YAML warning: ${w.message}`),
+  ];
+  visit(doc, {
+    Alias() {
+      problems.push("YAML alias not allowed");
+    },
+    Node(_key, node) {
+      if (isNode(node) && node.anchor)
+        problems.push(`YAML anchor &${node.anchor} not allowed`);
+      if (isNode(node) && node.tag !== undefined)
+        problems.push(`YAML tag ${node.tag} not allowed`);
+    },
+    Pair(_key, pair) {
+      const k = pair.key;
+      if (isAlias(k) || !isScalar(k) || typeof k.value !== "string") {
+        problems.push("YAML keys must be plain strings");
+      } else if (k.value === "<<") {
+        problems.push("YAML merge key << not allowed");
+      }
+    },
   });
+  if (!isMap(doc.contents)) problems.push("the workflow root is not a map");
+  let root: unknown;
+  try {
+    root = doc.toJS();
+  } catch (error) {
+    problems.push(`YAML could not be read: ${String(error)}`);
+  }
+  return { root, problems };
+}
+
+/** Why this file can't be trusted to read the same in the guards as on GitHub; empty when it can. */
+export function workflowProblems(text: string): string[] {
+  const { root, problems } = load(text);
+  const jobs = isPlainMap(root) ? root.jobs : undefined;
+  if (!isPlainMap(jobs) || Object.keys(jobs).length === 0) {
+    problems.push("`jobs` is not a non-empty map");
+  }
   return problems;
 }
 
-interface JobRange {
-  id: string;
-  start: number;
-  end: number;
+function rootOf(text: string): YamlMap {
+  const { root } = load(text);
+  return isPlainMap(root) ? root : {};
 }
 
-/** Line ranges of the jobs, found on the comment-stripped text; same line numbers as the raw text. */
-function jobRanges(lines: string[]): { jobsLine: number; jobs: JobRange[] } {
-  const jobsLine = lines.findIndex((l) => /^jobs:\s*$/.test(l));
-  if (jobsLine === -1) return { jobsLine: lines.length, jobs: [] };
-  const jobs: JobRange[] = [];
-  for (let i = jobsLine + 1; i < lines.length; i++) {
-    const m = /^ {2}([A-Za-z_][\w-]*):\s*$/.exec(lines[i] as string);
-    if (m === null) continue;
-    const last = jobs.at(-1);
-    if (last !== undefined) last.end = i;
-    jobs.push({ id: m[1] as string, start: i, end: lines.length });
-  }
-  return { jobsLine, jobs };
+export function parseJobs(text: string): Map<string, unknown> {
+  const jobs = rootOf(text).jobs;
+  return new Map(isPlainMap(jobs) ? Object.entries(jobs) : []);
 }
 
-function preamble(text: string): string {
-  const lines = toLines(normalize(text));
-  return lines.slice(0, jobRanges(lines).jobsLine).join("\n");
+/** Top-level keys a workflow may have: no `env` or `defaults`, which reach every job. */
+export function workflowLevelViolations(text: string): string[] {
+  return Object.keys(rootOf(text))
+    .filter((k) => !WORKFLOW_KEYS.has(k))
+    .map((k) => `workflow-level ${k}: not allowed`);
 }
 
-export function parseJobs(text: string): Map<string, string> {
-  const lines = toLines(normalize(text));
-  const result = new Map<string, string>();
-  for (const { id, start, end } of jobRanges(lines).jobs) {
-    result.set(id, lines.slice(start, end).join("\n"));
-  }
-  return result;
+/** A parsed workflow-level value (`permissions`, `concurrency`, …); undefined when absent. */
+export function topLevel(text: string, key: string): unknown {
+  return rootOf(text)[key];
 }
 
-const unquote = (v: string): string => v.trim().replace(/^(['"])(.*)\1$/, "$2");
-
-/** A plain environment name, or DYNAMIC for anything the guards can't read literally. */
-const DYNAMIC = "(not a plain name)";
-
-function plainName(value: string): string {
-  const v = unquote(value);
-  return /^[\w-]+$/.test(v) ? v.toLowerCase() : DYNAMIC;
+/** The parsed workflow-level `permissions:` value; undefined when absent. */
+export function topLevelPermissions(text: string): unknown {
+  return topLevel(text, "permissions");
 }
 
-function environmentName(job: string): string | undefined {
-  const m = /^ {4}environment:[ \t]*(.*)$/m.exec(job);
-  if (m === null) return undefined;
-  const value = (m[1] as string).trim();
-  if (value.startsWith("{")) {
-    if (!value.endsWith("}")) return DYNAMIC;
-    const name = /^\{\s*name:\s*([^,}]+?)\s*[,}]/.exec(value)?.[1];
-    return name === undefined ? DYNAMIC : plainName(name);
-  }
-  if (value !== "") return plainName(value);
-  const rest = job.slice(m.index + m[0].length + 1).split("\n");
-  for (const line of rest) {
-    if (line.trim() === "") continue;
-    if (indentOf(line) <= 4) break;
-    const name = /^ {6}name:[ \t]*(.+)$/.exec(line)?.[1];
-    if (name !== undefined) return plainName(name);
-  }
-  return DYNAMIC;
+const PLAIN_NAME = /^[\w-]+$/;
+const NOT_PLAIN = "(not a plain name)";
+
+function environmentName(job: unknown): string | undefined {
+  if (!isPlainMap(job) || !("environment" in job)) return undefined;
+  const env = job.environment;
+  const name = isPlainMap(env) ? env.name : env;
+  return typeof name === "string" && PLAIN_NAME.test(name)
+    ? name.toLowerCase()
+    : NOT_PLAIN;
 }
 
 /**
  * `file#job` for every job, in any workflow, that uses the `release`
- * environment (any case) or an environment the guards can't read literally
- * (an expression, anchor, alias, tag, multi-line flow map): fail closed.
+ * environment (any case) or an environment value that isn't a plain name
+ * (an expression, a map without a plain `name`): fail closed.
  */
 export function releaseEnvironmentHolders(workflows: Workflow[]): string[] {
   const holders: string[] = [];
   for (const { name, text } of workflows) {
     for (const [id, job] of parseJobs(text)) {
       const env = environmentName(job);
-      if (env === "release" || env === DYNAMIC) holders.push(`${name}#${id}`);
+      if (env === "release" || env === NOT_PLAIN) holders.push(`${name}#${id}`);
     }
   }
   return holders;
 }
 
 const KEY_REFERENCE =
-  /secrets\.HOMEFLEET_RELEASE_KEY|secrets\[|secrets:[ \t]*inherit|toJSON\(\s*secrets\s*\)/i;
+  /secrets\s*\.\s*HOMEFLEET_RELEASE_KEY|secrets\s*\[|toJSON\(\s*secrets\s*\)/i;
+
+/** Every string key and value inside a parsed value. */
+function strings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(strings);
+  if (isPlainMap(value)) {
+    return Object.entries(value).flatMap(([k, v]) => [k, ...strings(v)]);
+  }
+  return [];
+}
+
+const reachesKey = (value: unknown): boolean =>
+  strings(value).some((s) => KEY_REFERENCE.test(s)) ||
+  (isPlainMap(value) && value.secrets === "inherit");
 
 /**
  * `file#job` for every job that references the release key or could reach
  * it indirectly (`secrets: inherit`, `secrets[...]`, `toJSON(secrets)`), and
- * `file#(workflow)` when the workflow-level preamble does. Searched in the
- * RAW text, comments included — a `#` inside a `run: |` script is content
- * GitHub still expands — and case-insensitively, like secret names.
+ * `file#(workflow)` when the workflow level does. Searched in the parsed
+ * values — every `run:` script, `env:` and `with:` value — case-insensitively.
+ * A YAML comment is not searched: GitHub never expands one.
  */
 export function releaseKeyUsers(workflows: Workflow[]): string[] {
   const users: string[] = [];
   for (const { name, text } of workflows) {
-    const raw = toLines(text);
-    const { jobsLine, jobs } = jobRanges(toLines(normalize(text)));
-    if (KEY_REFERENCE.test(raw.slice(0, jobsLine).join("\n"))) {
-      users.push(`${name}#(workflow)`);
-    }
-    for (const { id, start, end } of jobs) {
-      if (KEY_REFERENCE.test(raw.slice(start, end).join("\n"))) {
-        users.push(`${name}#${id}`);
+    const { jobs, ...rest } = rootOf(text);
+    if (reachesKey(rest)) users.push(`${name}#(workflow)`);
+    if (isPlainMap(jobs)) {
+      for (const [id, job] of Object.entries(jobs)) {
+        if (reachesKey(job)) users.push(`${name}#${id}`);
       }
     }
   }
   return users;
 }
 
-/** Env var names set anywhere in a (normalized) job: job- or step-level `env:` blocks. */
-function envNames(job: string): string[] {
-  const names: string[] = [];
-  const lines = job.split("\n");
-  lines.forEach((line, i) => {
-    const m = /^(\s*)(?:-\s+)?env:[ \t]*(.*)$/.exec(line);
-    if (m === null) return;
-    if ((m[2] as string).trim() !== "") {
-      names.push(`(inline env: ${(m[2] as string).trim()})`);
-      return;
-    }
-    const keyIndent =
-      indentOf(line) + (line.trimStart().startsWith("-") ? 2 : 0);
-    for (const next of lines.slice(i + 1)) {
-      if (next.trim() === "") continue;
-      if (indentOf(next) <= keyIndent) break;
-      const key = /^\s*([^:\s]+):/.exec(next)?.[1];
-      if (key !== undefined && indentOf(next) === keyIndent + 2)
-        names.push(key);
-    }
-  });
-  return names;
-}
+const PINNED = /^([\w.-]+\/[\w.-]+)@[0-9a-f]{40}$/;
 
-/** Why the key-holding job is not the minimal one; empty when it is. */
-export function signJobViolations(job: string): string[] {
-  const s = normalize(job);
+function actionStepViolations(step: YamlMap, i: number): string[] {
   const problems: string[] = [];
-  for (const m of s.matchAll(/^\s*(?:-\s+)?uses:[ \t]*(\S+)/gm)) {
-    const ref = m[1] as string;
-    if (!SIGN_ACTIONS.has(ref.split("@")[0] as string)) {
-      problems.push(`action not allowed: ${ref}`);
+  const where = `step ${i + 1}`;
+  for (const key of Object.keys(step)) {
+    if (!["uses", "with", "name"].includes(key))
+      problems.push(`${where}: ${key} not allowed`);
+  }
+  const ref = step.uses;
+  const action = typeof ref === "string" ? PINNED.exec(ref)?.[1] : undefined;
+  const rules = action === undefined ? undefined : SIGN_ACTIONS[action];
+  if (rules === undefined) {
+    problems.push(`${where}: action not allowed: ${String(ref)}`);
+    return problems;
+  }
+  const inputs = step.with ?? {};
+  if (!isPlainMap(inputs)) return [...problems, `${where}: with: is not a map`];
+  for (const key of Object.keys(inputs)) {
+    if (!rules.allowed.includes(key))
+      problems.push(`${where}: ${action} input ${key} not allowed`);
+  }
+  for (const [key, value] of Object.entries(rules.required)) {
+    if (inputs[key] !== value) {
+      problems.push(
+        `${where}: ${action} needs ${key}: ${JSON.stringify(value)}`,
+      );
     }
   }
-  const runs = [...s.matchAll(/^\s*(?:-\s+)?run:[ \t]*(.*)$/gm)].map((m) =>
-    (m[1] as string).trim(),
-  );
-  for (const run of runs) {
-    if (run !== SIGN_RUN) problems.push(`run step not allowed: ${run}`);
-  }
-  if (runs.length !== 1) {
-    problems.push(`expected exactly one run step, found ${runs.length}`);
-  }
-  if (/^\s*(?:-\s+)?shell:/m.test(s)) problems.push("shell: not allowed");
-  for (const name of envNames(s)) {
-    if (name !== SIGN_ENV) problems.push(`env var not allowed: ${name}`);
-  }
-  const runsOn = /^ {4}runs-on:[ \t]*(.*)$/m.exec(s)?.[1]?.trim();
-  if (runsOn !== "ubuntu-latest") {
-    problems.push(`runs-on must be ubuntu-latest, found ${runsOn ?? "none"}`);
-  }
-  if (/^\s+cache:/m.test(s)) problems.push("dependency cache configured");
-  const setupNodes = (s.match(/uses:[ \t]*actions\/setup-node@/g) ?? []).length;
-  const cacheOff = (s.match(/^\s+package-manager-cache:[ \t]*false\b/gm) ?? [])
-    .length;
-  if (cacheOff < setupNodes) {
-    problems.push("setup-node without package-manager-cache: false");
-  }
-  for (const key of ["container", "services"]) {
-    if (new RegExp(`^ {4}${key}:`, "m").test(s)) {
-      problems.push(`${key} not allowed`);
+  if ("sparse-checkout" in inputs) {
+    const paths =
+      typeof inputs["sparse-checkout"] === "string"
+        ? inputs["sparse-checkout"]
+            .split(/\r?\n/)
+            .map((p) => p.trim())
+            .filter((p) => p !== "")
+        : [];
+    if (JSON.stringify(paths.sort()) !== JSON.stringify(SIGN_SPARSE)) {
+      problems.push(
+        `${where}: sparse-checkout must be exactly ${SIGN_SPARSE.join(", ")}`,
+      );
     }
   }
   return problems;
 }
 
-/** The workflow-level `permissions:` entries (one-line value or block lines); [] when absent. */
-export function topLevelPermissions(text: string): string[] {
-  const lines = preamble(text).split("\n");
-  const at = lines.findIndex((l) => /^permissions:/.test(l));
-  if (at === -1) return [];
-  const inline = (lines[at] as string).slice("permissions:".length).trim();
-  if (inline !== "") return [inline];
-  const entries: string[] = [];
-  for (const l of lines.slice(at + 1)) {
-    if (l.trim() === "") continue;
-    if (indentOf(l) === 0) break;
-    entries.push(l.trim());
+function runStepViolations(step: YamlMap, i: number): string[] {
+  const problems: string[] = [];
+  const where = `step ${i + 1}`;
+  for (const key of Object.keys(step)) {
+    if (!["run", "env", "name"].includes(key))
+      problems.push(`${where}: ${key} not allowed`);
   }
-  return entries;
+  if (step.run !== SIGN_RUN)
+    problems.push(`${where}: run step not allowed: ${String(step.run)}`);
+  const env = step.env;
+  const keys = isPlainMap(env) ? Object.keys(env) : [];
+  if (
+    !isPlainMap(env) ||
+    keys.length !== 1 ||
+    keys[0] !== SIGN_KEY_ENV ||
+    env[SIGN_KEY_ENV] !== SIGN_KEY_VALUE
+  ) {
+    problems.push(
+      `${where}: env must be exactly ${SIGN_KEY_ENV}: ${SIGN_KEY_VALUE}`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * Why the key-holding job is not the minimal one; empty when it is: only
+ * `needs`, `runs-on: ubuntu-latest`, `environment` and `steps`; steps are
+ * allowlisted actions pinned to a SHA with allowlisted inputs, plus exactly
+ * one step that runs SIGN_RUN with only the key in its env.
+ */
+export function signJobViolations(job: unknown): string[] {
+  if (!isPlainMap(job)) return ["the sign job is missing or not a map"];
+  const problems: string[] = [];
+  for (const key of Object.keys(job)) {
+    if (!SIGN_JOB_KEYS.has(key)) problems.push(`job-level ${key} not allowed`);
+  }
+  if (job["runs-on"] !== "ubuntu-latest") {
+    problems.push(
+      `runs-on must be ubuntu-latest, found ${JSON.stringify(job["runs-on"])}`,
+    );
+  }
+  const steps = Array.isArray(job.steps) ? job.steps : [];
+  if (steps.length === 0) problems.push("no steps");
+  let runSteps = 0;
+  steps.forEach((step: unknown, i: number) => {
+    if (!isPlainMap(step)) {
+      problems.push(`step ${i + 1}: not a map`);
+    } else if ("uses" in step && !("run" in step)) {
+      problems.push(...actionStepViolations(step, i));
+    } else if ("run" in step && !("uses" in step)) {
+      runSteps++;
+      problems.push(...runStepViolations(step, i));
+    } else {
+      problems.push(`step ${i + 1}: needs exactly one of uses or run`);
+    }
+  });
+  if (runSteps !== 1)
+    problems.push(`expected exactly one run step, found ${runSteps}`);
+  return problems;
 }

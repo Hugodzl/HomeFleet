@@ -1,21 +1,24 @@
 /**
  * Structural guards on the real .github/workflows files (spec 2026-11-12,
- * PR 1). The guards live in workflow-guards.ts and are tested on bad text in
- * workflow-guards.test.ts. These pin the properties a future edit could
- * silently undo — above all that the job holding the release key installs
- * nothing and is the only one that can read it.
+ * PR 1). The files are read with a YAML parser (workflow-guards.ts), whose
+ * guards are tested on bad text in workflow-guards.test.ts. These pin the
+ * properties a future edit could silently undo — above all that the job
+ * holding the release key installs nothing and is the only one that can
+ * read it.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
-  indentationProblems,
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
   signJobViolations,
+  topLevel,
   topLevelPermissions,
+  workflowLevelViolations,
+  workflowProblems,
 } from "./workflow-guards.js";
 
 const dir = path.resolve(
@@ -24,40 +27,53 @@ const dir = path.resolve(
 );
 const workflows = readdirSync(dir)
   .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
-  .map((f) => ({
-    name: f,
-    text: readFileSync(path.join(dir, f), "utf8").replaceAll("\r\n", "\n"),
-  }));
-const release = workflows.find((w) => w.name === "release.yml")?.text ?? "";
-const ci = workflows.find((w) => w.name === "ci.yml")?.text ?? "";
+  .map((f) => ({ name: f, text: readFileSync(path.join(dir, f), "utf8") }));
+const text = (name: string) =>
+  workflows.find((w) => w.name === name)?.text ?? "";
+const release = text("release.yml");
+const ci = text("ci.yml");
 
-/** The lines of a `- uses:` step block, up to the next sibling step or key. */
-function stepBlocks(text: string, action: string): string[] {
-  const lines = text.split("\n");
-  const blocks: string[] = [];
-  lines.forEach((line, i) => {
-    const m = /^(\s*)- uses: (\S+)@/.exec(line);
-    if (m?.[2] !== action) return;
-    const indent = (m[1] as string).length;
-    const block = [line];
-    for (const next of lines.slice(i + 1)) {
-      const lead = next.length - next.trimStart().length;
-      if (next.trim() !== "" && lead <= indent) break;
-      block.push(next);
-    }
-    blocks.push(block.join("\n"));
-  });
-  return blocks;
-}
+type Step = Record<string, unknown> & {
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+};
+type Job = Record<string, unknown> & { steps?: Step[]; uses?: string };
 
-test("every remote action is pinned to a commit SHA", () => {
+const job = (workflow: string, id: string): Job =>
+  (parseJobs(workflow).get(id) ?? {}) as Job;
+const allJobs = () =>
+  workflows.flatMap(({ name, text }) =>
+    [...parseJobs(text)].map(([id, j]) => ({ name, id, job: j as Job })),
+  );
+const allSteps = () =>
+  allJobs().flatMap(({ name, id, job }) =>
+    (job.steps ?? []).map((step) => ({ where: `${name}#${id}`, step })),
+  );
+const actionOf = (ref: unknown) =>
+  typeof ref === "string" ? ref.split("@")[0] : undefined;
+
+test("every workflow is plain YAML the guards read the same way GitHub does", () => {
   for (const { name, text } of workflows) {
-    for (const line of text.split("\n")) {
-      const m = /^\s*(?:- )?uses: (\S+)/.exec(line);
-      if (m === null || /^(\.|\$)\//.test(m[1] as string)) continue;
-      expect(line, `${name}: ${line.trim()}`).toMatch(
-        /uses: [\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+(\.\d+){0,2}\s*$/,
-      );
+    expect(workflowProblems(text), name).toEqual([]);
+  }
+});
+
+test("every remote action is pinned to a commit SHA, with its version noted", () => {
+  const refs = [
+    ...allJobs().map(({ name, job }) => ({ where: name, ref: job.uses })),
+    ...allSteps().map(({ where, step }) => ({ where, ref: step.uses })),
+  ].filter(({ ref }) => typeof ref === "string" && !/^(\.|\$)\//.test(ref));
+  expect(refs.length).toBeGreaterThan(0);
+  for (const { where, ref } of refs) {
+    expect(ref, where).toMatch(/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/);
+  }
+  // Dependabot keeps the trailing "# vX.Y.Z" comment in step with the SHA.
+  for (const { name, text } of workflows) {
+    for (const line of text.split(/\r?\n/)) {
+      if (/@[0-9a-f]{40}/.test(line)) {
+        expect(line, name).toMatch(/@[0-9a-f]{40} # v\d+(\.\d+){0,2}\s*$/);
+      }
     }
   }
 });
@@ -70,94 +86,87 @@ test("only release.yml's sign job can reach the release key", () => {
   expect(releaseKeyUsers(workflows)).toEqual(["release.yml#sign"]);
 });
 
-test("the sign job is minimal: allowed actions, one signer command, no cache", () => {
-  expect(signJobViolations(parseJobs(release).get("sign") ?? "")).toEqual([]);
+test("the sign job is minimal: allowlisted actions and inputs, one signer command", () => {
+  expect(signJobViolations(parseJobs(release).get("sign"))).toEqual([]);
 });
 
-test("the sign job checks out exactly the signer and version.ts", () => {
-  const lines = (parseJobs(release).get("sign") ?? "").split("\n");
-  const at = lines.findIndex((l) => /sparse-checkout: \|/.test(l));
-  expect(at).toBeGreaterThan(-1);
-  const indent = (lines[at] as string).search(/\S/);
-  const paths: string[] = [];
-  for (const l of lines.slice(at + 1)) {
-    if (l.trim() === "" || l.search(/\S/) <= indent) break;
-    paths.push(l.trim());
+test("no workflow-level env or defaults, which would reach every job", () => {
+  for (const { name, text } of workflows) {
+    expect(workflowLevelViolations(text), name).toEqual([]);
   }
-  expect(paths.sort()).toEqual([
-    "packages/protocol/src/version.ts",
-    "scripts/sign-release.mjs",
-  ]);
 });
 
 test("workflow-level permissions are exactly contents: read", () => {
   for (const { name, text } of workflows) {
-    expect(topLevelPermissions(text), name).toEqual(["contents: read"]);
+    expect(topLevelPermissions(text), name).toEqual({ contents: "read" });
   }
 });
 
 test("only the release job can write", () => {
-  for (const { name, text } of workflows) {
-    for (const [id, body] of parseJobs(text)) {
-      if (name === "release.yml" && id === "release") continue;
-      expect(body, `${name} job ${id}`).not.toMatch(/:\s*write\b|write-all/);
-    }
+  for (const { name, id, job } of allJobs()) {
+    if (name === "release.yml" && id === "release") continue;
+    const perms = job.permissions;
+    const values =
+      typeof perms === "object" && perms !== null
+        ? Object.values(perms)
+        : [perms];
+    expect(values, `${name}#${id}`).not.toContain("write");
+    expect(values, `${name}#${id}`).not.toContain("write-all");
   }
 });
 
 test("pack checks the tag is on main before anything is signed", () => {
-  expect(parseJobs(release).get("pack")).toContain("merge-base --is-ancestor");
+  const runs = (job(release, "pack").steps ?? []).map((s) => s.run ?? "");
+  expect(runs.some((r) => r.includes("merge-base --is-ancestor"))).toBe(true);
 });
 
 test("only a tag push publishes; release runs never overlap", () => {
-  const job = parseJobs(release).get("release") ?? "";
-  expect(job).toMatch(
-    /^ {4}if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)$/m,
+  expect(job(release, "release").if).toBe(
+    "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
   );
-  expect(release).toMatch(
-    /^concurrency:\n {2}group: release-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: false$/m,
-  );
+  expect(topLevel(release, "concurrency")).toEqual({
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal GitHub expression
+    group: "release-${{ github.ref }}",
+    "cancel-in-progress": false,
+  });
 });
 
 test("publish treats only 'release not found' as no release", () => {
-  const job = parseJobs(release).get("release") ?? "";
-  expect(job).toContain("release not found");
-  expect(job).not.toMatch(/gh release view[^\n]*2>\/dev\/null/);
+  const runs = (job(release, "release").steps ?? []).map((s) => s.run ?? "");
+  const publish = runs.find((r) => r.includes("gh release create")) ?? "";
+  expect(publish).toContain("release not found");
+  expect(publish).not.toMatch(/gh release view[^\n]*2>\/dev\/null/);
 });
 
-test("every workflow is plain 2-space YAML, which the guards assume", () => {
-  for (const { name, text } of workflows) {
-    expect(indentationProblems(text), name).toEqual([]);
-  }
-});
-
-test("every workflow parses into jobs (a guard that sees no jobs checks nothing)", () => {
-  for (const { name, text } of workflows) {
-    expect(parseJobs(text).size, name).toBeGreaterThan(0);
-  }
-});
+const zizmorStep = (id: string) =>
+  (job(ci, id).steps ?? []).find(
+    (s) => actionOf(s.uses) === "zizmorcore/zizmor-action",
+  );
 
 test("the zizmor gate runs a pinned zizmor version, offline", () => {
-  const job = parseJobs(ci).get("zizmor") ?? "";
-  expect(job).toMatch(/^\s+version: \d+\.\d+\.\d+$/m);
+  const step = zizmorStep("zizmor");
+  expect(String(step?.with?.version)).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(step?.with?.["advanced-security"]).toBe(false);
   // ci.yml is also the release gate: a new online advisory must not fail an
   // already-pushed tag.
-  expect(job).toMatch(/^\s+online-audits: false$/m);
+  expect(step?.with?.["online-audits"]).toBe(false);
 });
 
 test("online zizmor audits run on pull requests only, never in the release gate", () => {
-  const job = parseJobs(ci).get("zizmor-online") ?? "";
-  expect(job).toMatch(/^ {4}if: github\.event_name == 'pull_request'$/m);
-  expect(job).toMatch(/^\s+version: \d+\.\d+\.\d+$/m);
-  expect(job).not.toMatch(/online-audits: false/);
+  expect(job(ci, "zizmor-online").if).toBe(
+    "github.event_name == 'pull_request'",
+  );
+  const step = zizmorStep("zizmor-online");
+  expect(String(step?.with?.version)).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(step?.with?.["online-audits"]).not.toBe(false);
 });
 
 test("every checkout drops its credentials", () => {
-  for (const { name, text } of workflows) {
-    const blocks = stepBlocks(text, "actions/checkout");
-    expect(blocks.length, name).toBeGreaterThan(0);
-    for (const block of blocks) {
-      expect(block, name).toContain("persist-credentials: false");
-    }
+  const checkouts = allSteps().filter(
+    ({ step }) => actionOf(step.uses) === "actions/checkout",
+  );
+  expect(checkouts.length).toBeGreaterThan(0);
+  for (const { where, step } of checkouts) {
+    expect(step.with?.["persist-credentials"], where).toBe(false);
   }
 });
