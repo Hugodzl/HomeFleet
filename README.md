@@ -110,6 +110,11 @@ the daemon in the background and rolls back automatically if the new
 version fails to start. `homefleet upgrade --check` only reports what is
 available. Upgrading *to* v0.5.0 is the last manual `npm i -g`.
 
+Releases since v0.5.0 are signed (that's what `homefleet upgrade` checks).
+Releases after v0.7.0 also carry a build-provenance attestation, so anyone
+can check which commit and workflow built a downloaded tarball with
+`gh attestation verify homefleet-<version>.tgz -R Hugodzl/HomeFleet`.
+
 To upgrade the whole fleet from one node, run `homefleet fleet upgrade`
 (optionally `--to <version>`, or `--nodes <name|id>…` to pick peers). The
 daemon rolls the release out sequentially, peers first and this node last,

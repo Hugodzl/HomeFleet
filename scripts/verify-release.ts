@@ -3,7 +3,8 @@
  *
  * Verifies the manifest + signature next to <tarball> against the PINNED
  * public keys compiled into the daemon — the exact check an upgrading node
- * runs. CI runs it right after signing so a key mismatch fails the release
+ * runs, plus a check that the signed HFP version is this source's. CI runs
+ * it right after signing so a key mismatch fails the release
  * before anything is published.
  */
 import { readFile } from "node:fs/promises";
@@ -14,6 +15,8 @@ import {
   signatureFileName,
   verifyRelease,
 } from "../packages/daemon/src/upgrade/manifest.js";
+import { HFP_PROTOCOL_VERSION } from "../packages/protocol/src/version.js";
+import { checkSignedHfpVersion } from "./lib/hfp-version-check.js";
 import { versionFromTarball } from "./lib/sign-release.js";
 
 async function main(): Promise<void> {
@@ -36,6 +39,7 @@ async function main(): Promise<void> {
   if (!result.ok) {
     throw new Error(`${result.reason}: ${result.detail}`);
   }
+  checkSignedHfpVersion(result.manifest.hfpVersion, HFP_PROTOCOL_VERSION);
   process.stdout.write(`verified ${path.basename(tarballPath)}\n`);
 }
 

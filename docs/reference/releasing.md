@@ -1,10 +1,22 @@
 # Releasing
 
-A `v*` tag on `main` runs [`.github/workflows/release.yml`](../../.github/workflows/release.yml):
-the CI gate, then `pnpm pack:release --tag <tag>`, then a global install of
-the real tarball on Ubuntu and Windows (bins must print their exact version),
-then a GitHub Release with `homefleet-<version>.tgz` attached, titled and
-described from `docs/releases/<tag>.md`.
+A `v*` tag on `main` runs [`.github/workflows/release.yml`](../../.github/workflows/release.yml),
+job by job:
+
+1. **`gate`:** the CI workflow (tests on Ubuntu and Windows, plus `zizmor`).
+2. **`pack`:** checks that the tagged commit is on `main` and that the notes
+   file exists, then runs `pnpm pack:release --tag <tag>` and outputs the
+   tarball's version, sha256 and size. It holds no secret.
+3. **`sign`:** signs that digest without ever receiving the tarball (see
+   [Release signing](#release-signing)). It waits for Hugo's approval.
+4. **`verify`** and **`smoke`**, in parallel:
+   - `verify` checks the signature against the pinned key, the real tarball
+     against the signed digest, and the signed HFP version against the
+     source.
+   - `smoke` installs the real tarball globally on Ubuntu and Windows; the
+     bins must print their exact version.
+5. **`release`:** attests the assets and publishes a GitHub Release with
+   them, titled and described from `docs/releases/<tag>.md`.
 
 ## Release flow
 
@@ -32,9 +44,10 @@ session runs this flow every time, without being asked:
      and the README Status banner, Install note and Roadmap.
    - **Before merging:** `git grep` for the previous version, and wait for CI
      to pass on the prep commit.
-4. **Merge, then tag** (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `pack`
+4. **Merge, then tag** (`git tag vX.Y.Z && git push origin vX.Y.Z`). The `sign`
    job waits for Hugo to approve the `release` environment. That approval is
-   the last human gate.
+   the last human gate. Before approving, check that the run's commit is the
+   merge on `main` (see [Release signing](#release-signing)).
 5. **After the Release is published**, check:
    - the three assets are present
    - the repo About description is still accurate
@@ -106,8 +119,10 @@ data dirs. What needs hardware goes into the PR as steps for Hugo.
    has gone stale. `git grep -n "v<previous>"` catches leftovers.
 4. `pnpm lint && pnpm typecheck && pnpm test`, commit, push.
 5. Optional dry run: `gh workflow run release.yml --ref main` — everything
-   except the Release. The `pack` job must print `verified homefleet-X.Y.Z.tgz`.
-6. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `pack` job waits for
+   except the Release. The `verify` job must print `verified homefleet-X.Y.Z.tgz`.
+   A dry run from any other branch stops at `sign`: the environment refuses
+   it, which is the point.
+6. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `sign` job waits for
    approval on the `release` environment (see [Release signing](#release-signing)).
 
 ## Release signing
@@ -120,12 +135,34 @@ verifies under a key pinned in
 `packages/daemon/src/upgrade/release-keys.ts`.
 
 - The private key is the `HOMEFLEET_RELEASE_KEY` secret on the `release`
-  GitHub **environment**, not a repo secret. The environment admits only
-  `main` and `v*` tags and requires Hugo's approval, so a workflow edited on
-  any other branch (including an agent's `claude/*` branch) can never read
-  the key. An offline backup lives with Hugo.
-- The `pack` job signs, then verifies against the pinned key, before
-  anything is published.
+  GitHub **environment**, not a repo secret. An offline backup lives with
+  Hugo.
+- **Only the `sign` job can read it, and that job installs nothing.** It has
+  no pnpm and no `node_modules`, and it checks out only
+  `scripts/sign-release.mjs` (`node:` built-ins only) and
+  `packages/protocol/src/version.ts`, which the signer reads as text for the
+  HFP version. So no npm dependency ever runs next to the key.
+- **It downloads no artifact either.** It signs the digest `pack` computed
+  (`node scripts/sign-release.mjs --digest <dir>`, which validates each
+  value), so no file `pack` produced, whose job does run dependencies, can
+  land next to the key and overwrite the signer or the Node it runs on. A
+  `pack` that lies about the digest gets it signed but fails `verify`, which
+  hashes the real tarball before anything is published. On a tag run the
+  signer signs only the tag's own version, and the signature artifact
+  expires after a day, so a bogus signed manifest can't linger. Re-running
+  the release more than a day later means re-running the whole workflow.
+- `scripts/lib/workflows.test.ts` pins all of this, reading the workflows
+  with a real YAML parser (`yaml`, a dev dependency that never runs in
+  `sign`).
+- **The environment admits only `main` and `v*` tags, and requires Hugo's
+  approval.** A run from a branch (including an agent's `claude/*` branch)
+  can't reach the key. A `v*` tag on *any* commit does pass the filter,
+  though, and that commit's workflow is what runs. `pack` refuses a tag
+  whose commit isn't on `main`, but that check catches mistakes only: an
+  edited workflow could drop it. **Hugo's approval is the real gate:**
+  before approving, check that the run's commit is on `main`.
+- `verify` then checks the signature against the pinned key, and the signed
+  HFP version against the source, before anything is published.
 - To sign a local build by hand (for example the rig rollback test):
   `pnpm sign:release <tgz> --key-file <pem>`, then
   `pnpm verify:release <tgz>`.
@@ -135,11 +172,42 @@ verifies under a key pinned in
   Nodes that never installed a release pinning the new key must be upgraded
   by hand.
 
+## Verifying a release
+
+Anyone can check a downloaded release two ways:
+
+- **The signature**, which is what `homefleet upgrade` checks: the manifest
+  is signed by a key pinned in the daemon. That proves Hugo's release key
+  approved these bytes.
+- **The provenance attestation:**
+  `gh attestation verify homefleet-X.Y.Z.tgz -R Hugodzl/HomeFleet` (also
+  works for the `.manifest.json`). That proves which commit and which
+  workflow run built them (SLSA Build L2). Releases up to v0.7.0 have no
+  attestation; the first release cut after this pipeline change does.
+
+Neither one replaces the other.
+
+## Branch rule on `main`
+
+`main` requires a pull request, with 0 approvals, because GitHub never
+lets an author approve their own PR. The checks `test (ubuntu-latest)`,
+`test (windows-latest)` and `zizmor` must pass, and the branch must be up to
+date. Force-pushes and deletion are blocked, admins included. So a rejected
+direct push to `main` is this rule, not a fault: open a PR. The `zizmor-online`
+check (zizmor's network audits, pull requests only) is advisory, not
+required: the release gate runs zizmor offline so it stays deterministic. Tags aren't
+covered, and `v*` tags are still pushed directly.
+
 ## If the tag was wrong
 
 A tag that doesn't match the version, or has no notes file, fails in `pack` before anything is
 built, and no Release is created. Delete the tag (`git push --delete origin
 vX.Y.Z && git tag -d vX.Y.Z`), fix, and re-tag.
+
+Releases are immutable once published: their assets and tag can't change.
+A bad published release is fixed by a new patch version, never by
+re-uploading. A run that fails while publishing leaves at most a draft,
+which re-running the `release` job replaces.
 
 To fix a published Release's title or notes, edit the notes file and run
 `gh release edit vX.Y.Z --title "<first line without # >" --notes-file <rest>`.
