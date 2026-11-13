@@ -1,7 +1,21 @@
 # Release candidates and release-pipeline hardening — design
 
-**Status:** PR 1 (hardening) implemented 2026-11-12, PR #25; PR 2 (release
-candidates) not started. Brainstormed with Hugo after a research pass on
+**Status:** PR 1 (hardening) implemented 2026-11-12–13, PR #25; PR 2 (release
+candidates) not started.
+
+**As built, PR 1 differs from the design below in two ways**, both from its
+review loop:
+- **`sign` downloads no artifact.** `pack` outputs the tarball's version,
+  sha256 and size; `sign` signs that digest (`sign-release.mjs --digest`), and
+  `verify` checks the real tarball against it. The review traced how the
+  pinned download-artifact's unzip could let a compromised `pack` overwrite
+  the signer.
+- **The workflow guards read the files with a YAML parser** (`yaml`, a
+  dev dependency), not regexes. Three review rounds kept finding YAML forms
+  the regexes misread.
+
+PR 2 must adapt the signer's tag check: today it refuses a version other
+than the tag's, and a `vX.Y.Z-rc.N` tag carries `X.Y.Z`. Brainstormed with Hugo after a research pass on
 current CI/release practice (summary in [Background](#background)).
 
 ## Why

@@ -223,17 +223,15 @@ test("verify checks the real tarball against the signed manifest", () => {
 });
 
 test("the Release gets only the three signed-release file kinds", () => {
-  const runs = (job(release, "release").steps ?? []).map((s) => s.run ?? "");
-  const publish = runs.find((r) => r.includes("gh release create")) ?? "";
-  const create = publish.slice(publish.indexOf("gh release create"));
-  const files = create
-    .slice(0, create.indexOf("--repo"))
-    .split(/\s+/)
+  // Every release/ path any run step of the release job names, so a file
+  // added after --repo or by a separate gh release upload step shows up too.
+  const words = (job(release, "release").steps ?? [])
+    .flatMap((s) => (s.run ?? "").split(/\s+/))
     .filter((w) => w.startsWith("release/"));
-  expect(files).toEqual([
-    "release/homefleet-*.tgz",
+  expect([...new Set(words)].sort()).toEqual([
     "release/homefleet-*.manifest.json",
     "release/homefleet-*.manifest.sig",
+    "release/homefleet-*.tgz",
   ]);
 });
 
@@ -248,5 +246,7 @@ test("pack's digest step fails when no tarball matches", () => {
   const step = (job(release, "pack").steps ?? []).find(
     (s) => s.id === "digest",
   );
-  expect(step?.run).toContain("shopt -s nullglob");
+  const run = step?.run ?? "";
+  expect(run).toContain("shopt -s nullglob");
+  expect(run.indexOf("shopt -s nullglob")).toBeLessThan(run.indexOf("files=("));
 });
