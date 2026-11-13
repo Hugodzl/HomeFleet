@@ -41,19 +41,17 @@ const goodSign = `  sign:
         with:
           node-version: 22
           package-manager-cache: false
-      - uses: actions/download-artifact@${SHA} # v4.3.0
-        with:
-          name: homefleet-tarball
-          path: release
       - name: Sign the tarball
         env:
           HOMEFLEET_RELEASE_KEY: \${{ secrets.HOMEFLEET_RELEASE_KEY }}
+          HOMEFLEET_RELEASE_VERSION: \${{ needs.pack.outputs.version }}
+          HOMEFLEET_RELEASE_SHA256: \${{ needs.pack.outputs.sha256 }}
+          HOMEFLEET_RELEASE_SIZE: \${{ needs.pack.outputs.size }}
         run: ${SIGN_RUN}
       - uses: actions/upload-artifact@${SHA} # v4.6.2
         with:
-          name: homefleet-release
+          name: homefleet-signature
           path: |
-            release/homefleet-*.tgz
             release/homefleet-*.manifest.json
             release/homefleet-*.manifest.sig
           if-no-files-found: error
@@ -232,8 +230,8 @@ describe("signJobViolations", () => {
     ],
     [
       "a flow-map env",
-      `        env:\n          HOMEFLEET_RELEASE_KEY: \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n`,
-      `        env:\n          { HOMEFLEET_RELEASE_KEY: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}", NODE_OPTIONS: x }\n`,
+      `        env:\n          HOMEFLEET_RELEASE_KEY: \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n          HOMEFLEET_RELEASE_VERSION: \${{ needs.pack.outputs.version }}\n          HOMEFLEET_RELEASE_SHA256: \${{ needs.pack.outputs.sha256 }}\n          HOMEFLEET_RELEASE_SIZE: \${{ needs.pack.outputs.size }}\n`,
+      `        env:\n          { HOMEFLEET_RELEASE_KEY: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}", HOMEFLEET_RELEASE_VERSION: "\${{ needs.pack.outputs.version }}", HOMEFLEET_RELEASE_SHA256: "\${{ needs.pack.outputs.sha256 }}", HOMEFLEET_RELEASE_SIZE: "\${{ needs.pack.outputs.size }}", NODE_OPTIONS: x }\n`,
     ],
     [
       "a key taken from somewhere else",
@@ -320,11 +318,6 @@ describe("signJobViolations", () => {
       "setup-node mirror-token",
       "          node-version: 22\n",
       "          node-version: 22\n          mirror-token: x\n",
-    ],
-    [
-      "download from another run",
-      "          name: homefleet-tarball\n",
-      "          name: homefleet-tarball\n          run-id: 1\n          github-token: x\n",
     ],
   ])("flags %s", (_label, from, to) => {
     expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
@@ -443,19 +436,8 @@ describe("sign job: paths, artifacts and the sparse checkout are pinned", () => 
       "          path: other\n",
     ],
     [
-      "download into the script dir",
-      "          name: homefleet-tarball\n          path: release\n",
-      "          name: homefleet-tarball\n          path: src/scripts\n",
-    ],
-    [
-      "download another artifact",
-      "          name: homefleet-tarball\n",
-      "          name: something-else\n",
-    ],
-    ["download every artifact", "          name: homefleet-tarball\n", ""],
-    [
       "upload under another name",
-      "          name: homefleet-release\n",
+      "          name: homefleet-signature\n",
       "          name: other\n",
     ],
     [
@@ -579,7 +561,7 @@ describe("sign job: environment and upload are pinned", () => {
     ],
     [
       "uploading src",
-      "            release/homefleet-*.tgz\n",
+      "            release/homefleet-*.manifest.sig\n",
       "            src\n",
     ],
     [
@@ -666,8 +648,8 @@ describe("sign job: no expression anywhere but the one pinned key value", () => 
     ],
     [
       "an action step's name",
-      `      - uses: actions/download-artifact@${SHA} # v4.3.0\n`,
-      `      - name: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}"\n        uses: actions/download-artifact@${SHA} # v4.3.0\n`,
+      `      - uses: actions/upload-artifact@${SHA} # v4.6.2\n`,
+      `      - name: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}"\n        uses: actions/upload-artifact@${SHA} # v4.6.2\n`,
     ],
   ])("flags an expression in %s", (_label, from, to) => {
     expect(goodSign).toContain(from);
@@ -703,7 +685,7 @@ describe("sign job: no expression anywhere but the one pinned key value", () => 
       signOf(
         wf(
           goodSign.replace(
-            "          path: |\n            release/homefleet-*.tgz\n            release/homefleet-*.manifest.json\n            release/homefleet-*.manifest.sig\n",
+            "          path: |\n            release/homefleet-*.manifest.json\n            release/homefleet-*.manifest.sig\n",
             "          path: release/homefleet-*\n",
           ),
         ),
@@ -715,5 +697,59 @@ describe("sign job: no expression anywhere but the one pinned key value", () => 
 test("the replacement character from undecodable bytes is rejected", () => {
   expect(
     workflowProblems(wf(`${goodSign}  b: # x\uFFFD\n    runs-on: x\n`)).length,
+  ).toBeGreaterThan(0);
+});
+
+// Review loop, round 4: the sign job handles no file at all.
+describe("sign job signs a digest and downloads nothing", () => {
+  test("flags any download-artifact step", () => {
+    const download = `      - uses: actions/download-artifact@${SHA} # v4.3.0\n        with:\n          name: homefleet-tarball\n          path: release\n`;
+    expect(
+      signOf(
+        wf(
+          goodSign.replace(
+            "      - name: Sign the tarball\n",
+            `${download}      - name: Sign the tarball\n`,
+          ),
+        ),
+      ),
+    ).not.toBe("");
+  });
+
+  test.each([
+    [
+      "a digest taken from elsewhere",
+      "needs.pack.outputs.sha256",
+      "github.event.inputs.sha256",
+    ],
+    [
+      "a missing digest variable",
+      `          HOMEFLEET_RELEASE_SIZE: \${{ needs.pack.outputs.size }}\n`,
+      "",
+    ],
+    ["needs other than pack", "    needs: pack\n", "    needs: [pack, gate]\n"],
+  ])("flags %s", (_label, from, to) => {
+    expect(goodSign).toContain(from);
+    expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
+  });
+});
+
+test("the long-s spelling of secrets is still found", () => {
+  expect(
+    releaseKeyUsers([
+      {
+        name: "a.yml",
+        text: wf(
+          `  x:\n    env:\n      K: "\${{ \u017Fecrets.HOMEFLEET_RELEASE_KEY }}"\n`,
+        ),
+      },
+    ]),
+  ).toEqual(["a.yml#x"]);
+});
+
+test("a BOM at the very start is fine, a second one is not", () => {
+  expect(workflowProblems(`\uFEFF${wf(goodSign)}`)).toEqual([]);
+  expect(
+    workflowProblems(`\uFEFF\uFEFF${wf(goodSign)}`).length,
   ).toBeGreaterThan(0);
 });

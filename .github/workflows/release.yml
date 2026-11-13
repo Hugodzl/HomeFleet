@@ -27,6 +27,11 @@ jobs:
   pack:
     needs: gate
     runs-on: ubuntu-latest
+    # The tarball's digest, for `sign`, which never receives the file itself.
+    outputs:
+      version: ${{ steps.digest.outputs.version }}
+      sha256: ${{ steps.digest.outputs.sha256 }}
+      size: ${{ steps.digest.outputs.size }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -65,6 +70,19 @@ jobs:
           else
             pnpm pack:release
           fi
+      - name: Digest for the sign job
+        id: digest
+        run: |
+          set -euo pipefail
+          files=(release/homefleet-*.tgz)
+          [ "${#files[@]}" -eq 1 ] || { echo "::error::expected exactly one tarball"; exit 1; }
+          f="${files[0]}"
+          v="${f#release/homefleet-}"
+          {
+            echo "version=${v%.tgz}"
+            echo "sha256=$(sha256sum "$f" | cut -d' ' -f1)"
+            echo "size=$(stat -c %s "$f")"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: homefleet-tarball
@@ -74,9 +92,11 @@ jobs:
   # The ONLY job that can read the signing key. The key is an ENVIRONMENT
   # secret: the environment admits only main and v* tags and waits for
   # Hugo's approval. This job installs nothing — no pnpm, no node_modules, no
-  # cache — and checks out just the dependency-free signer and the file it
-  # reads the HFP version from, so no npm dependency ever runs next to the
-  # key. scripts/lib/workflows.test.ts pins all of this.
+  # cache — checks out just the dependency-free signer and the file it reads
+  # the HFP version from, and downloads NO artifact: it signs the digest pack
+  # computed (version, sha256, size), so nothing pack produced can overwrite
+  # the signer or the Node it runs on. A lying digest fails `verify`, which
+  # checks the real tarball. scripts/lib/workflows.test.ts pins all of this.
   sign:
     needs: pack
     runs-on: ubuntu-latest
@@ -94,23 +114,19 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: homefleet-tarball
-          path: release
       # Signed manifest + detached Ed25519 signature (fleet-upgrade spec,
-      # Phase 1).
+      # Phase 1), over the digest; the signer validates each value.
       - name: Sign the tarball
         env:
           HOMEFLEET_RELEASE_KEY: ${{ secrets.HOMEFLEET_RELEASE_KEY }}
-        run: node src/scripts/sign-release.mjs release/homefleet-*.tgz
+          HOMEFLEET_RELEASE_VERSION: ${{ needs.pack.outputs.version }}
+          HOMEFLEET_RELEASE_SHA256: ${{ needs.pack.outputs.sha256 }}
+          HOMEFLEET_RELEASE_SIZE: ${{ needs.pack.outputs.size }}
+        run: node src/scripts/sign-release.mjs --digest release
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: homefleet-release
-          # The three signed-release files only: anything else pack slipped
-          # into the tarball artifact stays out of the Release.
+          name: homefleet-signature
           path: |
-            release/homefleet-*.tgz
             release/homefleet-*.manifest.json
             release/homefleet-*.manifest.sig
           if-no-files-found: error
@@ -132,7 +148,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: homefleet-release
+          name: homefleet-tarball
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homefleet-signature
           path: release
       - name: Verify the signature against the pinned public key
         run: pnpm verify:release release/homefleet-*.tgz
@@ -156,7 +176,11 @@ jobs:
           package-manager-cache: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: homefleet-release
+          name: homefleet-tarball
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homefleet-signature
           path: release
       - name: Global install
         # Deliberately ad hoc: install the artifact exactly as a user does,
@@ -205,7 +229,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: homefleet-release
+          name: homefleet-tarball
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homefleet-signature
           path: release
       # Build provenance (SLSA Build L2): which commit and workflow run built
       # these bytes. Check with `gh attestation verify <file> -R <repo>`.
@@ -236,7 +264,10 @@ jobs:
           fi
           notes="docs/releases/$tag.md"
           tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
-          gh release create "$tag" release/homefleet-* \
+          # The three signed-release files only, by name pattern: anything
+          # else pack slipped into its artifact stays out of the Release.
+          gh release create "$tag" release/homefleet-*.tgz \
+            release/homefleet-*.manifest.json release/homefleet-*.manifest.sig \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$(head -n 1 "$notes" | sed 's/^# //')" \
             --notes-file "$RUNNER_TEMP/notes.md"

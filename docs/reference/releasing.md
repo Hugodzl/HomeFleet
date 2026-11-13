@@ -5,12 +5,14 @@ job by job:
 
 1. **`gate`:** the CI workflow (tests on Ubuntu and Windows, plus `zizmor`).
 2. **`pack`:** checks that the tagged commit is on `main` and that the notes
-   file exists, then runs `pnpm pack:release --tag <tag>`. It holds no secret.
-3. **`sign`:** signs the tarball (see [Release signing](#release-signing)).
-   It waits for Hugo's approval.
+   file exists, then runs `pnpm pack:release --tag <tag>` and outputs the
+   tarball's version, sha256 and size. It holds no secret.
+3. **`sign`:** signs that digest without ever receiving the tarball (see
+   [Release signing](#release-signing)). It waits for Hugo's approval.
 4. **`verify`** and **`smoke`**, in parallel:
-   - `verify` checks the signature against the pinned key and the signed HFP
-     version against the source.
+   - `verify` checks the signature against the pinned key, the real tarball
+     against the signed digest, and the signed HFP version against the
+     source.
    - `smoke` installs the real tarball globally on Ubuntu and Windows; the
      bins must print their exact version.
 5. **`release`:** attests the assets and publishes a GitHub Release with
@@ -140,7 +142,15 @@ verifies under a key pinned in
   `scripts/sign-release.mjs` (`node:` built-ins only) and
   `packages/protocol/src/version.ts`, which the signer reads as text for the
   HFP version. So no npm dependency ever runs next to the key.
-  `scripts/lib/workflows.test.ts` pins this.
+- **It downloads no artifact either.** It signs the digest `pack` computed
+  (`node scripts/sign-release.mjs --digest <dir>`, which validates each
+  value), so no file `pack` produced, whose job does run dependencies, can
+  land next to the key and overwrite the signer or the Node it runs on. A
+  `pack` that lies about the digest gets it signed but fails `verify`, which
+  hashes the real tarball before anything is published.
+- `scripts/lib/workflows.test.ts` pins all of this, reading the workflows
+  with a real YAML parser (`yaml`, a dev dependency that never runs in
+  `sign`).
 - **The environment admits only `main` and `v*` tags, and requires Hugo's
   approval.** A run from a branch (including an agent's `claude/*` branch)
   can't reach the key. A `v*` tag on *any* commit does pass the filter,

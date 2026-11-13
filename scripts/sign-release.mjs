@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * node scripts/sign-release.mjs <tarball> [--key-file <pem>]
+ * node scripts/sign-release.mjs --digest <out-dir> [--key-file <pem>]   (CI)
  *
  * Writes homefleet-<v>.manifest.json + .manifest.sig next to the tarball and
  * prints both paths. The Ed25519 key comes from --key-file or the
@@ -20,7 +21,7 @@
  */
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -56,22 +57,79 @@ async function hashFile(filePath) {
   return { sha256: hash.digest("hex"), size };
 }
 
-async function main() {
-  const { values, positionals } = parseArgs({
-    options: { "key-file": { type: "string" } },
-    allowPositionals: true,
-  });
-  if (positionals.length !== 1) {
+const USAGE =
+  "usage: node scripts/sign-release.mjs <tarball> [--key-file <pem>]\n" +
+  "       node scripts/sign-release.mjs --digest <out-dir> [--key-file <pem>]";
+
+/** The largest tarball a node will download (MAX_RELEASE_ASSET_BYTES). */
+const MAX_SIZE = 100 * 1024 * 1024;
+
+/**
+ * --digest mode (the CI sign job): the tarball's version, sha256 and size
+ * come from HOMEFLEET_RELEASE_VERSION / _SHA256 / _SIZE, computed by `pack`.
+ * The key-holding job then handles no file at all — nothing downloaded can
+ * overwrite this script or the Node it runs on. A lying digest gets signed
+ * but fails `verify`, which checks the real tarball before anything ships.
+ */
+function digestFromEnv() {
+  const version = process.env.HOMEFLEET_RELEASE_VERSION ?? "";
+  const sha256 = process.env.HOMEFLEET_RELEASE_SHA256 ?? "";
+  const sizeText = process.env.HOMEFLEET_RELEASE_SIZE ?? "";
+  if (!SEMVER.test(version)) {
     throw new Error(
-      "usage: node scripts/sign-release.mjs <tarball> [--key-file <pem>]",
+      `HOMEFLEET_RELEASE_VERSION is not X.Y.Z: ${JSON.stringify(version)}`,
     );
   }
-  const tarballPath = positionals[0];
-  const file = path.basename(tarballPath);
-  const version = TARBALL.exec(file)?.[1];
-  if (version === undefined) {
-    throw new Error(`${tarballPath} is not named homefleet-X.Y.Z.tgz`);
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw new Error("HOMEFLEET_RELEASE_SHA256 is not 64 lower-case hex digits");
   }
+  const size = Number(sizeText);
+  if (!/^[1-9]\d*$/.test(sizeText) || size > MAX_SIZE) {
+    throw new Error(
+      `HOMEFLEET_RELEASE_SIZE is not a size from 1 to ${MAX_SIZE}: ${JSON.stringify(sizeText)}`,
+    );
+  }
+  return { version, sha256, size };
+}
+
+async function main() {
+  const { values, positionals } = parseArgs({
+    options: {
+      "key-file": { type: "string" },
+      digest: { type: "string" },
+    },
+    allowPositionals: true,
+  });
+  const digestDir = values.digest;
+  if (
+    digestDir !== undefined
+      ? positionals.length !== 0
+      : positionals.length !== 1
+  ) {
+    throw new Error(USAGE);
+  }
+  let version;
+  let sha256;
+  let size;
+  let dir;
+  if (digestDir !== undefined) {
+    ({ version, sha256, size } = digestFromEnv());
+    dir = digestDir;
+  } else {
+    const tarballPath = positionals[0];
+    version = TARBALL.exec(path.basename(tarballPath))?.[1];
+    if (version === undefined) {
+      throw new Error(`${tarballPath} is not named homefleet-X.Y.Z.tgz`);
+    }
+    ({ sha256, size } = await hashFile(tarballPath));
+    // ReleaseManifestSchema requires a positive size: never sign what the
+    // verifier would reject.
+    if (size === 0) {
+      throw new Error(`${tarballPath} is empty`);
+    }
+    dir = path.dirname(tarballPath);
+  }
+  const file = `homefleet-${version}.tgz`;
   const keyFile = values["key-file"];
   const pem =
     keyFile !== undefined
@@ -87,19 +145,13 @@ async function main() {
     throw new Error("the release signing key must be an Ed25519 private key");
   }
 
-  const { sha256, size } = await hashFile(tarballPath);
-  // ReleaseManifestSchema requires a positive size: never sign what the
-  // verifier would reject.
-  if (size === 0) {
-    throw new Error(`${tarballPath} is empty`);
-  }
   // Same fixed key order + trailing newline as serializeManifest().
   const manifestBytes = Buffer.from(
     `${JSON.stringify({ version, file, sha256, size, hfpVersion: await hfpVersion() })}\n`,
     "utf8",
   );
   const signature = sign(null, manifestBytes, key).toString("base64");
-  const dir = path.dirname(tarballPath);
+  await mkdir(dir, { recursive: true });
   const manifestPath = path.join(dir, `homefleet-${version}.manifest.json`);
   const signaturePath = path.join(dir, `homefleet-${version}.manifest.sig`);
   await writeFile(manifestPath, manifestBytes);

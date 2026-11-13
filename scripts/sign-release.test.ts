@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   hashFile,
   serializeManifest,
@@ -71,8 +71,9 @@ function run(
   box: Sandbox,
   args: string[],
   key?: string,
+  extraEnv: Record<string, string> = {},
 ): { code: number; stdout: string; stderr: string } {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
   delete env.HOMEFLEET_RELEASE_KEY;
   if (key !== undefined) env.HOMEFLEET_RELEASE_KEY = key;
   try {
@@ -220,4 +221,124 @@ test("refuses a version.ts without a valid HFP_PROTOCOL_VERSION", async () => {
     expect(out.stderr).toMatch(/HFP_PROTOCOL_VERSION/);
   }
   expect(existsSync(manifestOf(box))).toBe(false);
+});
+
+// --digest: the CI sign job never receives a file, only three strings that
+// pack computed. verify then checks the real tarball against the manifest.
+describe("--digest <dir>: sign a version, sha256 and size, no file", () => {
+  async function digestOf(box: Sandbox) {
+    const { sha256, size } = await hashFile(box.tarball);
+    return {
+      HOMEFLEET_RELEASE_VERSION: "0.5.0",
+      HOMEFLEET_RELEASE_SHA256: sha256,
+      HOMEFLEET_RELEASE_SIZE: String(size),
+    };
+  }
+
+  test("writes the same manifest as signing the file, into <dir>", async () => {
+    const box = await sandbox();
+    const keys = generateReleaseKeyPair();
+    const fromFile = run(box, [box.tarball], keys.privateKeyPem);
+    expect(fromFile.code).toBe(0);
+    const expected = await readFile(manifestOf(box), "utf8");
+
+    const outDir = path.join(box.root, "signed");
+    const out = run(
+      box,
+      ["--digest", outDir],
+      keys.privateKeyPem,
+      await digestOf(box),
+    );
+    expect(out.code).toBe(0);
+    const manifest = path.join(outDir, "homefleet-0.5.0.manifest.json");
+    expect(await readFile(manifest, "utf8")).toBe(expected);
+    const result = await verifyRelease({
+      manifestBytes: await readFile(manifest),
+      signature: await readFile(
+        path.join(outDir, "homefleet-0.5.0.manifest.sig"),
+        "utf8",
+      ),
+      tarballPath: box.tarball,
+      expectedVersion: "0.5.0",
+      publicKeys: [keys.publicKeyBase64],
+    });
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  test("a digest that does not match the tarball fails verification", async () => {
+    const box = await sandbox();
+    const keys = generateReleaseKeyPair();
+    const outDir = path.join(box.root, "signed");
+    const lie = {
+      ...(await digestOf(box)),
+      HOMEFLEET_RELEASE_SHA256: "a".repeat(64),
+    };
+    expect(run(box, ["--digest", outDir], keys.privateKeyPem, lie).code).toBe(
+      0,
+    );
+    const result = await verifyRelease({
+      manifestBytes: await readFile(
+        path.join(outDir, "homefleet-0.5.0.manifest.json"),
+      ),
+      signature: await readFile(
+        path.join(outDir, "homefleet-0.5.0.manifest.sig"),
+        "utf8",
+      ),
+      tarballPath: box.tarball,
+      expectedVersion: "0.5.0",
+      publicKeys: [keys.publicKeyBase64],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  test.each([
+    [
+      "a non-semver version",
+      { HOMEFLEET_RELEASE_VERSION: "0.5.0-rc.1" },
+      /VERSION/,
+    ],
+    [
+      "a path in the version",
+      { HOMEFLEET_RELEASE_VERSION: "../0.5.0" },
+      /VERSION/,
+    ],
+    [
+      "an upper-case sha256",
+      { HOMEFLEET_RELEASE_SHA256: "A".repeat(64) },
+      /SHA256/,
+    ],
+    ["a short sha256", { HOMEFLEET_RELEASE_SHA256: "a".repeat(63) }, /SHA256/],
+    ["a zero size", { HOMEFLEET_RELEASE_SIZE: "0" }, /SIZE/],
+    ["a non-integer size", { HOMEFLEET_RELEASE_SIZE: "12.5" }, /SIZE/],
+    [
+      "a size over 100 MiB",
+      { HOMEFLEET_RELEASE_SIZE: String(100 * 1024 * 1024 + 1) },
+      /SIZE/,
+    ],
+    ["a missing value", { HOMEFLEET_RELEASE_SIZE: "" }, /SIZE/],
+  ])("refuses %s", async (_label, override, message) => {
+    const box = await sandbox();
+    const outDir = path.join(box.root, "signed");
+    const out = run(
+      box,
+      ["--digest", outDir],
+      generateReleaseKeyPair().privateKeyPem,
+      { ...(await digestOf(box)), ...override },
+    );
+    expect(out.code).toBe(1);
+    expect(out.stderr).toMatch(message);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  test("refuses --digest with a tarball argument too", async () => {
+    const box = await sandbox();
+    const out = run(
+      box,
+      ["--digest", path.join(box.root, "signed"), box.tarball],
+      generateReleaseKeyPair().privateKeyPem,
+      await digestOf(box),
+    );
+    expect(out.code).toBe(1);
+    expect(out.stderr).toMatch(/usage/);
+  });
 });

@@ -18,12 +18,24 @@ export interface Workflow {
 type YamlMap = Record<string, unknown>;
 
 /** The only command the key-holding `sign` job may run. */
-export const SIGN_RUN =
-  "node src/scripts/sign-release.mjs release/homefleet-*.tgz";
+export const SIGN_RUN = "node src/scripts/sign-release.mjs --digest release";
 
-const SIGN_KEY_ENV = "HOMEFLEET_RELEASE_KEY";
-// biome-ignore lint/suspicious/noTemplateCurlyInString: a literal GitHub expression
-const SIGN_KEY_VALUE = "${{ secrets.HOMEFLEET_RELEASE_KEY }}";
+/**
+ * The sign step's env, exactly: the key, and the digest `pack` computed. The
+ * job handles no file, so nothing downloaded can overwrite the signer or the
+ * Node it runs on (PR 25 review loop, round 4). These are also the only
+ * expressions allowed anywhere in the sign job.
+ */
+const SIGN_ENV: Record<string, string> = {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub expressions
+  HOMEFLEET_RELEASE_KEY: "${{ secrets.HOMEFLEET_RELEASE_KEY }}",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub expressions
+  HOMEFLEET_RELEASE_VERSION: "${{ needs.pack.outputs.version }}",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub expressions
+  HOMEFLEET_RELEASE_SHA256: "${{ needs.pack.outputs.sha256 }}",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub expressions
+  HOMEFLEET_RELEASE_SIZE: "${{ needs.pack.outputs.size }}",
+};
 const SIGN_SPARSE = [
   "packages/protocol/src/version.ts",
   "scripts/sign-release.mjs",
@@ -58,14 +70,10 @@ const SIGN_ACTIONS: Record<
     allowed: ["node-version", "package-manager-cache"],
     required: { "node-version": 22, "package-manager-cache": false },
   },
-  "actions/download-artifact": {
-    allowed: ["name", "path"],
-    required: { name: "homefleet-tarball", path: "release" },
-  },
   "actions/upload-artifact": {
     allowed: ["name", "path", "if-no-files-found"],
     required: {
-      name: "homefleet-release",
+      name: "homefleet-signature",
       "if-no-files-found": "error",
     },
   },
@@ -76,7 +84,6 @@ const SIGN_LINES: Record<string, Record<string, string[]>> = {
   "actions/checkout": { "sparse-checkout": SIGN_SPARSE },
   "actions/upload-artifact": {
     path: [
-      "release/homefleet-*.tgz",
       "release/homefleet-*.manifest.json",
       "release/homefleet-*.manifest.sig",
     ],
@@ -213,7 +220,7 @@ export function releaseEnvironmentHolders(workflows: Workflow[]): string[] {
 }
 
 const KEY_REFERENCE =
-  /secrets\s*\.\s*HOMEFLEET_RELEASE_KEY|secrets\s*\.\s*\*|secrets\s*\[|toJSON\(\s*secrets\s*\)/i;
+  /secrets\s*\.\s*HOMEFLEET_RELEASE_KEY|secrets\s*\.\s*\*|secrets\s*\[|toJSON\(\s*secrets\s*\)/iu;
 
 /** Every string key and value inside a parsed value. */
 function strings(value: unknown): string[] {
@@ -232,8 +239,8 @@ function strings(value: unknown): string[] {
  * merely mentions the word fails closed.
  */
 function usesSecrets(s: string): boolean {
-  return /\bsecrets\b/i.test(
-    s.replace(/\bsecrets\s*\.\s*GITHUB_TOKEN\b/gi, ""),
+  return /\bsecrets\b/iu.test(
+    s.replace(/\bsecrets\s*\.\s*GITHUB_TOKEN\b/giu, ""),
   );
 }
 
@@ -325,17 +332,8 @@ function runStepViolations(step: YamlMap, i: number): string[] {
   }
   if (step.run !== SIGN_RUN)
     problems.push(`${where}: run step not allowed: ${String(step.run)}`);
-  const env = step.env;
-  const keys = isPlainMap(env) ? Object.keys(env) : [];
-  if (
-    !isPlainMap(env) ||
-    keys.length !== 1 ||
-    keys[0] !== SIGN_KEY_ENV ||
-    env[SIGN_KEY_ENV] !== SIGN_KEY_VALUE
-  ) {
-    problems.push(
-      `${where}: env must be exactly ${SIGN_KEY_ENV}: ${SIGN_KEY_VALUE}`,
-    );
+  if (JSON.stringify(step.env) !== JSON.stringify(SIGN_ENV)) {
+    problems.push(`${where}: env must be exactly ${JSON.stringify(SIGN_ENV)}`);
   }
   return problems;
 }
@@ -353,9 +351,18 @@ export function signJobViolations(job: unknown): string[] {
     if (!SIGN_JOB_KEYS.has(key)) problems.push(`job-level ${key} not allowed`);
   }
   const expressions = strings(job).filter((x) => x.includes("${{"));
-  if (expressions.length !== 1 || expressions[0] !== SIGN_KEY_VALUE) {
+  const allowed = Object.values(SIGN_ENV);
+  if (
+    JSON.stringify([...expressions].sort()) !==
+    JSON.stringify([...allowed].sort())
+  ) {
     problems.push(
-      `the only expression allowed in sign is the key value ${SIGN_KEY_VALUE}, found ${JSON.stringify(expressions)}`,
+      `the only expressions allowed in sign are the pinned env values, found ${JSON.stringify(expressions)}`,
+    );
+  }
+  if (job.needs !== "pack") {
+    problems.push(
+      `needs must be exactly pack, found ${JSON.stringify(job.needs)}`,
     );
   }
   if (job.environment !== "release") {
