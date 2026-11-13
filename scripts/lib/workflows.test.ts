@@ -30,7 +30,13 @@ const dir = path.resolve(
 );
 const workflows = readdirSync(dir)
   .filter((f) => /\.ya?ml$/i.test(f))
-  .map((f) => ({ name: f, text: readFileSync(path.join(dir, f), "utf8") }));
+  .map((f) => ({
+    name: f,
+    // fatal: an undecodable byte fails here instead of becoming U+FFFD.
+    text: new TextDecoder("utf-8", { fatal: true }).decode(
+      readFileSync(path.join(dir, f)),
+    ),
+  }));
 const text = (name: string) =>
   workflows.find((w) => w.name === name)?.text ?? "";
 const release = text("release.yml");

@@ -52,7 +52,10 @@ const goodSign = `  sign:
       - uses: actions/upload-artifact@${SHA} # v4.6.2
         with:
           name: homefleet-release
-          path: release/homefleet-*
+          path: |
+            release/homefleet-*.tgz
+            release/homefleet-*.manifest.json
+            release/homefleet-*.manifest.sig
           if-no-files-found: error
 `;
 
@@ -576,8 +579,8 @@ describe("sign job: environment and upload are pinned", () => {
     ],
     [
       "uploading src",
-      "          path: release/homefleet-*\n",
-      "          path: src\n",
+      "            release/homefleet-*.tgz\n",
+      "            src\n",
     ],
     [
       "upload not failing on no files",
@@ -638,4 +641,79 @@ describe("dangerousTriggers", () => {
       ),
     ).toEqual([]);
   });
+});
+
+// Review loop, round 3.
+test("releaseKeyUsers is not fooled by '}}' inside a quoted string", () => {
+  expect(
+    releaseKeyUsers([
+      {
+        name: "a.yml",
+        text: wf(
+          `  x:\n    steps:\n      - run: echo "\${{ format('}}', (secrets).HOMEFLEET_RELEASE_KEY) }}"\n`,
+        ),
+      },
+    ]),
+  ).toEqual(["a.yml#x"]);
+});
+
+describe("sign job: no expression anywhere but the one pinned key value", () => {
+  test.each([
+    [
+      "the sign step's name",
+      "      - name: Sign the tarball\n",
+      `      - name: "\${{ toJSON(secrets) }}"\n`,
+    ],
+    [
+      "an action step's name",
+      `      - uses: actions/download-artifact@${SHA} # v4.3.0\n`,
+      `      - name: "\${{ secrets.HOMEFLEET_RELEASE_KEY }}"\n        uses: actions/download-artifact@${SHA} # v4.3.0\n`,
+    ],
+  ])("flags an expression in %s", (_label, from, to) => {
+    expect(goodSign).toContain(from);
+    expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
+  });
+
+  test.each([
+    ["nightly"],
+    ["latest"],
+    ["node"],
+    ["24-nightly"],
+  ])("flags node-version %s", (version) => {
+    expect(
+      signOf(
+        wf(
+          goodSign.replace(
+            "          node-version: 22\n",
+            `          node-version: ${version}\n`,
+          ),
+        ),
+      ),
+    ).not.toBe("");
+  });
+
+  test("flags a missing node-version", () => {
+    expect(
+      signOf(wf(goodSign.replace("          node-version: 22\n", ""))),
+    ).not.toBe("");
+  });
+
+  test("flags an upload glob that would carry extra unsigned files", () => {
+    expect(
+      signOf(
+        wf(
+          goodSign.replace(
+            "          path: |\n            release/homefleet-*.tgz\n            release/homefleet-*.manifest.json\n            release/homefleet-*.manifest.sig\n",
+            "          path: release/homefleet-*\n",
+          ),
+        ),
+      ),
+    ).not.toBe("");
+  });
+});
+
+test("the replacement character from undecodable bytes is rejected", () => {
+  expect(
+    workflowProblems(wf(`${goodSign}  b: # x\uFFFD\n    runs-on: x\n`)).length,
+  ).toBeGreaterThan(0);
 });

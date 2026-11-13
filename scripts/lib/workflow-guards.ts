@@ -56,7 +56,7 @@ const SIGN_ACTIONS: Record<
   },
   "actions/setup-node": {
     allowed: ["node-version", "package-manager-cache"],
-    required: { "package-manager-cache": false },
+    required: { "node-version": 22, "package-manager-cache": false },
   },
   "actions/download-artifact": {
     allowed: ["name", "path"],
@@ -66,9 +66,20 @@ const SIGN_ACTIONS: Record<
     allowed: ["name", "path", "if-no-files-found"],
     required: {
       name: "homefleet-release",
-      path: "release/homefleet-*",
       "if-no-files-found": "error",
     },
+  },
+};
+
+/** Multi-line inputs of the sign actions, pinned line by line (order free). */
+const SIGN_LINES: Record<string, Record<string, string[]>> = {
+  "actions/checkout": { "sparse-checkout": SIGN_SPARSE },
+  "actions/upload-artifact": {
+    path: [
+      "release/homefleet-*.tgz",
+      "release/homefleet-*.manifest.json",
+      "release/homefleet-*.manifest.sig",
+    ],
   },
 };
 
@@ -94,7 +105,7 @@ const isPlainMap = (v: unknown): v is YamlMap =>
  */
 const DIVERGENT_CHARS =
   // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]|[\s\S]\uFEFF/;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFFFD]|[\s\S]\uFEFF/;
 
 function load(text: string): { root: unknown; problems: string[] } {
   const doc = parseDocument(text, { uniqueKeys: true, merge: false });
@@ -215,19 +226,15 @@ function strings(value: unknown): string[] {
 }
 
 /**
- * True for an expression that uses `secrets` in any way except
- * `secrets.GITHUB_TOKEN`: grouping like `(secrets).X` or `toJSON((secrets))`
- * can't then slip past a pattern.
+ * True for any string that names `secrets` other than `secrets.GITHUB_TOKEN`.
+ * No expression parsing: a `}}` inside a quoted string, grouping like
+ * `(secrets).X`, or any other expression form can't slip past. A script that
+ * merely mentions the word fails closed.
  */
 function usesSecrets(s: string): boolean {
-  for (const m of s.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
-    const expr = (m[1] as string).replace(
-      /\bsecrets\s*\.\s*GITHUB_TOKEN\b/gi,
-      "",
-    );
-    if (/\bsecrets\b/i.test(expr)) return true;
-  }
-  return false;
+  return /\bsecrets\b/i.test(
+    s.replace(/\bsecrets\s*\.\s*GITHUB_TOKEN\b/gi, ""),
+  );
 }
 
 const reachesKey = (value: unknown): boolean =>
@@ -289,17 +296,20 @@ function actionStepViolations(step: YamlMap, i: number): string[] {
       );
     }
   }
-  if (action === "actions/checkout") {
-    const paths =
-      typeof inputs["sparse-checkout"] === "string"
-        ? inputs["sparse-checkout"]
+  const lineRules: Record<string, string[]> =
+    (action === undefined ? undefined : SIGN_LINES[action]) ?? {};
+  for (const [key, expected] of Object.entries(lineRules)) {
+    const value = inputs[key];
+    const lines =
+      typeof value === "string"
+        ? value
             .split(/\r?\n/)
-            .map((p) => p.trim())
-            .filter((p) => p !== "")
+            .map((l) => l.trim())
+            .filter((l) => l !== "")
         : [];
-    if (JSON.stringify(paths.sort()) !== JSON.stringify(SIGN_SPARSE)) {
+    if (JSON.stringify(lines.sort()) !== JSON.stringify([...expected].sort())) {
       problems.push(
-        `${where}: sparse-checkout must be exactly ${SIGN_SPARSE.join(", ")}`,
+        `${where}: ${action} ${key} must be exactly ${expected.join(", ")}`,
       );
     }
   }
@@ -341,6 +351,12 @@ export function signJobViolations(job: unknown): string[] {
   const problems: string[] = [];
   for (const key of Object.keys(job)) {
     if (!SIGN_JOB_KEYS.has(key)) problems.push(`job-level ${key} not allowed`);
+  }
+  const expressions = strings(job).filter((x) => x.includes("${{"));
+  if (expressions.length !== 1 || expressions[0] !== SIGN_KEY_VALUE) {
+    problems.push(
+      `the only expression allowed in sign is the key value ${SIGN_KEY_VALUE}, found ${JSON.stringify(expressions)}`,
+    );
   }
   if (job.environment !== "release") {
     problems.push(

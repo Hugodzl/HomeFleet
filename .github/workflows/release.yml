@@ -107,7 +107,12 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: homefleet-release
-          path: release/homefleet-*
+          # The three signed-release files only: anything else pack slipped
+          # into the tarball artifact stays out of the Release.
+          path: |
+            release/homefleet-*.tgz
+            release/homefleet-*.manifest.json
+            release/homefleet-*.manifest.sig
           if-no-files-found: error
 
   # Verified against the key PINNED in the daemon source, so a secret/key
