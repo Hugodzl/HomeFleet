@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "vitest";
 import {
+  indentationProblems,
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
@@ -197,15 +198,10 @@ describe("environment and key forms the guards must still catch", () => {
     ).toEqual(["a.yml#x"]);
   });
 
-  test("parses jobs under a commented jobs: line and with 4-space indentation", () => {
+  test("parses jobs under a commented jobs: line", () => {
     expect([
       ...parseJobs("on: push\njobs: # all\n  a:\n    runs-on: x\n").keys(),
     ]).toEqual(["a"]);
-    const four = "on: push\njobs:\n    a:\n        environment: release\n";
-    expect([...parseJobs(four).keys()]).toEqual(["a"]);
-    expect(releaseEnvironmentHolders([{ name: "f.yml", text: four }])).toEqual([
-      "f.yml#a",
-    ]);
   });
 });
 
@@ -263,4 +259,70 @@ test("a blank line or comment inside permissions: does not end the scan", () => 
       ),
     ),
   ).toEqual(["contents: read", "packages: write"]);
+});
+
+// PR 25 round-2 re-review: make the guards fail closed.
+describe("indentationProblems: only plain 2-space YAML is accepted", () => {
+  test("the intended layout passes, block scalars included", () => {
+    const text = wf(
+      `${goodSign}  b:\n    runs-on: x\n    steps:\n      - run: |\n          echo a\n              echo deeper\n`,
+    );
+    expect(indentationProblems(text)).toEqual([]);
+  });
+
+  test.each([
+    ["a 4-space file", "on: push\njobs:\n    a:\n        runs-on: x\n"],
+    [
+      "a job body indented 6",
+      "on: push\njobs:\n  a:\n      environment: release\n",
+    ],
+    ["an odd indent", "on: push\njobs:\n  a:\n   runs-on: x\n"],
+    [
+      "a 4-space step with - env:",
+      "on: push\njobs:\n  sign:\n    steps:\n        - env:\n            NODE_OPTIONS: x\n",
+    ],
+  ])("flags %s", (_label, text) => {
+    expect(indentationProblems(text).length).toBeGreaterThan(0);
+  });
+});
+
+describe("key references are found in the raw text, comments included", () => {
+  test.each([
+    [
+      "a # line inside a run: | script",
+      `  x:\n    steps:\n      - run: |\n          # \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n`,
+    ],
+    [
+      "an env value block scalar starting with #",
+      `  x:\n    env:\n      K: >-\n        # \${{ secrets.HOMEFLEET_RELEASE_KEY }}\n`,
+    ],
+    [
+      "an escaped quote before a #",
+      `  x:\n    env:\n      K: "\\" # \${{ secrets.HOMEFLEET_RELEASE_KEY }}"\n`,
+    ],
+  ])("finds %s", (_label, jobs) => {
+    expect(releaseKeyUsers([{ name: "a.yml", text: wf(jobs) }])).toEqual([
+      "a.yml#x",
+    ]);
+  });
+});
+
+describe("an environment value that is not a plain name counts as holding it", () => {
+  test.each([
+    ["an expression", `    environment: \${{ inputs.env }}\n`],
+    ["an anchor", "    environment: &e release\n"],
+    ["an alias", "    environment: *e\n"],
+    ["a tag", "    environment: !!str release\n"],
+    ["a multi-line flow map", "    environment: {\n      name: release }\n"],
+    [
+      "an expression name",
+      `    environment:\n      name: \${{ inputs.env }}\n`,
+    ],
+  ])("%s", (_label, env) => {
+    expect(
+      releaseEnvironmentHolders([
+        { name: "a.yml", text: wf(`  x:\n${env}    runs-on: x\n`) },
+      ]),
+    ).toEqual(["a.yml#x"]);
+  });
 });

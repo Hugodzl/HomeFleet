@@ -1,9 +1,10 @@
 /**
  * Text-level guards over GitHub workflow files (spec 2026-11-12, PR 1; PR 25
- * review and re-review). No YAML dependency. Before matching, every file is
- * normalized: `#` comments are stripped (outside quotes) and indentation is
- * rescaled to 2 spaces per level, so jobs are the 2-space keys under
- * `jobs:` and job keys are 4-space. Each guard is tested on bad text in
+ * review and re-reviews). No YAML dependency, so the guards FAIL CLOSED:
+ * workflows must be plain 2-space YAML (indentationProblems), structure is
+ * read with `#` comments stripped, but key references are searched in the
+ * RAW text, and any environment value that is not a plain name counts as
+ * the release environment. Each guard is tested on bad text in
  * workflow-guards.test.ts and run on the real files in workflows.test.ts.
  */
 
@@ -46,68 +47,126 @@ function stripComment(line: string): string {
 const indentOf = (line: string): number =>
   line.length - line.trimStart().length;
 
-/** Comments stripped, CRLF removed, indentation rescaled to 2 spaces per level. */
+const toLines = (text: string): string[] =>
+  text.replaceAll("\r\n", "\n").split("\n");
+
+/** Comments stripped, CRLF removed. Indentation is left as is: see indentationProblems. */
 export function normalize(text: string): string {
-  const lines = text.replaceAll("\r\n", "\n").split("\n").map(stripComment);
-  const unit = Math.min(
-    ...lines
-      .filter((l) => l.trim() !== "")
-      .map(indentOf)
-      .filter((n) => n > 0),
-  );
-  if (!Number.isFinite(unit) || unit === 2) return lines.join("\n");
-  return lines
-    .map((l) => " ".repeat(Math.floor(indentOf(l) / unit) * 2) + l.trimStart())
-    .join("\n");
+  return toLines(text).map(stripComment).join("\n");
+}
+
+const BLOCK_SCALAR = /:\s*[|>][-+0-9]*$/;
+
+/**
+ * Why this file is not plain 2-space YAML; empty when it is. Every
+ * structural line is indented by an even number of spaces and at most one
+ * level (2 spaces) deeper than the line it nests under; block-scalar bodies
+ * (`run: |`) are free-form. The other guards assume this layout, so a file
+ * that breaks it fails instead of being half-read.
+ */
+export function indentationProblems(text: string): string[] {
+  const problems: string[] = [];
+  const lines = toLines(text).map(stripComment);
+  let parent = 0;
+  let scalarParent: number | undefined;
+  lines.forEach((line, i) => {
+    if (line.trim() === "") return;
+    const indent = indentOf(line);
+    if (scalarParent !== undefined) {
+      if (indent > scalarParent) return;
+      scalarParent = undefined;
+    }
+    if (indent % 2 !== 0) {
+      problems.push(`line ${i + 1}: odd indentation (${indent})`);
+    } else if (indent > parent + 2) {
+      problems.push(
+        `line ${i + 1}: indented ${indent - parent} spaces under its parent, not 2`,
+      );
+    }
+    const dash = /^\s*-\s+/.exec(line);
+    // Keys of a list item ("- uses: x" then "with:") sit 2 deeper than the dash.
+    parent = dash !== null ? indent + 2 : indent;
+    if (BLOCK_SCALAR.test(line)) scalarParent = indent;
+  });
+  return problems;
+}
+
+interface JobRange {
+  id: string;
+  start: number;
+  end: number;
+}
+
+/** Line ranges of the jobs, found on the comment-stripped text; same line numbers as the raw text. */
+function jobRanges(lines: string[]): { jobsLine: number; jobs: JobRange[] } {
+  const jobsLine = lines.findIndex((l) => /^jobs:\s*$/.test(l));
+  if (jobsLine === -1) return { jobsLine: lines.length, jobs: [] };
+  const jobs: JobRange[] = [];
+  for (let i = jobsLine + 1; i < lines.length; i++) {
+    const m = /^ {2}([A-Za-z_][\w-]*):\s*$/.exec(lines[i] as string);
+    if (m === null) continue;
+    const last = jobs.at(-1);
+    if (last !== undefined) last.end = i;
+    jobs.push({ id: m[1] as string, start: i, end: lines.length });
+  }
+  return { jobsLine, jobs };
 }
 
 function preamble(text: string): string {
-  const s = normalize(text);
-  const at = s.search(/^jobs:\s*$/m);
-  return at === -1 ? s : s.slice(0, at);
+  const lines = toLines(normalize(text));
+  return lines.slice(0, jobRanges(lines).jobsLine).join("\n");
 }
 
 export function parseJobs(text: string): Map<string, string> {
-  const s = normalize(text);
+  const lines = toLines(normalize(text));
   const result = new Map<string, string>();
-  const at = /^jobs:\s*$/m.exec(s);
-  if (at === null) return result;
-  const body = s.slice(at.index + at[0].length + 1);
-  const marks = [...body.matchAll(/^ {2}([A-Za-z_][\w-]*):\s*$/gm)];
-  marks.forEach((m, i) => {
-    const end = marks[i + 1]?.index ?? body.length;
-    result.set(m[1] as string, body.slice(m.index, end));
-  });
+  for (const { id, start, end } of jobRanges(lines).jobs) {
+    result.set(id, lines.slice(start, end).join("\n"));
+  }
   return result;
 }
 
 const unquote = (v: string): string => v.trim().replace(/^(['"])(.*)\1$/, "$2");
+
+/** A plain environment name, or DYNAMIC for anything the guards can't read literally. */
+const DYNAMIC = "(not a plain name)";
+
+function plainName(value: string): string {
+  const v = unquote(value);
+  return /^[\w-]+$/.test(v) ? v.toLowerCase() : DYNAMIC;
+}
 
 function environmentName(job: string): string | undefined {
   const m = /^ {4}environment:[ \t]*(.*)$/m.exec(job);
   if (m === null) return undefined;
   const value = (m[1] as string).trim();
   if (value.startsWith("{")) {
-    const name = /\bname:\s*([^,}]+)/.exec(value)?.[1];
-    return name === undefined ? undefined : unquote(name).toLowerCase();
+    if (!value.endsWith("}")) return DYNAMIC;
+    const name = /^\{\s*name:\s*([^,}]+?)\s*[,}]/.exec(value)?.[1];
+    return name === undefined ? DYNAMIC : plainName(name);
   }
-  if (value !== "") return unquote(value).toLowerCase();
+  if (value !== "") return plainName(value);
   const rest = job.slice(m.index + m[0].length + 1).split("\n");
   for (const line of rest) {
     if (line.trim() === "") continue;
     if (indentOf(line) <= 4) break;
     const name = /^ {6}name:[ \t]*(.+)$/.exec(line)?.[1];
-    if (name !== undefined) return unquote(name).toLowerCase();
+    if (name !== undefined) return plainName(name);
   }
-  return undefined;
+  return DYNAMIC;
 }
 
-/** `file#job` for every job, in any workflow, that uses the `release` environment (any case). */
+/**
+ * `file#job` for every job, in any workflow, that uses the `release`
+ * environment (any case) or an environment the guards can't read literally
+ * (an expression, anchor, alias, tag, multi-line flow map): fail closed.
+ */
 export function releaseEnvironmentHolders(workflows: Workflow[]): string[] {
   const holders: string[] = [];
   for (const { name, text } of workflows) {
     for (const [id, job] of parseJobs(text)) {
-      if (environmentName(job) === "release") holders.push(`${name}#${id}`);
+      const env = environmentName(job);
+      if (env === "release" || env === DYNAMIC) holders.push(`${name}#${id}`);
     }
   }
   return holders;
@@ -119,15 +178,22 @@ const KEY_REFERENCE =
 /**
  * `file#job` for every job that references the release key or could reach
  * it indirectly (`secrets: inherit`, `secrets[...]`, `toJSON(secrets)`), and
- * `file#(workflow)` when the workflow-level preamble does. Case-insensitive,
- * like GitHub's secret names.
+ * `file#(workflow)` when the workflow-level preamble does. Searched in the
+ * RAW text, comments included — a `#` inside a `run: |` script is content
+ * GitHub still expands — and case-insensitively, like secret names.
  */
 export function releaseKeyUsers(workflows: Workflow[]): string[] {
   const users: string[] = [];
   for (const { name, text } of workflows) {
-    if (KEY_REFERENCE.test(preamble(text))) users.push(`${name}#(workflow)`);
-    for (const [id, job] of parseJobs(text)) {
-      if (KEY_REFERENCE.test(job)) users.push(`${name}#${id}`);
+    const raw = toLines(text);
+    const { jobsLine, jobs } = jobRanges(toLines(normalize(text)));
+    if (KEY_REFERENCE.test(raw.slice(0, jobsLine).join("\n"))) {
+      users.push(`${name}#(workflow)`);
+    }
+    for (const { id, start, end } of jobs) {
+      if (KEY_REFERENCE.test(raw.slice(start, end).join("\n"))) {
+        users.push(`${name}#${id}`);
+      }
     }
   }
   return users;

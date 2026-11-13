@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
+  indentationProblems,
   parseJobs,
   releaseEnvironmentHolders,
   releaseKeyUsers,
@@ -122,6 +123,12 @@ test("publish treats only 'release not found' as no release", () => {
   const job = parseJobs(release).get("release") ?? "";
   expect(job).toContain("release not found");
   expect(job).not.toMatch(/gh release view[^\n]*2>\/dev\/null/);
+});
+
+test("every workflow is plain 2-space YAML, which the guards assume", () => {
+  for (const { name, text } of workflows) {
+    expect(indentationProblems(text), name).toEqual([]);
+  }
 });
 
 test("every workflow parses into jobs (a guard that sees no jobs checks nothing)", () => {
