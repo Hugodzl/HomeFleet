@@ -1,20 +1,10 @@
 /**
- * Release signing (fleet-upgrade spec, Phase 1). Uses the daemon's own
- * manifest serializer so CI and the verifier can never disagree on the
- * signed bytes.
+ * Release-key helpers shared by release-keygen and verify-release. Signing
+ * itself lives in scripts/sign-release.mjs, which is dependency-free so the
+ * release workflow's key-holding job installs nothing.
  */
-import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
 import path from "node:path";
-import {
-  hashFile,
-  manifestFileName,
-  ReleaseManifestSchema,
-  releaseFileName,
-  serializeManifest,
-  signatureFileName,
-} from "../../packages/daemon/src/upgrade/manifest.js";
-import { HFP_PROTOCOL_VERSION } from "../../packages/protocol/src/version.js";
 
 export function versionFromTarball(tarballPath: string): string {
   const match = /^homefleet-(\d+\.\d+\.\d+)\.tgz$/.exec(
@@ -39,32 +29,4 @@ export function generateReleaseKeyPair(): {
       .export({ format: "der", type: "spki" })
       .toString("base64"),
   };
-}
-
-export async function signRelease(options: {
-  tarballPath: string;
-  privateKeyPem: string;
-  hfpVersion?: string;
-}): Promise<{ manifestPath: string; signaturePath: string }> {
-  const version = versionFromTarball(options.tarballPath);
-  const key = createPrivateKey(options.privateKeyPem);
-  if (key.asymmetricKeyType !== "ed25519") {
-    throw new Error("the release signing key must be an Ed25519 private key");
-  }
-  const { sha256, size } = await hashFile(options.tarballPath);
-  const manifest = ReleaseManifestSchema.parse({
-    version,
-    file: releaseFileName(version),
-    sha256,
-    size,
-    hfpVersion: options.hfpVersion ?? HFP_PROTOCOL_VERSION,
-  });
-  const manifestBytes = Buffer.from(serializeManifest(manifest), "utf8");
-  const signature = sign(null, manifestBytes, key).toString("base64");
-  const dir = path.dirname(options.tarballPath);
-  const manifestPath = path.join(dir, manifestFileName(version));
-  const signaturePath = path.join(dir, signatureFileName(version));
-  await writeFile(manifestPath, manifestBytes);
-  await writeFile(signaturePath, `${signature}\n`);
-  return { manifestPath, signaturePath };
 }

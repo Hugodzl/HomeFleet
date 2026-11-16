@@ -248,6 +248,21 @@ the 413 before the server destroys the socket (e.g. `res.end()` then destroy
 on `finish`, or read with `Connection: close`), or assert "413 or a reset
 after the 413 was written" in the test.
 
+## Release and CI follow-ups (from the 2026-11-12 design)
+
+Proposed in [the release-candidates design](specs/2026-11-12-release-candidates-design.md),
+not yet scheduled.
+
+- **Root `AGENTS.md`:** make the agent working rules visible in the repo
+  (independent review, release flow, rig safety). Today they live in Hugo's
+  private Claude memory.
+- **Mutation testing** (e.g. Stryker), non-blocking, on `upgrade/` and the
+  auth code, reported per PR. Agents write both the code and its tests, so
+  coverage alone proves little.
+- **`pnpm release:prep X.Y.Z`:** one script for the four-place version bump.
+- **OpenSSF Scorecard run:** explain the expected ceiling for a solo repo
+  rather than chase it.
+
 ## Known technical debt (from v0.1)
 
 Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md).
