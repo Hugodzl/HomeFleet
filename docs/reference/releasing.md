@@ -100,9 +100,22 @@ data dirs. What needs hardware goes into the PR as steps for Hugo.
    and a `**Full changelog:**` compare link.
 3. Update every user-facing text that names the current version or what has
    shipped: the README **Status** banner, the "currently vX.Y.Z" note in
-   README **Install**, and the README **Roadmap** (mark items done with their
-   version). Check the GitHub repo *About* description too (`gh repo view
-   --json description`) and edit it with `gh repo edit --description` if it
+   README **Install**, the README **Roadmap** (mark items done with their
+   version), a row in README **Proven on real hardware** for a new minor, and
+   the feature list in **What it does today** when the release adds one.
+   `pnpm check:docs` enforces the mechanical part, and it runs in CI, so the
+   prep PR can't go green without it:
+   - the Status banner and the "currently vX.Y.Z" note name the new version;
+   - the Roadmap mentions the new minor (`vX.Y`) and the hardware table has a
+     row for it;
+   - `docs/releases/vX.Y.Z.md` exists;
+   - the CLI block in `packages/daemon/README.md` equals the `USAGE` text in
+     `packages/daemon/src/cli/cli.ts`, and every top-level command is
+     mentioned in the README.
+
+   It can't judge prose, so still reread the Status banner and the feature
+   list, and check the GitHub repo *About* description (`gh repo view
+   --json description`); edit it with `gh repo edit --description` if it
    has gone stale. `git grep -n "v<previous>"` catches leftovers.
 4. `pnpm lint && pnpm typecheck && pnpm test`, commit, push.
 5. Optional dry run: `gh workflow run release.yml --ref main` — everything
