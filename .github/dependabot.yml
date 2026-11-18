@@ -1,6 +1,7 @@
-# Weekly, one grouped PR per ecosystem. A 7-day cooldown (zizmor's floor;
-# Dependabot's default is 3) keeps brand-new, possibly malicious versions out
-# while the ecosystem catches them. Security updates are exempt.
+# Weekly, one grouped PR per ecosystem; npm majors come one PR each. A
+# 7-day cooldown (zizmor's floor; Dependabot's default is 3) keeps
+# brand-new, possibly malicious versions out while the ecosystem catches
+# them. Security updates are exempt.
 # Actions stay SHA-pinned; Dependabot updates the SHA and its version comment.
 version: 2
 updates:
@@ -22,3 +23,5 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+        # Each major gets its own PR, so its CI run names its cause.
+        update-types: [minor, patch]
