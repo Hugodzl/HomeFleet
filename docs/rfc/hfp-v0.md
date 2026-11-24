@@ -678,6 +678,11 @@ the sender. The node serves only a version that is cached AND verified, and
 `{version}` MUST be strict semver `X.Y.Z`; the path is never derived from
 anything else. Any other request responds 404.
 
+For the version it is currently pushing, a node serves exactly the bytes it
+pushed (whose manifest the receiver already holds), which for a release
+candidate are not the final release of that version. For any other version
+it serves the final release (`vX.Y.Z`) if it has one cached.
+
 ## Discovery
 
 Discovery is how daemons find connection candidates on the LAN before any

@@ -52,7 +52,19 @@ export interface PreparedUpgrade {
   size: number;
 }
 
+/** The release a rollout pushed: the bytes this node's tarball route serves. */
+export interface ServedRelease {
+  version: string;
+  sha256: string;
+}
+
 export interface FleetUpgradeSurface {
+  /**
+   * The release this node's latest rollout pushed, or undefined before any.
+   * The tarball route serves exactly these bytes for that version, so a
+   * candidate push is never answered with a cached final (or vice versa).
+   */
+  servedRelease(): ServedRelease | undefined;
   /** Download + verify the target now, so the confirm dialog can say so. */
   prepare(input: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
@@ -66,6 +78,7 @@ export function createFleetUpgradeSurface(
   // while the first is still downloading (status() only says "running" after
   // rollout.start() returns).
   let starting = false;
+  let served: ServedRelease | undefined;
 
   function rolloutBusy(): boolean {
     return starting || options.rollout.status()?.state === "running";
@@ -106,24 +119,34 @@ export function createFleetUpgradeSurface(
       }
       const { prepared } = await resolveAndPrepare(input.version);
       const { manifestBytes, signature } = prepared;
-      return await options.rollout.start({
-        prepared,
-        manifestBytes,
-        signature,
-        ...(nodes !== undefined ? { nodes } : {}),
-        ...(input.forceLocal !== undefined
-          ? { forceLocal: input.forceLocal }
-          : {}),
-        ...(input.includeSelf !== undefined
-          ? { includeSelf: input.includeSelf }
-          : {}),
-      });
+      // Only now - past the busy check and a successful prepare - does the
+      // tarball route switch to these bytes, before the first push.
+      const before = served;
+      served = { version: prepared.version, sha256: prepared.sha256 };
+      return await options.rollout
+        .start({
+          prepared,
+          manifestBytes,
+          signature,
+          ...(nodes !== undefined ? { nodes } : {}),
+          ...(input.forceLocal !== undefined
+            ? { forceLocal: input.forceLocal }
+            : {}),
+          ...(input.includeSelf !== undefined
+            ? { includeSelf: input.includeSelf }
+            : {}),
+        })
+        .catch((error: unknown) => {
+          served = before;
+          throw error;
+        });
     } finally {
       starting = false;
     }
   }
 
   return {
+    servedRelease: () => served,
     prepare: async (input) => {
       const { current, prepared } = await resolveAndPrepare(input.version);
       return {

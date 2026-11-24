@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NodeInfo } from "@homefleet/protocol";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { HfpRequestError } from "../transport/client.js";
 import { UpgradeError } from "./errors.js";
 import {
@@ -53,6 +53,7 @@ async function harness(
   dirs.push(upgradesDir);
   const prepared = {
     version: "0.5.2",
+    sha256: "c".repeat(64),
     manifestBytes: Buffer.from("MANIFEST"),
     signature: "SIG",
     manifest: { size: 4096 },
@@ -369,4 +370,36 @@ test("without a version the latest is looked up once; current is the option", as
   });
   expect(calls.check).toBe(1);
   expect(calls.prepare).toEqual(["0.5.2"]);
+});
+
+describe("servedRelease: what the tarball route serves", () => {
+  test("undefined before any rollout", async () => {
+    const { surface } = await harness();
+    expect(surface.servedRelease()).toBeUndefined();
+  });
+
+  test("set to the pushed release once a rollout starts", async () => {
+    const { surface } = await harness();
+    await surface.upgrade({ targets: "fleet" });
+    expect(surface.servedRelease()).toEqual({
+      version: "0.5.2",
+      sha256: "c".repeat(64),
+    });
+  });
+
+  test("a refused second rollout start does not change the served release", async () => {
+    const { surface } = await harness({ running: true });
+    await surface.upgrade({ targets: "fleet" }).catch(() => undefined);
+    expect(surface.servedRelease()).toBeUndefined();
+  });
+
+  test("a start whose prepare fails does not change the served release", async () => {
+    const { surface } = await harness({
+      prepare: async () => {
+        throw new UpgradeError("fetch-failed", "offline");
+      },
+    });
+    await surface.upgrade({ targets: "fleet" }).catch(() => undefined);
+    expect(surface.servedRelease()).toBeUndefined();
+  });
 });

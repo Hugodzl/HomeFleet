@@ -18,7 +18,7 @@ import type { HfpClient } from "../transport/client.js";
 import type { NodeServer } from "../transport/server.js";
 import type { UpgradeCoordinator } from "./coordinator.js";
 import { UpgradeError, type UpgradeErrorCode } from "./errors.js";
-import { readVerifiedCache } from "./prepare.js";
+import { type CacheQuery, readVerifiedCache } from "./prepare.js";
 import { isSemver } from "./semver.js";
 
 export interface UpgradeRouteDeps {
@@ -27,6 +27,22 @@ export interface UpgradeRouteDeps {
   upgradesDir: string;
   /** Test seam; defaults to the pinned RELEASE_PUBLIC_KEYS. */
   publicKeys?: readonly string[];
+  /** The release this node's latest rollout pushed (fleet-upgrade.ts). */
+  servedRelease?: () => { version: string; sha256: string } | undefined;
+}
+
+/**
+ * Which cached bytes `GET /upgrade/tarball/:version` serves: for the version
+ * this node is pushing, exactly the pushed hash (a candidate shares its
+ * version with the final); for any other version, the final release.
+ */
+export function tarballQuery(
+  version: string,
+  served: { version: string; sha256: string } | undefined,
+): CacheQuery {
+  return served?.version === version
+    ? { version, sha256: served.sha256 }
+    : { version };
 }
 
 function wireCode(code: UpgradeErrorCode): HfpErrorCode {
@@ -99,7 +115,11 @@ export function registerUpgradeRoutes(
     async (context) => {
       const version = context.params.version ?? "";
       const prepared = isSemver(version)
-        ? await readVerifiedCache(upgradesDir, { version }, publicKeys)
+        ? await readVerifiedCache(
+            upgradesDir,
+            tarballQuery(version, deps.servedRelease?.()),
+            publicKeys,
+          )
         : undefined;
       const res = context.res;
       if (prepared === undefined) {

@@ -69,7 +69,10 @@ import {
   upgradesDir,
   writeRolloutStatus,
 } from "./upgrade/files.js";
-import { createFleetUpgradeSurface } from "./upgrade/fleet-upgrade.js";
+import {
+  createFleetUpgradeSurface,
+  type ServedRelease,
+} from "./upgrade/fleet-upgrade.js";
 import { prepareRelease } from "./upgrade/prepare.js";
 import {
   GitHubReleaseSource,
@@ -707,10 +710,16 @@ export class Daemon {
     });
     // Routes are live-registered, so adding them after `nodeServer.start()`
     // is fine; they need the coordinator, which needs the control endpoint.
+    // The fleet surface (below) decides what the tarball route serves; it is
+    // built after the routes, so the route reads it through this holder.
+    let fleetUpgradesRef: { servedRelease(): ServedRelease | undefined } = {
+      servedRelease: () => undefined,
+    };
     registerUpgradeRoutes(nodeServer, {
       coordinator: upgrades,
       client: hfpClient,
       upgradesDir: upgradesDir(dataDir),
+      servedRelease: () => fleetUpgradesRef.servedRelease(),
       ...(this.upgradeSeams?.publicKeys !== undefined
         ? { publicKeys: this.upgradeSeams.publicKeys }
         : {}),
@@ -755,6 +764,7 @@ export class Daemon {
         }),
       upgradesDir: upgradesDir(dataDir),
     });
+    fleetUpgradesRef = fleetUpgrades;
     const controlSurface: ControlSurface = {
       beginPairing: () => pairingManager.beginPairing(),
       pairWith: (input) =>
