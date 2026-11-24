@@ -263,6 +263,21 @@ not yet scheduled.
 - **OpenSSF Scorecard run:** explain the expected ceiling for a solo repo
   rather than chase it.
 
+Deferred from PR 2 (release candidates):
+
+- **Release cache pruning:** `upgrades/releases/<sha256>/` keeps every
+  candidate and final a node has fetched or been pushed. Prune entries that
+  are neither the running release nor its rollback copy.
+- **Legacy cache cleanup:** pre-0.8 `upgrades/<version>/` dirs are ignored
+  but never deleted.
+- **Stale hash after a manual reinstall:** a manual `npm i -g` of the same
+  version with other bytes leaves `installed-release.json` naming the old
+  hash. Workaround: delete the file. A fix could compare against npm's
+  recorded `integrity` for the installed package.
+- **The record is per data dir, the install per machine:** two data dirs on
+  one machine share the npm install but each keeps its own
+  `installed-release.json`.
+
 ## Known technical debt (from v0.1)
 
 Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md).
