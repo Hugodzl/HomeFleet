@@ -4,6 +4,12 @@ name: Release
 # Run it by hand (workflow_dispatch) on main to exercise everything except the
 # Release itself: a manual run never publishes, on any ref. Job chain:
 # gate → pack → sign → verify + smoke → release (docs/reference/releasing.md).
+#
+# Three modes (scripts/lib/release-plan.ts): a vX.Y.Z-rc.N tag is a release
+# CANDIDATE (the final X.Y.Z tarball, published as a prerelease); a final
+# vX.Y.Z tag with published candidates PROMOTES the highest one (its exact
+# tarball, re-signed - Ed25519 signing is deterministic, so the manifest and
+# signature come out identical); any other final tag is a plain BUILD.
 on:
   push:
     tags: ["v*"]
@@ -46,15 +52,6 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
             || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
-      # Fail before packing, not after the smoke: a Release must never go out
-      # with a missing or mis-titled notes file (see docs/reference/releasing.md).
-      - name: Release notes exist and are titled "# HomeFleet <tag> — …"
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          notes="docs/releases/$GITHUB_REF_NAME.md"
-          test -f "$notes" || { echo "::error::missing $notes"; exit 1; }
-          head -n 1 "$notes" | grep -q "^# HomeFleet $GITHUB_REF_NAME — ." \
-            || { echo "::error::$notes must start with '# HomeFleet $GITHUB_REF_NAME — <theme>'"; exit 1; }
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       # No dependency cache in any release job (package-manager-cache: false):
       # a cache written by an untrusted run must never feed the build that ships.
@@ -63,13 +60,56 @@ jobs:
           node-version: 22
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
+      # build, candidate or promote. Pack's own view: the release job
+      # derives it again rather than trust this job's outputs.
+      - name: Plan this run (build, candidate or promote)
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > "$RUNNER_TEMP/releases.json"
+          else
+            echo '[]' > "$RUNNER_TEMP/releases.json"
+          fi
+          pnpm release:plan "$RUNNER_TEMP/releases.json"
+      # Fail before packing, not after the smoke: a Release must never go out
+      # with a missing or mis-titled notes file (see docs/reference/releasing.md).
+      # A candidate uses its final's notes.
+      - name: Release notes exist and are titled "# HomeFleet <final> — …"
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          FINAL: ${{ steps.plan.outputs.final }}
+        run: |
+          notes="docs/releases/$FINAL.md"
+          test -f "$notes" || { echo "::error::missing $notes"; exit 1; }
+          head -n 1 "$notes" | grep -q "^# HomeFleet $FINAL — ." \
+            || { echo "::error::$notes must start with '# HomeFleet $FINAL — <theme>'"; exit 1; }
       - name: Pack (tag must match the daemon version)
+        if: steps.plan.outputs.mode != 'promote'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             pnpm pack:release --tag "$GITHUB_REF_NAME"
           else
             pnpm pack:release
           fi
+      # A promote ships the candidate's tarball, not a rebuild: the bytes
+      # tested on the rig are the bytes released. Only on the candidate's own
+      # commit, and only once they verify against the pinned key.
+      - name: "Promote: take the candidate's tarball"
+        if: steps.plan.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ steps.plan.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-list -n 1 "$CANDIDATE")" = "$GITHUB_SHA" ] \
+            || { echo "::error::$GITHUB_REF_NAME is not on the commit of $CANDIDATE"; exit 1; }
+          gh release download "$CANDIDATE" --repo "$GITHUB_REPOSITORY" -p 'homefleet-*' -D candidate
+          pnpm verify:release candidate/homefleet-*.tgz
+          mkdir -p release
+          cp candidate/homefleet-*.tgz release/
       - name: Digest for the sign job
         id: digest
         run: |
@@ -241,6 +281,57 @@ jobs:
         with:
           name: homefleet-signature
           path: release
+      # The plan again, from the tag and the published Releases alone: this
+      # job holds write tokens, so nothing from pack's (dependency-running)
+      # job decides what it publishes.
+      - name: Plan (re-derived here; pack's plan is not trusted)
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          candidate=""
+          if [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-rc\.[1-9][0-9]*$ ]]; then
+            mode=candidate
+            final="v${BASH_REMATCH[1]}"
+          elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            final="$tag"
+            candidate="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" \
+              | jq -r 'add | .[] | select(.prerelease and (.draft | not)) | .tag_name' \
+              | { grep -E "^${final//./\\.}-rc\.[1-9][0-9]*$" || true; } \
+              | sort -V | tail -n 1)"
+            if [ -n "$candidate" ]; then
+              mode=promote
+              sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$candidate" --jq .sha)"
+              [ "$sha" = "$GITHUB_SHA" ] \
+                || { echo "::error::$tag is not on the commit of $candidate"; exit 1; }
+            else
+              mode=build
+            fi
+          else
+            echo "::error::$tag is not a release tag (vX.Y.Z or vX.Y.Z-rc.N)"; exit 1
+          fi
+          {
+            echo "mode=$mode"
+            echo "final=$final"
+            echo "candidate=$candidate"
+          } >> "$GITHUB_OUTPUT"
+      # The second check of a promote's bytes (verify already checked the
+      # signature): what goes out is exactly what the candidate Release has.
+      - name: "Promote: the bytes are the candidate's"
+        if: steps.plan.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ steps.plan.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          gh release download "$CANDIDATE" --repo "$GITHUB_REPOSITORY" -p 'homefleet-*' -D "$RUNNER_TEMP/candidate"
+          for f in release/homefleet-*.tgz release/homefleet-*.manifest.json
+          do
+            cmp "$f" "$RUNNER_TEMP/candidate/${f#release/}" \
+              || { echo "::error::$f differs from the one in $CANDIDATE"; exit 1; }
+          done
       # Build provenance (SLSA Build L2): which commit and workflow run built
       # these bytes. Check with `gh attestation verify <file> -R <repo>`.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -252,11 +343,17 @@ jobs:
       # can't gain assets once published. A re-run after a failed publish
       # replaces the leftover draft; a PUBLISHED Release is never touched.
       # Title = the notes file's first line without "# "; body = the rest.
+      # A candidate: its final's notes under the candidate's tag, a notice
+      # line first, a prerelease that never becomes "latest".
       - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          FINAL: ${{ steps.plan.outputs.final }}
         run: |
           tag="$GITHUB_REF_NAME"
+          mode="$MODE"
+          final="$FINAL"
           # Only gh's "release not found" means there is no Release yet; any
           # other failure (network, auth, rate limit) stops the run.
           if draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>"$RUNNER_TEMP/view.err")"; then
@@ -268,13 +365,26 @@ jobs:
             cat "$RUNNER_TEMP/view.err" >&2
             echo "::error::could not check for an existing release $tag"; exit 1
           fi
-          notes="docs/releases/$tag.md"
-          tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/notes.md"
+          notes="docs/releases/$final.md"
+          title="$(head -n 1 "$notes" | sed 's/^# //')"
+          tail -n +2 "$notes" | sed '/./,$!d' > "$RUNNER_TEMP/body.md"
+          prerelease=()
+          if [ "$mode" = candidate ]; then
+            title="${title/"$final"/"$tag"}"
+            {
+              echo "> **Release candidate for testing on Hugo's rig — not for general use.** Promoted to $final once it passes."
+              echo
+              cat "$RUNNER_TEMP/body.md"
+            } > "$RUNNER_TEMP/notes.md"
+            prerelease=(--prerelease --latest=false)
+          else
+            cp "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/notes.md"
+          fi
           # The three signed-release files only, by name pattern: anything
           # else pack slipped into its artifact stays out of the Release.
           gh release create "$tag" release/homefleet-*.tgz \
             release/homefleet-*.manifest.json release/homefleet-*.manifest.sig \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "$(head -n 1 "$notes" | sed 's/^# //')" \
-            --notes-file "$RUNNER_TEMP/notes.md"
+            --title "$title" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
