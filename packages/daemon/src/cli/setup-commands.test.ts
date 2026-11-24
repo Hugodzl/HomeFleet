@@ -64,29 +64,23 @@ describe("generateFirewallAllowCommands", () => {
     ]);
   });
 
-  test.each([
-    0,
-    65536,
-    -1,
-    1.5,
-    Number.NaN,
-  ])("throws for an out-of-range or non-integer hfpPort (%s)", (badPort) => {
-    expect(() =>
-      generateFirewallAllowCommands({ hfpPort: badPort, udpPort: 56371 }),
-    ).toThrow();
-  });
+  test.each([0, 65536, -1, 1.5, Number.NaN])(
+    "throws for an out-of-range or non-integer hfpPort (%s)",
+    (badPort) => {
+      expect(() =>
+        generateFirewallAllowCommands({ hfpPort: badPort, udpPort: 56371 }),
+      ).toThrow();
+    },
+  );
 
-  test.each([
-    0,
-    65536,
-    -1,
-    1.5,
-    Number.NaN,
-  ])("throws for an out-of-range or non-integer udpPort (%s)", (badPort) => {
-    expect(() =>
-      generateFirewallAllowCommands({ hfpPort: 56370, udpPort: badPort }),
-    ).toThrow();
-  });
+  test.each([0, 65536, -1, 1.5, Number.NaN])(
+    "throws for an out-of-range or non-integer udpPort (%s)",
+    (badPort) => {
+      expect(() =>
+        generateFirewallAllowCommands({ hfpPort: 56370, udpPort: badPort }),
+      ).toThrow();
+    },
+  );
 
   test("accepts the boundary ports 1 and 65535", () => {
     expect(() =>
@@ -221,45 +215,42 @@ describe("generateAutostartCreateCommand", () => {
     expect(command).toContain("/TN '\"My Custom Task\"'");
   });
 
-  test.each([
-    'C:\\bad"path\\node.exe',
-    "C:\\bad\npath\\node.exe",
-    "",
-  ])("throws for an unsafe or empty nodeExecPath (%j)", (badPath) => {
-    expect(() =>
-      generateAutostartCreateCommand({
-        nodeExecPath: badPath,
-        daemonEntryPath: "C:\\HomeFleet\\daemon.js",
-      }),
-    ).toThrow();
-  });
+  test.each(['C:\\bad"path\\node.exe', "C:\\bad\npath\\node.exe", ""])(
+    "throws for an unsafe or empty nodeExecPath (%j)",
+    (badPath) => {
+      expect(() =>
+        generateAutostartCreateCommand({
+          nodeExecPath: badPath,
+          daemonEntryPath: "C:\\HomeFleet\\daemon.js",
+        }),
+      ).toThrow();
+    },
+  );
 
-  test.each([
-    'C:\\bad"path\\daemon.js',
-    "C:\\bad\npath\\daemon.js",
-    "",
-  ])("throws for an unsafe or empty daemonEntryPath (%j)", (badPath) => {
-    expect(() =>
-      generateAutostartCreateCommand({
-        nodeExecPath: "C:\\Node\\node.exe",
-        daemonEntryPath: badPath,
-      }),
-    ).toThrow();
-  });
+  test.each(['C:\\bad"path\\daemon.js', "C:\\bad\npath\\daemon.js", ""])(
+    "throws for an unsafe or empty daemonEntryPath (%j)",
+    (badPath) => {
+      expect(() =>
+        generateAutostartCreateCommand({
+          nodeExecPath: "C:\\Node\\node.exe",
+          daemonEntryPath: badPath,
+        }),
+      ).toThrow();
+    },
+  );
 
-  test.each([
-    'Bad"Name',
-    "Bad\tName",
-    "",
-  ])("throws for an unsafe or empty taskName (%j)", (badTaskName) => {
-    expect(() =>
-      generateAutostartCreateCommand({
-        nodeExecPath: "C:\\Node\\node.exe",
-        daemonEntryPath: "C:\\HomeFleet\\daemon.js",
-        taskName: badTaskName,
-      }),
-    ).toThrow();
-  });
+  test.each(['Bad"Name', "Bad\tName", ""])(
+    "throws for an unsafe or empty taskName (%j)",
+    (badTaskName) => {
+      expect(() =>
+        generateAutostartCreateCommand({
+          nodeExecPath: "C:\\Node\\node.exe",
+          daemonEntryPath: "C:\\HomeFleet\\daemon.js",
+          taskName: badTaskName,
+        }),
+      ).toThrow();
+    },
+  );
 
   test("a taskName containing a PowerShell subexpression is treated as an inert literal, not evaluated", () => {
     // Regression guard for the taskName command-injection finding: `$(...)`
