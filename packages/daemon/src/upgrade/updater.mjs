@@ -107,7 +107,28 @@ function launch() {
   }
 }
 
-async function reportsVersion(version, timeoutMs) {
+// <dataDir>/installed-release.json (INSTALLED_FILE in files.ts): the bytes
+// just installed, written after the install and BEFORE launch so the new
+// daemon reads it at boot. The updater writes it blind, so the hash check
+// below proves only that the daemon answering is a freshly started one (not
+// the old process still holding the port); it is not a proof of the bytes
+// npm put on disk.
+const installedPath = path.join(state.dataDir, "installed-release.json");
+
+function recordInstalled(version, sha256) {
+  if (sha256 === undefined) {
+    forgetInstalled();
+    return;
+  }
+  writeFileSync(installedPath, `${JSON.stringify({ version, sha256 })}\n`);
+}
+
+function forgetInstalled() {
+  rmSync(installedPath, { force: true });
+}
+
+/** `sha256`, when given, must be reported too (candidate installs). */
+async function reportsVersion(version, timeoutMs, sha256) {
   const host = state.controlHost.includes(":")
     ? `[${state.controlHost}]`
     : state.controlHost;
@@ -121,7 +142,12 @@ async function reportsVersion(version, timeoutMs) {
       });
       if (response.ok) {
         const body = await response.json();
-        if (body.daemonVersion === version) return true;
+        if (
+          body.daemonVersion === version &&
+          (sha256 === undefined || body.releaseSha256 === sha256)
+        ) {
+          return true;
+        }
       }
     } catch {
       // not up yet
@@ -133,8 +159,18 @@ async function reportsVersion(version, timeoutMs) {
 
 async function recover(reason) {
   if (state.rollbackTarballPath && install(state.rollbackTarballPath)) {
+    recordInstalled(state.from, state.fromSha256);
     const pid = launch();
-    if (await reportsVersion(state.from, state.healthTimeoutMs)) {
+    // Same version both ways (a candidate reinstall): only the hash tells
+    // the previous bytes from the failed ones.
+    const sameVersion = state.candidate === true && state.from === state.to;
+    if (
+      await reportsVersion(
+        state.from,
+        state.healthTimeoutMs,
+        sameVersion ? state.fromSha256 : undefined,
+      )
+    ) {
       return { outcome: "rolled-back", reason };
     }
     kill(pid);
@@ -143,8 +179,10 @@ async function recover(reason) {
       reason: `${reason}; the rolled-back ${state.from} daemon did not come up either`,
     };
   }
-  // No rollback copy: start whatever is installed rather than leave the
-  // node with no daemon at all.
+  // No rollback copy (or its install failed): start whatever is installed
+  // rather than leave the node with no daemon at all. Which bytes that is
+  // is unknown, so the record goes.
+  forgetInstalled();
   launch();
   return { outcome: "failed", reason: `${reason}; rollback unavailable` };
 }
@@ -152,10 +190,18 @@ async function recover(reason) {
 async function run() {
   await waitForExit(state.daemonPid, state.exitTimeoutMs);
   if (!install(state.tarballPath)) {
+    forgetInstalled();
     return recover(`npm install of ${state.to} failed (see updater.log)`);
   }
+  recordInstalled(state.to, state.toSha256);
   const pid = launch();
-  if (await reportsVersion(state.to, state.healthTimeoutMs)) {
+  if (
+    await reportsVersion(
+      state.to,
+      state.healthTimeoutMs,
+      state.candidate === true ? state.toSha256 : undefined,
+    )
+  ) {
     return { outcome: "succeeded" };
   }
   kill(pid);

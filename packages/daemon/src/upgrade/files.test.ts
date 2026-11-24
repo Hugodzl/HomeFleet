@@ -7,11 +7,14 @@ import {
   LOCK_FILE,
   RESULT_FILE,
   ROLLOUT_STATUS_FILE,
+  INSTALLED_FILE,
+  readInstalledReleaseSync,
   readRolloutStatusSync,
   readUpgradeResultSync,
   releaseLock,
   STALE_LOCK_MS,
   toLastUpgrade,
+  writeInstalledRelease,
   writeRolloutStatus,
   writeUpgradeResult,
 } from "./files.js";
@@ -189,5 +192,28 @@ describe("rollout status store", () => {
     expect(readRolloutStatusSync(dataDir)).toBeUndefined();
     await writeFile(file, JSON.stringify({ ...status, self: null }));
     expect(readRolloutStatusSync(dataDir)).toBeUndefined();
+  });
+});
+
+describe("installed-release record", () => {
+  const sha = "c".repeat(64);
+  test("returned for the running version only", async () => {
+    const dir = await tempDir();
+    await writeInstalledRelease(dir, { version: "0.8.0", sha256: sha });
+    expect(readInstalledReleaseSync(dir, "0.8.0")).toBe(sha);
+    expect(readInstalledReleaseSync(dir, "0.8.1")).toBeUndefined();
+  });
+  test.each([
+    ["missing", undefined],
+    ["corrupt JSON", "{not json"],
+    ["an upper-case sha", JSON.stringify({ version: "0.8.0", sha256: "C".repeat(64) })],
+    ["a short sha", JSON.stringify({ version: "0.8.0", sha256: "c".repeat(63) })],
+    ["no version", JSON.stringify({ sha256: sha })],
+  ])("%s → undefined", async (_name, content) => {
+    const dir = await tempDir();
+    if (content !== undefined) {
+      await writeFile(path.join(dir, INSTALLED_FILE), content);
+    }
+    expect(readInstalledReleaseSync(dir, "0.8.0")).toBeUndefined();
   });
 });

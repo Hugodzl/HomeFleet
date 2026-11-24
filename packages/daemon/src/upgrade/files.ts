@@ -4,6 +4,8 @@
  * updater.test.ts drives it through these constants so they cannot drift):
  *
  *   <dataDir>/upgrade-result.json          last outcome (read by status)
+ *   <dataDir>/installed-release.json       { version, sha256 } of the bytes
+ *                                          the updater last installed
  *   <dataDir>/upgrades/<version>/…         verified release cache
  *   <dataDir>/upgrades/updater.mjs         the copied updater
  *   <dataDir>/upgrades/upgrade-state.json  the updater's only input
@@ -22,6 +24,7 @@ export const UPGRADES_DIRNAME = "upgrades";
 export const STATE_FILE = "upgrade-state.json";
 export const LOCK_FILE = "upgrade.lock";
 export const RESULT_FILE = "upgrade-result.json";
+export const INSTALLED_FILE = "installed-release.json";
 export const UPDATER_FILE = "updater.mjs";
 export const UPDATER_LOG = "updater.log";
 export const ROLLOUT_STATUS_FILE = "rollout-status.json";
@@ -35,6 +38,15 @@ export interface UpgradeState {
   from: string;
   to: string;
   tarballPath: string;
+  /** sha256 of the `to` tarball; the updater records it after installing. */
+  toSha256: string;
+  /** sha256 of the running `from` release; absent when unknown. */
+  fromSha256?: string;
+  /**
+   * A release-candidate install: success needs the relaunched daemon to
+   * report `toSha256`, not just `to` (the version may be unchanged).
+   */
+  candidate?: boolean;
   /** The verified tarball of `from`; absent when it could not be cached. */
   rollbackTarballPath?: string;
   /** The daemon being replaced; the updater waits for it to exit. */
@@ -146,6 +158,47 @@ export async function isLockHeld(dir: string, now: number): Promise<boolean> {
 
 export async function releaseLock(dir: string): Promise<void> {
   await rm(path.join(dir, LOCK_FILE), { force: true });
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The installed-release record's hash, trusted only when the record names
+ * the version this daemon runs: a manual `npm i -g` of another version
+ * leaves a stale record that must read as "unknown". Sync on purpose: read
+ * once at boot. Absent, corrupt or for another version → undefined.
+ */
+export function readInstalledReleaseSync(
+  dataDir: string,
+  runningVersion: string,
+): string | undefined {
+  try {
+    const json = JSON.parse(
+      readFileSync(path.join(dataDir, INSTALLED_FILE), "utf8"),
+    ) as Record<string, unknown>;
+    if (
+      json.version !== runningVersion ||
+      typeof json.sha256 !== "string" ||
+      !SHA256_HEX.test(json.sha256)
+    ) {
+      return undefined;
+    }
+    return json.sha256;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Writes the record the way the updater does (the updater has its own copy). */
+export async function writeInstalledRelease(
+  dataDir: string,
+  record: { version: string; sha256: string },
+): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(
+    path.join(dataDir, INSTALLED_FILE),
+    `${JSON.stringify({ version: record.version, sha256: record.sha256 })}\n`,
+  );
 }
 
 /** Writes the updater's input; returns its path. */

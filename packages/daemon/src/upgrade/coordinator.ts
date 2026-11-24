@@ -200,6 +200,7 @@ export class UpgradeCoordinator {
         from,
         to,
         tarballPath: prepared.tarballPath,
+        toSha256: prepared.manifest.sha256,
         ...(rollback !== undefined
           ? { rollbackTarballPath: rollback.tarballPath }
           : {}),
