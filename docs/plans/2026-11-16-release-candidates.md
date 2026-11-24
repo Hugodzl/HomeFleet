@@ -1,5 +1,7 @@
 # Release candidates (PR 2) Implementation Plan
 
+**Status:** implemented 2026-11-16–24 in PR #36 (all 13 tasks). Review loop: round 1 (1 should-fix, 9 nits; 5 fixed, the rest in `docs/backlog.md`), round 2 on the fix diff CLEAN.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cut `vX.Y.Z-rc.N` candidates that carry the final `X.Y.Z` bytes, deliver and replace them on the rig with `--candidate <tag>`, and promote the last one to `vX.Y.Z` without rebuilding.
