@@ -22,8 +22,21 @@ export interface FetchedRelease {
 export interface ReleaseSource {
   /** The newest published version (`X.Y.Z`, no leading `v`). */
   latestVersion(): Promise<string>;
-  /** Downloads the three release files for `version` into `destDir`. Unverified. */
-  fetchRelease(version: string, destDir: string): Promise<FetchedRelease>;
+  /**
+   * Downloads the three release files for `version` into `destDir`.
+   * Unverified. `tag` names the GitHub release to fetch from (a candidate's
+   * `vX.Y.Z-rc.N`); sources that are not GitHub ignore it.
+   */
+  fetchRelease(
+    version: string,
+    destDir: string,
+    options?: FetchOptions,
+  ): Promise<FetchedRelease>;
+}
+
+export interface FetchOptions {
+  /** Default `v<version>`. */
+  tag?: string;
 }
 
 /** The public repo releases are published from. */
@@ -67,9 +80,11 @@ export class GitHubReleaseSource implements ReleaseSource {
   async fetchRelease(
     version: string,
     destDir: string,
+    options: FetchOptions = {},
   ): Promise<FetchedRelease> {
     await mkdir(destDir, { recursive: true });
-    const base = `https://github.com/${this.repo}/releases/download/v${version}/`;
+    const tag = options.tag ?? `v${version}`;
+    const base = `https://github.com/${this.repo}/releases/download/${encodeURIComponent(tag)}/`;
     const names = {
       tarball: releaseFileName(version),
       manifest: manifestFileName(version),
@@ -152,12 +167,13 @@ export class FallbackReleaseSource implements ReleaseSource {
   async fetchRelease(
     version: string,
     destDir: string,
+    options: FetchOptions = {},
   ): Promise<FetchedRelease> {
     const errors: unknown[] = [];
     for (const source of this.sources) {
       await rm(destDir, { recursive: true, force: true });
       try {
-        return await source.fetchRelease(version, destDir);
+        return await source.fetchRelease(version, destDir, options);
       } catch (error) {
         errors.push(error);
       }

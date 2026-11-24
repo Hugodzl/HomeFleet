@@ -13,7 +13,12 @@ import {
   serializeManifest,
   signatureFileName,
 } from "./manifest.js";
-import type { FetchedRelease, ReleaseSource } from "./release-source.js";
+import {
+  type FetchedRelease,
+  type FetchOptions,
+  ReleaseFetchError,
+  type ReleaseSource,
+} from "./release-source.js";
 
 export interface TestKeys {
   /** base64 SPKI DER, the RELEASE_PUBLIC_KEYS format. */
@@ -70,13 +75,18 @@ export async function writeSignedRelease(
 /**
  * A ReleaseSource that "downloads" by copying from `originDir`, where tests
  * put releases with {@link writeSignedRelease}. `latest` is mutable.
+ * `tagOrigins` serves other bytes per GitHub tag (a candidate's
+ * `vX.Y.Z-rc.N`); a tag that is neither there nor `v<version>` is a 404.
  */
 export class FakeReleaseSource implements ReleaseSource {
   fetchCount = 0;
+  /** The tag each fetch asked for (`undefined` when none was given). */
+  readonly tags: (string | undefined)[] = [];
 
   constructor(
     private readonly originDir: string,
     public latest: string,
+    private readonly tagOrigins: Readonly<Record<string, string>> = {},
   ) {}
 
   async latestVersion(): Promise<string> {
@@ -86,8 +96,17 @@ export class FakeReleaseSource implements ReleaseSource {
   async fetchRelease(
     version: string,
     destDir: string,
+    options: FetchOptions = {},
   ): Promise<FetchedRelease> {
     this.fetchCount++;
+    this.tags.push(options.tag);
+    const tag = options.tag;
+    const originDir =
+      (tag !== undefined ? this.tagOrigins[tag] : undefined) ??
+      (tag === undefined || tag === `v${version}` ? this.originDir : undefined);
+    if (originDir === undefined) {
+      throw new ReleaseFetchError(`no release tagged ${tag}`);
+    }
     await mkdir(destDir, { recursive: true });
     const names = [
       releaseFileName(version),
@@ -95,7 +114,7 @@ export class FakeReleaseSource implements ReleaseSource {
       signatureFileName(version),
     ];
     for (const name of names) {
-      await copyFile(path.join(this.originDir, name), path.join(destDir, name));
+      await copyFile(path.join(originDir, name), path.join(destDir, name));
     }
     return {
       manifestBytes: await readFile(

@@ -7,18 +7,15 @@
  * pushed: a second start while a rollout runs (the loop is not re-entrant, so
  * the surface is the only guard), then unknown device ids, then target
  * resolution, `prepareRelease` (download + verify into the cache) and finally
- * the push of the cached manifest bytes + signature, which are read back from
- * the cache so peers verify exactly what this node verified.
+ * the push of the cached manifest bytes + signature, exactly as this node
+ * verified them.
  */
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type {
   PrepareUpgradeRequest,
   UpgradeRequest,
 } from "../control/messages.js";
 import type { UpgradeCheck, UpgradeStarted } from "./coordinator.js";
 import { UpgradeError } from "./errors.js";
-import { manifestFileName, signatureFileName } from "./manifest.js";
 import type { PreparedRelease } from "./prepare.js";
 import type { RolloutStartInput, RolloutStatus } from "./rollout.js";
 
@@ -60,10 +57,6 @@ export interface FleetUpgradeSurface {
   prepare(input: PrepareUpgradeRequest): Promise<PreparedUpgrade>;
   upgrade(input: UpgradeRequest): Promise<UpgradeStarted | RolloutStatus>;
   upgrades(): RolloutStatus | undefined;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function createFleetUpgradeSurface(
@@ -112,25 +105,7 @@ export function createFleetUpgradeSurface(
         }
       }
       const { prepared } = await resolveAndPrepare(input.version);
-      const dir = path.join(options.upgradesDir, prepared.version);
-      let manifestBytes: Buffer;
-      let signature: string;
-      try {
-        manifestBytes = await readFile(
-          path.join(dir, manifestFileName(prepared.version)),
-        );
-        signature = (
-          await readFile(
-            path.join(dir, signatureFileName(prepared.version)),
-            "utf8",
-          )
-        ).trim();
-      } catch (error) {
-        throw new UpgradeError(
-          "fetch-failed",
-          `cannot read the cached release ${prepared.version}: ${messageOf(error)}`,
-        );
-      }
+      const { manifestBytes, signature } = prepared;
       return await options.rollout.start({
         prepared,
         manifestBytes,

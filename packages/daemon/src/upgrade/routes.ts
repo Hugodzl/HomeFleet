@@ -97,7 +97,7 @@ export function registerUpgradeRoutes(
     async (context) => {
       const version = context.params.version ?? "";
       const prepared = isSemver(version)
-        ? await readVerifiedCache(upgradesDir, version, publicKeys)
+        ? await readVerifiedCache(upgradesDir, { version }, publicKeys)
         : undefined;
       const res = context.res;
       if (prepared === undefined) {

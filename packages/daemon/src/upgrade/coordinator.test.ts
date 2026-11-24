@@ -24,6 +24,7 @@ import {
   type UpgradeState,
   upgradesDir,
 } from "./files.js";
+import { RELEASES_DIRNAME } from "./prepare.js";
 import {
   FakeReleaseSource,
   makeTestKeys,
@@ -74,6 +75,19 @@ async function setup(
   return { root, origin, keys, source, coordinator, spawned, shutdowns };
 }
 
+/** `file` is `<upgradesDir>/releases/<sha256>/<name>`. */
+function expectCached(
+  file: string | undefined,
+  dir: string,
+  name: string,
+): void {
+  expect(file).toBeDefined();
+  const entry = path.dirname(file ?? "");
+  expect(path.dirname(entry)).toBe(path.join(dir, RELEASES_DIRNAME));
+  expect(path.basename(entry)).toMatch(/^[0-9a-f]{64}$/);
+  expect(path.basename(file ?? "")).toBe(name);
+}
+
 async function codeOf(promise: Promise<unknown>): Promise<string> {
   const error = await promise.catch((e: unknown) => e);
   expect(error).toBeInstanceOf(UpgradeError);
@@ -118,12 +132,10 @@ test("upgradeSelf prepares, writes state, spawns the updater, then requests shut
     installCommand: ["npm", "i", "-g"],
     dataDir: root,
   });
-  expect(state.tarballPath).toBe(
-    path.join(dir, "0.5.1", "homefleet-0.5.1.tgz"),
-  );
-  expect(state.rollbackTarballPath).toBe(
-    path.join(dir, "0.5.0", "homefleet-0.5.0.tgz"),
-  );
+  expectCached(state.tarballPath, dir, "homefleet-0.5.1.tgz");
+  expectCached(state.rollbackTarballPath, dir, "homefleet-0.5.0.tgz");
+  expect(state.toSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(state.rollbackTarballPath).not.toBe(state.tarballPath);
   await vi.waitFor(() => expect(shutdowns).toEqual(["upgrading to 0.5.1"]));
 });
 
@@ -335,8 +347,10 @@ test("acceptRemote downloads from the requester first", async () => {
   const state = JSON.parse(
     await readFile(path.join(upgradesDir(root), STATE_FILE), "utf8"),
   ) as UpgradeState;
-  expect(state.rollbackTarballPath).toBe(
-    path.join(upgradesDir(root), "0.5.0", "homefleet-0.5.0.tgz"),
+  expectCached(
+    state.rollbackTarballPath,
+    upgradesDir(root),
+    "homefleet-0.5.0.tgz",
   );
 });
 

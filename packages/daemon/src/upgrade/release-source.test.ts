@@ -83,6 +83,26 @@ describe("GitHubReleaseSource", () => {
     expect(fetched.signature).toBe("c2ln\n");
   });
 
+  test("fetchRelease with tag downloads from that tag's URL", async () => {
+    const base =
+      "https://github.com/Hugodzl/HomeFleet/releases/download/v0.8.0-rc.2/";
+    const { fetch, urls } = fakeFetch({
+      [`${base}homefleet-0.8.0.tgz`]: () => new Response("tgz"),
+      [`${base}homefleet-0.8.0.manifest.json`]: () => new Response("{}"),
+      [`${base}homefleet-0.8.0.manifest.sig`]: () => new Response("c2ln\n"),
+    });
+    const dir = await mkdtemp(path.join(tmpdir(), "hf-src-"));
+    dirs.push(dir);
+    const fetched = await new GitHubReleaseSource({ fetch }).fetchRelease(
+      "0.8.0",
+      path.join(dir, "x"),
+      { tag: "v0.8.0-rc.2" },
+    );
+    expect(urls.every((url) => url.startsWith(base))).toBe(true);
+    expect(urls).toHaveLength(3);
+    expect(await readFile(fetched.tarballPath, "utf8")).toBe("tgz");
+  });
+
   test("an HTTP error becomes a ReleaseFetchError naming the URL", async () => {
     const { fetch } = fakeFetch({});
     const dir = await mkdtemp(path.join(tmpdir(), "hf-src-"));

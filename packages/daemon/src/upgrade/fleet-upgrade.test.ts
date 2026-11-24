@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NodeInfo } from "@homefleet/protocol";
@@ -14,7 +14,6 @@ import {
   createFleetUpgradeSurface,
   type FleetUpgradeSurfaceOptions,
 } from "./fleet-upgrade.js";
-import { manifestFileName, signatureFileName } from "./manifest.js";
 import type { PreparedRelease } from "./prepare.js";
 import {
   FleetRollout,
@@ -52,12 +51,10 @@ async function harness(
 ) {
   const upgradesDir = await mkdtemp(path.join(tmpdir(), "hf-fleet-"));
   dirs.push(upgradesDir);
-  const dir = path.join(upgradesDir, "0.5.2");
-  await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, manifestFileName("0.5.2")), "MANIFEST");
-  await writeFile(path.join(dir, signatureFileName("0.5.2")), "SIG\n");
   const prepared = {
     version: "0.5.2",
+    manifestBytes: Buffer.from("MANIFEST"),
+    signature: "SIG",
     manifest: { size: 4096 },
   } as PreparedRelease;
   const calls = {
