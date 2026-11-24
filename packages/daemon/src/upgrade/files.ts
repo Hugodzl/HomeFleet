@@ -310,7 +310,10 @@ export function readRolloutStatusSync(
       !Array.isArray(json.peers) ||
       typeof self !== "object" ||
       self === null ||
-      typeof self.state !== "string"
+      typeof self.state !== "string" ||
+      (json.candidateSha256 !== undefined &&
+        (typeof json.candidateSha256 !== "string" ||
+          !SHA256_HEX.test(json.candidateSha256)))
     ) {
       return undefined;
     }

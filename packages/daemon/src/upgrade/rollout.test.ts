@@ -7,6 +7,7 @@ import type { PreparedRelease } from "./prepare.js";
 import {
   FleetRollout,
   type RolloutPeers,
+  type RolloutStartInput,
   type RolloutStatus,
   restoreRolloutStatus,
 } from "./rollout.js";
@@ -529,5 +530,254 @@ describe("restoreRolloutStatus", () => {
         daemonVersion: "0.5.0",
       }),
     ).toEqual(stopped);
+  });
+});
+
+describe("candidate rollouts count progress by hash", () => {
+  const CAND = "a".repeat(64);
+  const OLD = "b".repeat(64);
+  const V = "0.8.0";
+
+  function nodeInfo(
+    daemonVersion: string,
+    releaseSha256?: string,
+    lastUpgrade?: NodeInfo["lastUpgrade"],
+  ): NodeInfo {
+    return {
+      daemonVersion,
+      ...(releaseSha256 !== undefined ? { releaseSha256 } : {}),
+      ...(lastUpgrade !== undefined ? { lastUpgrade } : {}),
+    } as NodeInfo;
+  }
+
+  function peerEntry(id: string, node: NodeInfo): NodeDirectoryEntry {
+    return {
+      deviceId: id,
+      name: id,
+      host: "127.0.0.1",
+      port: 1,
+      reachable: true,
+      nodeInfo: node,
+    };
+  }
+
+  /**
+   * Each peer answers hello with the next item of its script (the last one
+   * repeats); a push makes no change on its own.
+   */
+  function candidateHarness(
+    entries: NodeDirectoryEntry[],
+    scripts: Record<string, Array<NodeInfo | undefined>>,
+    opts: {
+      currentVersion?: string;
+      currentSha256?: string;
+      pushErrors?: Record<string, Error>;
+    } = {},
+  ) {
+    const calls: string[] = [];
+    const requests: UpgradeRequest[] = [];
+    const selfInputs: unknown[] = [];
+    const clock = { t: 1_000_000 };
+    const pushed = new Set<string>();
+    const peers: RolloutPeers = {
+      list: async () => entries,
+      push: async (e, request) => {
+        calls.push(`push(${e.deviceId})`);
+        requests.push(request);
+        const err = opts.pushErrors?.[e.deviceId];
+        if (err) throw err;
+        pushed.add(e.deviceId);
+      },
+      hello: async (e) => {
+        if (!pushed.has(e.deviceId)) return e.nodeInfo;
+        const script = scripts[e.deviceId] ?? [];
+        return script.length > 1 ? script.shift() : script[0];
+      },
+    };
+    const rollout = new FleetRollout({
+      peers,
+      currentVersion: opts.currentVersion ?? V,
+      ...(opts.currentSha256 !== undefined
+        ? { currentSha256: opts.currentSha256 }
+        : {}),
+      upgradeSelf: async (input) => {
+        selfInputs.push(input);
+        return { from: V, to: V, sha256: CAND, candidate: true };
+      },
+      now: () => clock.t,
+      sleep: async (ms) => {
+        clock.t += ms;
+      },
+      pollMs: 10,
+      waitMs: 100,
+    });
+    const candidatePrepared = {
+      version: V,
+      sha256: CAND,
+      tarballPath: "x.tgz",
+      manifest: {},
+    } as unknown as PreparedRelease;
+    const go = async (input: Partial<RolloutStartInput> = {}) => {
+      await rollout.start({
+        prepared: candidatePrepared,
+        manifestBytes: Buffer.from("manifest"),
+        signature: "c2ln",
+        candidate: true,
+        ...input,
+      });
+      for (let i = 0; i < 200; i++) {
+        const s = rollout.status();
+        if (s && (s.state !== "running" || s.self.state === "restarting"))
+          break;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      return rollout.status() as RolloutStatus;
+    };
+    return { rollout, calls, requests, selfInputs, go };
+  }
+
+  it("selects same-version peers whose hash differs or is unknown, and skips peers already on it", async () => {
+    const h = candidateHarness(
+      [
+        peerEntry("old-hash", nodeInfo(V, OLD)),
+        peerEntry("no-hash", nodeInfo(V)),
+        peerEntry("on-it", nodeInfo(V, CAND)),
+        peerEntry("older", nodeInfo("0.7.0")),
+      ],
+      {
+        "old-hash": [nodeInfo(V, CAND)],
+        "no-hash": [nodeInfo(V, CAND)],
+        older: [nodeInfo(V, CAND)],
+      },
+    );
+    const s = await h.go();
+    expect(s.peers.map((p) => p.deviceId)).toEqual([
+      "old-hash",
+      "no-hash",
+      "older",
+    ]);
+    expect(s.candidateSha256).toBe(CAND);
+  });
+
+  it("a peer already on a newer version is skipped", async () => {
+    const h = candidateHarness(
+      [peerEntry("newer", nodeInfo("0.8.1", OLD))],
+      {},
+    );
+    const s = await h.go();
+    expect(s.peers).toEqual([]);
+  });
+
+  it("a peer back on the target version but the old hash keeps waiting, then succeeds on the new hash", async () => {
+    const h = candidateHarness([peerEntry("p", nodeInfo(V, OLD))], {
+      p: [undefined, nodeInfo(V, OLD), nodeInfo(V, OLD), nodeInfo(V, CAND)],
+    });
+    const s = await h.go();
+    expect(s.peers[0]?.state).toBe("succeeded");
+  });
+
+  it("a peer that never shows the new hash times out", async () => {
+    const h = candidateHarness([peerEntry("p", nodeInfo(V, OLD))], {
+      p: [nodeInfo(V, OLD)],
+    });
+    const s = await h.go();
+    expect(s.peers[0]?.state).toBe("timeout");
+    expect(s.state).toBe("stopped");
+  });
+
+  it("a peer on an older version comes back on the target with no hash → succeeded (old updater)", async () => {
+    const h = candidateHarness([peerEntry("p", nodeInfo("0.7.0"))], {
+      p: [undefined, nodeInfo(V)],
+    });
+    const s = await h.go();
+    expect(s.peers[0]?.state).toBe("succeeded");
+  });
+
+  it("a same-version peer that comes back with no hash is not counted as done", async () => {
+    const h = candidateHarness([peerEntry("p", nodeInfo(V, OLD))], {
+      p: [nodeInfo(V)],
+    });
+    const s = await h.go();
+    expect(s.peers[0]?.state).toBe("timeout");
+  });
+
+  it("a same-release refusal counts as succeeded", async () => {
+    const h = candidateHarness(
+      [peerEntry("p", nodeInfo(V, CAND))],
+      {},
+      {
+        pushErrors: {
+          p: new HfpRequestError(
+            422,
+            {
+              code: "UPGRADE_REJECTED",
+              message: "already running these bytes",
+              details: { reason: "same-release" },
+            },
+            "rejected",
+          ),
+        },
+      },
+    );
+    const s = await h.go({ nodes: ["p"] });
+    expect(s.peers[0]).toMatchObject({ deviceId: "p", state: "succeeded" });
+  });
+
+  it("self is pending when its hash differs, skipped when equal", async () => {
+    const differs = candidateHarness([], {}, { currentSha256: OLD });
+    expect((await differs.go()).self.state).toBe("restarting");
+    const unknown = candidateHarness([], {});
+    expect((await unknown.go()).self.state).toBe("restarting");
+    const equal = candidateHarness([], {}, { currentSha256: CAND });
+    expect((await equal.go()).self.state).toBe("skipped");
+    const newer = candidateHarness([], {}, { currentVersion: "0.8.1" });
+    expect((await newer.go()).self.state).toBe("skipped");
+  });
+
+  it("the push carries candidate: true; a plain rollout's push has no candidate key", async () => {
+    const cand = candidateHarness([peerEntry("p", nodeInfo(V, OLD))], {
+      p: [nodeInfo(V, CAND)],
+    });
+    await cand.go();
+    expect(cand.requests[0]?.candidate).toBe(true);
+    const plain = candidateHarness([peerEntry("p", nodeInfo("0.7.0"))], {
+      p: [nodeInfo(V)],
+    });
+    await plain.go({ candidate: false });
+    expect(plain.requests[0]).not.toHaveProperty("candidate");
+  });
+
+  it("self step calls upgradeSelf with candidate.sha256", async () => {
+    const h = candidateHarness([], {}, { currentSha256: OLD });
+    await h.go();
+    expect(h.selfInputs).toEqual([
+      { version: V, force: false, candidate: { sha256: CAND } },
+    ]);
+  });
+
+  it("restore: a candidate self step succeeds only on the candidate hash", () => {
+    const saved: RolloutStatus = {
+      id: "r",
+      target: V,
+      startedAt: "2026-11-20T10:00:00.000Z",
+      state: "running",
+      candidateSha256: CAND,
+      peers: [],
+      self: { state: "restarting" },
+    };
+    expect(
+      restoreRolloutStatus(saved, { daemonVersion: V, releaseSha256: CAND })
+        .self.state,
+    ).toBe("succeeded");
+    expect(
+      restoreRolloutStatus(saved, { daemonVersion: V, releaseSha256: OLD }).self
+        .state,
+    ).toBe("restarting");
+    expect(restoreRolloutStatus(saved, { daemonVersion: V }).self.state).toBe(
+      "restarting",
+    );
+    expect(
+      restoreRolloutStatus(saved, { daemonVersion: "0.8.1" }).self.state,
+    ).toBe("succeeded");
   });
 });

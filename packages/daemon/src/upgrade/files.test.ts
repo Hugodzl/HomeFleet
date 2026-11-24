@@ -193,6 +193,16 @@ describe("rollout status store", () => {
     await writeFile(file, JSON.stringify({ ...status, self: null }));
     expect(readRolloutStatusSync(dataDir)).toBeUndefined();
   });
+
+  test("a candidate rollout keeps its candidateSha256; a malformed one is refused", async () => {
+    const dataDir = await tempDir();
+    const candidate = { ...status, candidateSha256: "e".repeat(64) };
+    await writeRolloutStatus(dataDir, candidate);
+    expect(readRolloutStatusSync(dataDir)).toEqual(candidate);
+    const file = path.join(dataDir, "upgrades", ROLLOUT_STATUS_FILE);
+    await writeFile(file, JSON.stringify({ ...status, candidateSha256: 7 }));
+    expect(readRolloutStatusSync(dataDir)).toBeUndefined();
+  });
 });
 
 describe("installed-release record", () => {
