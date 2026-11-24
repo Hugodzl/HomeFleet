@@ -292,14 +292,22 @@ jobs:
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           candidate=""
+          # Published (non-draft) Releases as "tag<TAB>prerelease" lines.
+          releases="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" \
+            | jq -r 'add | .[] | select(.draft | not) | [.tag_name, (.prerelease | tostring)] | @tsv')"
           if [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-rc\.[1-9][0-9]*$ ]]; then
             mode=candidate
             final="v${BASH_REMATCH[1]}"
+            # A candidate after its final would publish other X.Y.Z bytes.
+            if printf '%s\n' "$releases" | grep -qxF "$final"$'\t'"false"; then
+              echo "::error::$final is already released; a candidate for it would ship different bytes"; exit 1
+            fi
           elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             final="$tag"
-            candidate="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" \
-              | jq -r 'add | .[] | select(.prerelease and (.draft | not)) | .tag_name' \
-              | { grep -E "^${final//./\\.}-rc\.[1-9][0-9]*$" || true; } \
+            # [.] rather than \. : bash 5.2 rewrites backslashes in ${//}.
+            candidate="$(printf '%s\n' "$releases" \
+              | awk -F '\t' '$2 == "true" { print $1 }' \
+              | { grep -E "^${final//./[.]}-rc[.][1-9][0-9]*$" || true; } \
               | sort -V | tail -n 1)"
             if [ -n "$candidate" ]; then
               mode=promote

@@ -89,3 +89,24 @@ test("flattenReleasePages refuses anything that is not pages of releases", () =>
   expect(() => flattenReleasePages({ message: "Not Found" })).toThrow();
   expect(() => flattenReleasePages([[{ name: "x" }]])).toThrow();
 });
+
+test("a candidate tag after its final is published throws", () => {
+  expect(() =>
+    planRelease({
+      ref: "refs/tags/v0.8.0-rc.3",
+      refName: "v0.8.0-rc.3",
+      releases: [
+        { tag: "v0.8.0", prerelease: false, draft: false },
+        rc("v0.8.0-rc.2"),
+      ],
+    }),
+  ).toThrow(/already released/);
+  // A draft final does not count.
+  expect(
+    planRelease({
+      ref: "refs/tags/v0.8.0-rc.3",
+      refName: "v0.8.0-rc.3",
+      releases: [{ tag: "v0.8.0", prerelease: false, draft: true }],
+    }),
+  ).toEqual({ mode: "candidate", final: "v0.8.0" });
+});

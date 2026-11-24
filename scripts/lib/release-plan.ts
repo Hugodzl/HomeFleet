@@ -39,6 +39,16 @@ export function planRelease(input: {
   const parsed = parseReleaseTag(input.refName);
   const final = `v${parsed.version}`;
   if (parsed.candidate !== undefined) {
+    // A candidate after its final would publish other X.Y.Z bytes.
+    const released = input.releases.some(
+      (release) =>
+        release.tag === final && !release.prerelease && !release.draft,
+    );
+    if (released) {
+      throw new Error(
+        `${final} is already released; a candidate for it would ship different bytes`,
+      );
+    }
     return { mode: "candidate", final };
   }
   const published = input.releases
