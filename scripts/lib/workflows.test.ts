@@ -331,5 +331,6 @@ test("a candidate is published as a prerelease that is never latest, with the no
   const run = stepNamed("release", "Publish the GitHub Release")?.run ?? "";
   expect(run).toContain("--prerelease --latest=false");
   expect(run).toContain("Release candidate for testing on Hugo's rig");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal bash expansion
   expect(run).toContain('title="${title/"$final"/"$tag"}"');
 });
