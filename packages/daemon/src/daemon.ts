@@ -63,6 +63,7 @@ import {
   type UpgradeCoordinatorOptions,
 } from "./upgrade/coordinator.js";
 import {
+  readInstalledReleaseSync,
   readRolloutStatusSync,
   readUpgradeResultSync,
   toLastUpgrade,
@@ -560,10 +561,15 @@ export class Daemon {
     const modelStatuses = await validateCatalog(catalog, {
       timeoutMs: DEFAULT_CATALOG_PROBE_TIMEOUT_MS,
     });
+    // The bytes this daemon runs, read ONCE: the updater writes the record
+    // before launching us, and only a record for our own version counts
+    // (a manual npm i -g of another version leaves a stale one).
+    const releaseSha256 = readInstalledReleaseSync(dataDir, this.daemonVersion);
     const nodeInfoProvider = createNodeInfoProvider({
       deviceId: identity.deviceId,
       config,
       daemonVersion: this.daemonVersion,
+      ...(releaseSha256 !== undefined ? { releaseSha256 } : {}),
       jobs: jobManager,
       lastUpgrade: () => {
         const result = readUpgradeResultSync(dataDir);
@@ -691,6 +697,7 @@ export class Daemon {
     const upgrades = new UpgradeCoordinator({
       dataDir,
       currentVersion: this.daemonVersion,
+      ...(releaseSha256 !== undefined ? { currentSha256: releaseSha256 } : {}),
       localHfpVersion: HFP_PROTOCOL_VERSION,
       source: releaseSource,
       activeJobs: () => jobManager.activeJobs,
@@ -731,6 +738,7 @@ export class Daemon {
         ourNodeInfo: nodeInfoProvider,
       }),
       currentVersion: this.daemonVersion,
+      ...(releaseSha256 !== undefined ? { currentSha256: releaseSha256 } : {}),
       upgradeSelf: (input) => upgrades.upgradeSelf(input),
       // Saved on every final step and when this node's own upgrade hands
       // off: that restart would lose the status the CLI is still reading.
@@ -741,6 +749,7 @@ export class Daemon {
           saved &&
           restoreRolloutStatus(saved, {
             daemonVersion: this.daemonVersion,
+            releaseSha256,
             lastUpgrade: readUpgradeResultSync(dataDir),
           })
         );
@@ -753,11 +762,14 @@ export class Daemon {
       coordinator: upgrades,
       currentVersion: this.daemonVersion,
       pairedDeviceIds: () => trustStore.list().map((d) => d.deviceId),
-      prepare: (version) =>
+      prepare: (version, prepareOptions = {}) =>
         prepareRelease({
           source: releaseSource,
           upgradesDir: upgradesDir(dataDir),
           version,
+          ...(prepareOptions.tag !== undefined
+            ? { tag: prepareOptions.tag }
+            : {}),
           ...(this.upgradeSeams?.publicKeys !== undefined
             ? { publicKeys: this.upgradeSeams.publicKeys }
             : {}),
@@ -802,6 +814,7 @@ export class Daemon {
             return lastUpgrade !== undefined ? { lastUpgrade } : {};
           })(),
           ...(available !== undefined ? { availableUpgrade: available } : {}),
+          ...(releaseSha256 !== undefined ? { releaseSha256 } : {}),
           pid: process.pid,
         };
       },

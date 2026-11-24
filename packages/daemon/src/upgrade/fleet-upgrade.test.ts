@@ -61,6 +61,7 @@ async function harness(
   const calls = {
     start: [] as RolloutStartInput[],
     prepare: [] as string[],
+    prepareOptions: [] as unknown[],
     self: [] as unknown[],
     check: 0,
   };
@@ -94,7 +95,8 @@ async function harness(
     pairedDeviceIds: () => [PEER],
     prepare:
       opts.prepare ??
-      (async (version) => {
+      (async (version, prepareOptions = {}) => {
+        calls.prepareOptions.push(prepareOptions);
         calls.prepare.push(version);
         return prepared;
       }),
@@ -401,5 +403,29 @@ describe("servedRelease: what the tarball route serves", () => {
     });
     await surface.upgrade({ targets: "fleet" }).catch(() => undefined);
     expect(surface.servedRelease()).toBeUndefined();
+  });
+});
+
+describe("candidate requests", () => {
+  test("a self candidate goes to the coordinator with the tag", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "self", candidate: "v0.5.2-rc.1" });
+    expect(calls.self).toEqual([{ candidate: { tag: "v0.5.2-rc.1" } }]);
+  });
+
+  test("a fleet candidate resolves the version from the tag, prepares with { tag }, and starts a candidate rollout", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "fleet", candidate: "v0.5.2-rc.1" });
+    expect(calls.prepare).toEqual(["0.5.2"]);
+    expect(calls.prepareOptions).toEqual([{ tag: "v0.5.2-rc.1" }]);
+    expect(calls.check).toBe(0);
+    expect(calls.start[0]?.candidate).toBe(true);
+  });
+
+  test("a plain fleet request starts a plain rollout", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "fleet" });
+    expect(calls.start[0]?.candidate).toBeUndefined();
+    expect(calls.prepareOptions).toEqual([{}]);
   });
 });

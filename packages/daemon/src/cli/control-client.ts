@@ -255,6 +255,9 @@ function validateControlStatus(json: unknown): ControlStatus {
   if (json.pid !== undefined) {
     assertNumber(json.pid, "pid", "status");
   }
+  if (json.releaseSha256 !== undefined) {
+    assertString(json.releaseSha256, "releaseSha256", "status");
+  }
   return json as unknown as ControlStatus;
 }
 

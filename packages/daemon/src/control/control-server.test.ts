@@ -10,7 +10,7 @@ import {
   type IncomingMessage,
   request,
 } from "node:http";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { UpgradeError } from "../upgrade/errors.js";
 import type { RolloutStatus } from "../upgrade/rollout.js";
 import {
@@ -904,6 +904,7 @@ test("POST /control/upgrade rejects a bad version with 400", async () => {
 test.each([
   ["busy", 409],
   ["not-newer", 409],
+  ["same-release", 409],
   ["verify-failed", 422],
   ["fetch-failed", 502],
 ] as const)("an UpgradeError %s maps to %i with its code", async (code, status) => {
@@ -1390,4 +1391,49 @@ test("POST /control/shutdown rejects a bad body with 400", async () => {
     body: JSON.stringify({ force: "yes" }),
   });
   expect(response.status).toBe(400);
+});
+
+describe("POST /control/upgrade with candidate", () => {
+  async function post(body: unknown, surface = fakeSurface()) {
+    const server = await start({ surface });
+    return send(server.port, {
+      method: "POST",
+      path: "/control/upgrade",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test.each([
+    ["v0.8.0-rc.2"],
+    ["v0.8.0"],
+  ])("passes candidate %s through", async (tag) => {
+    const calls: unknown[] = [];
+    const response = await post(
+      { candidate: tag },
+      fakeSurface({
+        upgrade: async (input) => {
+          calls.push(input);
+          return { from: "0.8.0", to: "0.8.0" };
+        },
+      }),
+    );
+    expect(response.status).toBe(202);
+    expect(calls).toEqual([{ targets: "self", candidate: tag }]);
+  });
+
+  test("refuses version together with candidate", async () => {
+    const response = await post({ version: "0.8.0", candidate: "v0.8.0-rc.1" });
+    expect(response.status).toBe(400);
+  });
+
+  test.each([
+    ["0.8.0-rc.1"],
+    ["v0.8.0-rc.0"],
+    ["v0.8.0-beta.1"],
+    ["v0.8"],
+  ])("refuses a bad tag %s", async (tag) => {
+    const response = await post({ candidate: tag });
+    expect(response.status).toBe(400);
+  });
 });

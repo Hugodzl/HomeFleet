@@ -1644,3 +1644,205 @@ describe("control token on upgrade (v0.6.0)", () => {
     expect(h.stderrLines).toEqual([BAD_TOKEN_MESSAGE]);
   });
 });
+
+describe("release candidates (--candidate)", () => {
+  const S = "5".repeat(64);
+  const OLD = "6".repeat(64);
+  const TAG = "v0.8.0-rc.2";
+
+  function statusOf(
+    daemonVersion: string,
+    releaseSha256?: string,
+  ): ControlStatus {
+    return {
+      deviceId: FAKE_DEVICE_ID,
+      name: "n",
+      platform: "win32",
+      daemonVersion,
+      protocolVersion: "0.5.0",
+      hfpPort: 1,
+      mcpPort: 2,
+      controlPort: 3,
+      roles: [],
+      executors: [],
+      models: [],
+      activeJobs: 0,
+      maxConcurrentJobs: 1,
+      ...(releaseSha256 !== undefined ? { releaseSha256 } : {}),
+    };
+  }
+
+  function clocked(client: ControlClientLike) {
+    const h = makeHarness({ controlClient: client });
+    let clock = 1_000;
+    h.deps.now = () => clock;
+    h.deps.sleep = async (ms) => {
+      clock += ms;
+    };
+    return h;
+  }
+
+  test("upgrade --candidate sends the tag and waits for the candidate's hash, not just the version", async () => {
+    const calls: unknown[] = [];
+    const statuses = [statusOf("0.8.0", OLD), statusOf("0.8.0", S)];
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async (input) => {
+          calls.push(input);
+          return { from: "0.8.0", to: "0.8.0", sha256: S, candidate: true };
+        },
+        status: async () =>
+          (statuses.length > 1
+            ? statuses.shift()
+            : statuses[0]) as ControlStatus,
+      }),
+    );
+    expect(await runCli(["upgrade", "--candidate", TAG], h.deps)).toBe(0);
+    expect(calls).toEqual([{ targets: "self", candidate: TAG }]);
+    expect(h.stdoutLines.at(-1)).toBe(
+      `Upgraded to 0.8.0 (sha256 ${S.slice(0, 12)}).`,
+    );
+  });
+
+  test("upgrade --candidate never succeeds on the old hash", async () => {
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async () => ({
+          from: "0.8.0",
+          to: "0.8.0",
+          sha256: S,
+          candidate: true,
+        }),
+        status: async () => statusOf("0.8.0", OLD),
+      }),
+    );
+    expect(await runCli(["upgrade", "--candidate", TAG], h.deps)).toBe(1);
+    expect(h.stderrLines.at(-1)).toMatch(/^Timed out/);
+  });
+
+  test.each([
+    [["upgrade", "--candidate", TAG, "--to", "0.8.0"]],
+    [["upgrade", "--to", "0.8.0", "--candidate", TAG]],
+    [["upgrade", "--candidate", "0.8.0"]],
+    [["upgrade", "--candidate", "v0.8.0-rc.0"]],
+    [["upgrade", "--candidate"]],
+    [["fleet", "upgrade", "--candidate", TAG, "--to", "0.8.0"]],
+    [["fleet", "upgrade", "--candidate", "v0.8.0-beta.1"]],
+  ])("%j is a usage error (exit 2)", async (argv) => {
+    const h = makeHarness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.stderrLines.join("\n")).toMatch(/--candidate/);
+  });
+
+  test("same-release prints Already running and exits 0", async () => {
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async () => {
+          throw new ControlRequestError(
+            409,
+            `already running 0.8.0 (sha256 ${S.slice(0, 12)})`,
+            "same-release",
+          );
+        },
+        status: async () => statusOf("0.8.0", S),
+      }),
+    );
+    expect(await runCli(["upgrade", "--candidate", TAG], h.deps)).toBe(0);
+    expect(h.stdoutLines).toEqual([
+      `Already running ${TAG} (sha256 ${S.slice(0, 12)}).`,
+    ]);
+  });
+
+  test("an old daemon that refuses the candidate field gets a clear message", async () => {
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async () => {
+          throw new ControlRequestError(
+            400,
+            'invalid upgrade request: (body): Unrecognized key: "candidate"',
+          );
+        },
+        status: async () => statusOf("0.7.0"),
+      }),
+    );
+    expect(await runCli(["upgrade", "--candidate", TAG], h.deps)).toBe(1);
+    expect(h.stderrLines).toEqual([
+      "The running homefleetd (0.7.0) does not support --candidate; upgrade it to a release first.",
+    ]);
+  });
+
+  test("fleet upgrade --candidate sends the tag and waits for this node's hash", async () => {
+    const calls: unknown[] = [];
+    const statuses = [
+      statusOf("0.8.0", OLD), // before
+      statusOf("0.8.0", OLD), // restarting
+      statusOf("0.8.0", S),
+    ];
+    const rollout: RolloutStatus = {
+      id: "r1",
+      target: "0.8.0",
+      candidateSha256: S,
+      startedAt: "2026-11-20T12:00:00.000Z",
+      state: "running",
+      peers: [],
+      self: { state: "restarting" },
+    };
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async (input) => {
+          calls.push(input);
+          return rollout;
+        },
+        status: async () =>
+          (statuses.length > 1
+            ? statuses.shift()
+            : statuses[0]) as ControlStatus,
+        upgrades: async () => ({ ...rollout, state: "done" }),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade", "--candidate", TAG], h.deps)).toBe(
+      0,
+    );
+    expect(calls).toEqual([{ targets: "fleet", candidate: TAG }]);
+    expect(h.stdoutLines).toContain(
+      `Upgraded to 0.8.0 (sha256 ${S.slice(0, 12)}).`,
+    );
+  });
+
+  test("fleet upgrade against an old daemon refusing candidate gets the clear message", async () => {
+    const h = clocked(
+      fakeControlClient({
+        upgrade: async () => {
+          throw new ControlRequestError(
+            400,
+            'invalid upgrade request: (body): Unrecognized key: "candidate"',
+          );
+        },
+        status: async () => statusOf("0.7.0"),
+      }),
+    );
+    expect(await runCli(["fleet", "upgrade", "--candidate", TAG], h.deps)).toBe(
+      1,
+    );
+    expect(h.stderrLines).toEqual([
+      "The running homefleetd (0.7.0) does not support --candidate; upgrade it to a release first.",
+    ]);
+  });
+
+  test("status prints the release hash, or unknown", async () => {
+    const known = makeHarness({
+      controlClient: fakeControlClient({
+        status: async () => statusOf("0.8.0", S),
+      }),
+    });
+    expect(await runCli(["status"], known.deps)).toBe(0);
+    expect(known.stdoutLines).toContain(`releaseSha256: ${S.slice(0, 12)}`);
+    const unknown = makeHarness({
+      controlClient: fakeControlClient({
+        status: async () => statusOf("0.8.0"),
+      }),
+    });
+    expect(await runCli(["status"], unknown.deps)).toBe(0);
+    expect(unknown.stdoutLines).toContain("releaseSha256: unknown");
+  });
+});

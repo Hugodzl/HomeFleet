@@ -29,14 +29,21 @@ export interface FleetUpgradeSurfaceOptions {
     upgradeSelf(input: {
       version?: string;
       force?: boolean;
+      candidate?: { tag?: string; sha256?: string };
     }): Promise<UpgradeStarted>;
   };
   /** This daemon's version (the coordinator's and rollout's), reported as `current`. */
   currentVersion: string;
   /** Device ids currently in the trust store. */
   pairedDeviceIds: () => string[];
-  /** Download + verify `version` into the cache (the coordinator's source and keys). */
-  prepare: (version: string) => Promise<PreparedRelease>;
+  /**
+   * Download + verify `version` into the cache (the coordinator's source and
+   * keys); `tag` fetches a release candidate's GitHub release instead.
+   */
+  prepare: (
+    version: string,
+    options?: { tag?: string },
+  ) => Promise<PreparedRelease>;
   upgradesDir: string;
 }
 
@@ -90,13 +97,17 @@ export function createFleetUpgradeSurface(
    */
   async function resolveAndPrepare(
     version: string | undefined,
+    tag?: string,
   ): Promise<{ current: string; prepared: PreparedRelease }> {
-    // An explicit version never touches the network here, so a cached
-    // verified release can still be rolled out offline.
-    const target = version ?? (await options.coordinator.check()).latest;
+    // An explicit version (or a candidate tag) never touches the network
+    // here, so a cached verified release can still be rolled out offline.
+    const target =
+      versionOfTag(tag) ??
+      version ??
+      (await options.coordinator.check()).latest;
     return {
       current: options.currentVersion,
-      prepared: await options.prepare(target),
+      prepared: await options.prepare(target, tag !== undefined ? { tag } : {}),
     };
   }
 
@@ -117,7 +128,10 @@ export function createFleetUpgradeSurface(
           );
         }
       }
-      const { prepared } = await resolveAndPrepare(input.version);
+      const { prepared } = await resolveAndPrepare(
+        input.version,
+        input.candidate,
+      );
       const { manifestBytes, signature } = prepared;
       // Only now - past the busy check and a successful prepare - does the
       // tarball route switch to these bytes, before the first push.
@@ -135,6 +149,7 @@ export function createFleetUpgradeSurface(
           ...(input.includeSelf !== undefined
             ? { includeSelf: input.includeSelf }
             : {}),
+          ...(input.candidate !== undefined ? { candidate: true } : {}),
         })
         .catch((error: unknown) => {
           served = before;
@@ -171,8 +186,16 @@ export function createFleetUpgradeSurface(
       return options.coordinator.upgradeSelf({
         ...(input.version !== undefined ? { version: input.version } : {}),
         ...(input.force !== undefined ? { force: input.force } : {}),
+        ...(input.candidate !== undefined
+          ? { candidate: { tag: input.candidate } }
+          : {}),
       });
     },
     upgrades: () => options.rollout.status(),
   };
+}
+
+/** The X.Y.Z of a `vX.Y.Z` / `vX.Y.Z-rc.N` tag (already schema-checked). */
+function versionOfTag(tag: string | undefined): string | undefined {
+  return tag === undefined ? undefined : /^v(\d+\.\d+\.\d+)/.exec(tag)?.[1];
 }

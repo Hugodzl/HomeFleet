@@ -49,6 +49,7 @@ function makeProvider(options: {
   hostname?: string;
   daemonVersion?: string;
   models?: ModelInfo[] | (() => ModelInfo[]);
+  releaseSha256?: string;
 }) {
   return createNodeInfoProvider({
     deviceId: DEVICE_ID,
@@ -58,6 +59,9 @@ function makeProvider(options: {
     lastUpgrade: options.lastUpgrade,
     hostname: options.hostname,
     models: options.models ?? [],
+    ...(options.releaseSha256 !== undefined
+      ? { releaseSha256: options.releaseSha256 }
+      : {}),
   });
 }
 
@@ -304,4 +308,10 @@ test("a models getter is re-read on every build, so re-probed statuses show up",
   ]);
   status = "ok";
   expect(provider().models[0]?.status).toBe("ok");
+});
+
+test("advertises releaseSha256 when known, and omits it otherwise", () => {
+  const sha = "f".repeat(64);
+  expect(makeProvider({ releaseSha256: sha })().releaseSha256).toBe(sha);
+  expect(makeProvider({})()).not.toHaveProperty("releaseSha256");
 });
