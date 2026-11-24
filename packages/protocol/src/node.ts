@@ -4,7 +4,11 @@
  */
 import { z } from "zod";
 import { SemverSchema } from "./semver.js";
-import { LastUpgradeSchema, UpgradeInfoSchema } from "./upgrade.js";
+import {
+  LastUpgradeSchema,
+  ReleaseSha256Schema,
+  UpgradeInfoSchema,
+} from "./upgrade.js";
 
 // Defined in semver.ts so upgrade.ts can use it without an import cycle;
 // re-exported here to keep the public path stable.
@@ -85,5 +89,10 @@ export const NodeInfoSchema = z.object({
   upgrade: UpgradeInfoSchema.optional(),
   /** Outcome of the latest self-upgrade; absent if none or pre-0.4. */
   lastUpgrade: LastUpgradeSchema.optional(),
+  /**
+   * sha256 of the release tarball this node runs; absent when unknown
+   * (pre-0.8, or installed outside `homefleet upgrade`).
+   */
+  releaseSha256: ReleaseSha256Schema.optional(),
 });
 export type NodeInfo = z.infer<typeof NodeInfoSchema>;
