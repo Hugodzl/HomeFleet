@@ -26,7 +26,9 @@
     "@homefleet/executors": "workspace:*",
     "@homefleet/protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@peculiar/asn1-schema": "^3.1.0",
     "@peculiar/x509": "^3.1.0",
+    "asn1js": "^4.1.0",
     "bonjour-service": "^1.4.1",
     "reflect-metadata": "^0.2.2",
     "zod": "^4.4.3"
