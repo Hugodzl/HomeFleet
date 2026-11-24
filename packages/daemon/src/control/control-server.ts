@@ -531,6 +531,8 @@ function upgradeErrorStatus(error: UpgradeError): number {
       return 422;
     case "unknown-node":
       return 400;
+    case "same-release":
+      return 409;
     default:
       return 409;
   }

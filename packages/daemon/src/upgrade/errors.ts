@@ -5,6 +5,7 @@
  */
 export type UpgradeErrorCode =
   | "not-newer"
+  | "same-release"
   | "hfp-major-mismatch"
   | "busy"
   | "locked"

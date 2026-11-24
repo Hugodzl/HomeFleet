@@ -661,6 +661,11 @@ Refusals use `HfpError`:
 | 422  | `UPGRADE_REJECTED` | Bad signature or a failed guard; `details: { reason }` names the upgrade error code |
 | 409  | `UPGRADE_BUSY`     | An upgrade is already in progress, or jobs are running       |
 
+A `candidate` push of the exact bytes the receiver already runs is refused
+`422 UPGRADE_REJECTED` with `details: { reason: "same-release" }` and the
+message "already running these bytes"; a sender SHOULD count that node as
+already upgraded, not as a failure.
+
 A 0.3.x peer does not know the route and answers 404 `INVALID_REQUEST`
 ("unknown endpoint") to `POST /upgrade`; a sender SHOULD report such a peer as
 too old and continue.

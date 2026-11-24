@@ -36,6 +36,8 @@ function wireCode(code: UpgradeErrorCode): HfpErrorCode {
     case "locked":
     case "busy":
       return "UPGRADE_BUSY";
+    case "same-release":
+      return "UPGRADE_REJECTED";
     default:
       return "UPGRADE_REJECTED";
   }
