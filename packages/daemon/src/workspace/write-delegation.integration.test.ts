@@ -193,7 +193,7 @@ test("write delegation E2E: branch at headCommit with the scripted edits, matchi
   // task named none) and carried it through to the wire, end to end via a
   // real assembled Daemon: submit() -> resolver -> context.endpoint -> the
   // OpenAiClient's request body.
-  expect((mock.requests[0]?.body as { model: string }).model).toBe(
+  expect((mock.requests[0]?.body as { model: string } | undefined)?.model).toBe(
     WRITE_TEST_MODEL_ID,
   );
 

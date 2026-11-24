@@ -1389,9 +1389,9 @@ test("delegate_task recon uses the requested model", async () => {
   });
   const { jobId } = DelegateTaskOutputSchema.parse(res.structuredContent);
   await runToTerminal(client, jobId);
-  expect((model.requests[0]?.body as { model: string }).model).toBe(
-    "qwen3.5-9b",
-  );
+  expect(
+    (model.requests[0]?.body as { model: string } | undefined)?.model,
+  ).toBe("qwen3.5-9b");
 });
 
 test("delegate_task rejects an un-offered model BEFORE syncing the workspace", async () => {

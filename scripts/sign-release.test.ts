@@ -370,11 +370,10 @@ describe("--digest on a tag run: the version must be the tag's", () => {
     expect(out.stderr).toMatch(/tag/);
   });
 
-  test.each([
-    ["refs/tags/v0.5.0"],
-    ["refs/heads/main"],
-    [undefined],
-  ])("%s is accepted", async (ref) => {
-    expect((await signWith(ref)).code).toBe(0);
-  });
+  test.each([["refs/tags/v0.5.0"], ["refs/heads/main"], [undefined]])(
+    "%s is accepted",
+    async (ref) => {
+      expect((await signWith(ref)).code).toBe(0);
+    },
+  );
 });
