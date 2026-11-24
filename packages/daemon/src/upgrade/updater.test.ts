@@ -99,6 +99,8 @@ interface Scenario {
   state?: Partial<UpgradeState>;
   /** An installed-release.json already on disk before the run. */
   record?: { version: string; sha256: string };
+  /** Runs on the data dir before the updater starts. */
+  setup?: (root: string) => Promise<void>;
 }
 
 async function runUpdater(scenario: Scenario): Promise<{
@@ -133,6 +135,7 @@ async function runUpdater(scenario: Scenario): Promise<{
   if (scenario.record !== undefined) {
     await writeInstalledRelease(root, scenario.record);
   }
+  await scenario.setup?.(root);
   const pids = path.join(root, "pids.txt");
   pidFiles.push(pids);
 
@@ -188,6 +191,7 @@ async function runUpdater(scenario: Scenario): Promise<{
     (text) => JSON.parse(text) as { version: string; sha256: string },
     () => undefined,
   );
+  await rm(path.join(root, INSTALLED_FILE), { recursive: true, force: true });
   return {
     result: JSON.parse(
       await readFile(path.join(root, RESULT_FILE), "utf8"),
@@ -299,6 +303,32 @@ describe("installed-release.json", () => {
     });
     expect(run.result.outcome).toBe("failed");
     expect(run.record).toBeUndefined();
+  });
+});
+
+describe("a record that cannot be written never stops the relaunch", () => {
+  test("installed-release.json unwritable (a directory) → still launches and succeeds", async () => {
+    const run = await runUpdater({
+      rollback: true,
+      setup: async (root) => {
+        await mkdir(path.join(root, INSTALLED_FILE), { recursive: true });
+      },
+    });
+    expect(run.result.outcome).toBe("succeeded");
+    expect(run.installed).toBe("0.5.1");
+    expect(run.log).toMatch(/could not (write|remove) installed-release\.json/);
+  });
+
+  test("unwritable record on a candidate install → the hash check fails and it rolls back, with a daemon running", async () => {
+    const run = await runUpdater({
+      rollback: true,
+      state: { candidate: true },
+      setup: async (root) => {
+        await mkdir(path.join(root, INSTALLED_FILE), { recursive: true });
+      },
+    });
+    expect(run.result.outcome).toBe("rolled-back");
+    expect(run.installed).toBe("0.5.0");
   });
 });
 
