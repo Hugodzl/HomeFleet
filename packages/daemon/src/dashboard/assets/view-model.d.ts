@@ -27,6 +27,8 @@ export interface NodeRow {
   endpoint: string;
   reachable: "yes" | "no";
   version: string;
+  /** First 12 hex chars of the peer's release tarball hash, or a dash. */
+  release: string;
   skew: boolean;
   executors: string;
   models: string;
