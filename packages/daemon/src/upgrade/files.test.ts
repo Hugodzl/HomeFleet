@@ -4,10 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   acquireLock,
+  INSTALLED_FILE,
   LOCK_FILE,
   RESULT_FILE,
   ROLLOUT_STATUS_FILE,
-  INSTALLED_FILE,
   readInstalledReleaseSync,
   readRolloutStatusSync,
   readUpgradeResultSync,
@@ -206,8 +206,14 @@ describe("installed-release record", () => {
   test.each([
     ["missing", undefined],
     ["corrupt JSON", "{not json"],
-    ["an upper-case sha", JSON.stringify({ version: "0.8.0", sha256: "C".repeat(64) })],
-    ["a short sha", JSON.stringify({ version: "0.8.0", sha256: "c".repeat(63) })],
+    [
+      "an upper-case sha",
+      JSON.stringify({ version: "0.8.0", sha256: "C".repeat(64) }),
+    ],
+    [
+      "a short sha",
+      JSON.stringify({ version: "0.8.0", sha256: "c".repeat(63) }),
+    ],
     ["no version", JSON.stringify({ sha256: sha })],
   ])("%s → undefined", async (_name, content) => {
     const dir = await tempDir();

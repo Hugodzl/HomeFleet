@@ -18,10 +18,11 @@ export function parseReleaseTag(tag: string): ReleaseTag {
       `release tag "${tag}" is not of the form v<semver> (vX.Y.Z or vX.Y.Z-rc.N)`,
     );
   }
-  const [, version, candidate] = match;
+  const version = match[1] ?? "";
+  const candidate = match[2];
   return candidate === undefined
-    ? { version: version! }
-    : { version: version!, candidate: Number(candidate) };
+    ? { version }
+    : { version, candidate: Number(candidate) };
 }
 
 /**

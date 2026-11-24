@@ -87,11 +87,14 @@ test("ReleaseSha256Schema accepts 64 lower-case hex only", () => {
 test("NodeInfoSchema takes an optional releaseSha256; a v0.7.0 shape still parses", () => {
   const sha = "b".repeat(64);
   expect(
-    NodeInfoSchema.parse({ ...validNodeInfo, releaseSha256: sha }).releaseSha256,
+    NodeInfoSchema.parse({ ...validNodeInfo, releaseSha256: sha })
+      .releaseSha256,
   ).toBe(sha);
   expect(NodeInfoSchema.parse(validNodeInfo).releaseSha256).toBeUndefined();
   expect(
-    NodeInfoSchema.safeParse({ ...validNodeInfo, releaseSha256: "B".repeat(64) })
-      .success,
+    NodeInfoSchema.safeParse({
+      ...validNodeInfo,
+      releaseSha256: "B".repeat(64),
+    }).success,
   ).toBe(false);
 });
