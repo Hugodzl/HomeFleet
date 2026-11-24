@@ -1098,14 +1098,13 @@ describe("upgrade", () => {
     );
   });
 
-  test.each([
-    [["--to"]],
-    [["--to", "latest"]],
-    [["--bogus"]],
-  ])("bad args %j → exit 2", async (args) => {
-    const h = makeHarness();
-    expect(await runCli(["upgrade", ...args], h.deps)).toBe(2);
-  });
+  test.each([[["--to"]], [["--to", "latest"]], [["--bogus"]]])(
+    "bad args %j → exit 2",
+    async (args) => {
+      const h = makeHarness();
+      expect(await runCli(["upgrade", ...args], h.deps)).toBe(2);
+    },
+  );
 });
 
 describe("upgrade visibility (v0.5.1)", () => {

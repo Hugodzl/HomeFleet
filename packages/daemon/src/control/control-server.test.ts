@@ -633,11 +633,14 @@ test.each([
   ["/index.html", 403],
   ["//", 403],
   ["/%2F", 403],
-])("static routes match by EXACT path only: %s -> %d", async (target, expectedStatus) => {
-  const server = await start();
-  const res = await getRaw(server.port, { path: target });
-  expect(res.status).toBe(expectedStatus);
-});
+])(
+  "static routes match by EXACT path only: %s -> %d",
+  async (target, expectedStatus) => {
+    const server = await start();
+    const res = await getRaw(server.port, { path: target });
+    expect(res.status).toBe(expectedStatus);
+  },
+);
 
 test("an absolute-form request target is not exact-path-matched: 403 without the control header", async () => {
   const server = await start();
@@ -907,23 +910,26 @@ test.each([
   ["same-release", 409],
   ["verify-failed", 422],
   ["fetch-failed", 502],
-] as const)("an UpgradeError %s maps to %i with its code", async (code, status) => {
-  const server = await start({
-    surface: fakeSurface({
-      upgrade: async () => {
-        throw new UpgradeError(code, `refused: ${code}`);
-      },
-    }),
-  });
-  const response = await send(server.port, {
-    method: "POST",
-    path: "/control/upgrade",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  expect(response.status).toBe(status);
-  expect(response.json).toEqual({ error: `refused: ${code}`, code });
-});
+] as const)(
+  "an UpgradeError %s maps to %i with its code",
+  async (code, status) => {
+    const server = await start({
+      surface: fakeSurface({
+        upgrade: async () => {
+          throw new UpgradeError(code, `refused: ${code}`);
+        },
+      }),
+    });
+    const response = await send(server.port, {
+      method: "POST",
+      path: "/control/upgrade",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(status);
+    expect(response.json).toEqual({ error: `refused: ${code}`, code });
+  },
+);
 
 test("POST /control/upgrade still requires the control header", async () => {
   const server = await start();
@@ -1146,26 +1152,29 @@ test.each([
   ["no token", undefined],
   ["a wrong token", "d".repeat(64)],
   ["a token of a different length", "c"],
-])("POST /control/upgrade with %s is 403 bad-token and never reaches the surface", async (_name, value) => {
-  let called = false;
-  const server = await start({
-    surface: fakeSurface({
-      upgrade: async () => {
-        called = true;
-        return { from: "0.5.0", to: "0.5.1" };
-      },
-    }),
-  });
-  const response = await send(server.port, {
-    method: "POST",
-    path: "/control/upgrade",
-    headers: { [CONTROL_TOKEN_HEADER]: value },
-    body: "{}",
-  });
-  expect(response.status).toBe(403);
-  expect(response.json).toMatchObject({ code: "bad-token" });
-  expect(called).toBe(false);
-});
+])(
+  "POST /control/upgrade with %s is 403 bad-token and never reaches the surface",
+  async (_name, value) => {
+    let called = false;
+    const server = await start({
+      surface: fakeSurface({
+        upgrade: async () => {
+          called = true;
+          return { from: "0.5.0", to: "0.5.1" };
+        },
+      }),
+    });
+    const response = await send(server.port, {
+      method: "POST",
+      path: "/control/upgrade",
+      headers: { [CONTROL_TOKEN_HEADER]: value },
+      body: "{}",
+    });
+    expect(response.status).toBe(403);
+    expect(response.json).toMatchObject({ code: "bad-token" });
+    expect(called).toBe(false);
+  },
+);
 
 test("any POST under /control/upgrade is token-guarded before the body is read", async () => {
   const server = await start();
@@ -1272,22 +1281,25 @@ test("POST /control/upgrade/prepare without the token is 403 and never reaches t
 test.each([
   ["verify-failed", 422],
   ["fetch-failed", 502],
-] as const)("POST /control/upgrade/prepare maps %s to %i", async (code, status) => {
-  const server = await start({
-    surface: fakeSurface({
-      prepareUpgrade: async () => {
-        throw new UpgradeError(code, "nope");
-      },
-    }),
-  });
-  const response = await send(server.port, {
-    method: "POST",
-    path: "/control/upgrade/prepare",
-    body: "{}",
-  });
-  expect(response.status).toBe(status);
-  expect(response.json).toMatchObject({ code });
-});
+] as const)(
+  "POST /control/upgrade/prepare maps %s to %i",
+  async (code, status) => {
+    const server = await start({
+      surface: fakeSurface({
+        prepareUpgrade: async () => {
+          throw new UpgradeError(code, "nope");
+        },
+      }),
+    });
+    const response = await send(server.port, {
+      method: "POST",
+      path: "/control/upgrade/prepare",
+      body: "{}",
+    });
+    expect(response.status).toBe(status);
+    expect(response.json).toMatchObject({ code });
+  },
+);
 
 test("POST /control/upgrade/prepare rejects a bad body with 400", async () => {
   const server = await start();
@@ -1347,24 +1359,23 @@ test("POST /control/shutdown without the token is 403 and never reaches the surf
   expect(called).toBe(false);
 });
 
-test.each([
-  "busy",
-  "upgrading",
-  "unsupported",
-] as const)("POST /control/shutdown refused as %s is 409 with that code", async (code) => {
-  const server = await start({
-    surface: fakeSurface({
-      shutdown: () => ({ ok: false, code, message: `refused: ${code}` }),
-    }),
-  });
-  const response = await send(server.port, {
-    method: "POST",
-    path: "/control/shutdown",
-    body: "{}",
-  });
-  expect(response.status).toBe(409);
-  expect(response.json).toEqual({ error: `refused: ${code}`, code });
-});
+test.each(["busy", "upgrading", "unsupported"] as const)(
+  "POST /control/shutdown refused as %s is 409 with that code",
+  async (code) => {
+    const server = await start({
+      surface: fakeSurface({
+        shutdown: () => ({ ok: false, code, message: `refused: ${code}` }),
+      }),
+    });
+    const response = await send(server.port, {
+      method: "POST",
+      path: "/control/shutdown",
+      body: "{}",
+    });
+    expect(response.status).toBe(409);
+    expect(response.json).toEqual({ error: `refused: ${code}`, code });
+  },
+);
 
 test("POST /control/shutdown on a surface without shutdown is 409 unsupported", async () => {
   const surface = fakeSurface();
@@ -1404,36 +1415,34 @@ describe("POST /control/upgrade with candidate", () => {
     });
   }
 
-  test.each([
-    ["v0.8.0-rc.2"],
-    ["v0.8.0"],
-  ])("passes candidate %s through", async (tag) => {
-    const calls: unknown[] = [];
-    const response = await post(
-      { candidate: tag },
-      fakeSurface({
-        upgrade: async (input) => {
-          calls.push(input);
-          return { from: "0.8.0", to: "0.8.0" };
-        },
-      }),
-    );
-    expect(response.status).toBe(202);
-    expect(calls).toEqual([{ targets: "self", candidate: tag }]);
-  });
+  test.each([["v0.8.0-rc.2"], ["v0.8.0"]])(
+    "passes candidate %s through",
+    async (tag) => {
+      const calls: unknown[] = [];
+      const response = await post(
+        { candidate: tag },
+        fakeSurface({
+          upgrade: async (input) => {
+            calls.push(input);
+            return { from: "0.8.0", to: "0.8.0" };
+          },
+        }),
+      );
+      expect(response.status).toBe(202);
+      expect(calls).toEqual([{ targets: "self", candidate: tag }]);
+    },
+  );
 
   test("refuses version together with candidate", async () => {
     const response = await post({ version: "0.8.0", candidate: "v0.8.0-rc.1" });
     expect(response.status).toBe(400);
   });
 
-  test.each([
-    ["0.8.0-rc.1"],
-    ["v0.8.0-rc.0"],
-    ["v0.8.0-beta.1"],
-    ["v0.8"],
-  ])("refuses a bad tag %s", async (tag) => {
-    const response = await post({ candidate: tag });
-    expect(response.status).toBe(400);
-  });
+  test.each([["0.8.0-rc.1"], ["v0.8.0-rc.0"], ["v0.8.0-beta.1"], ["v0.8"]])(
+    "refuses a bad tag %s",
+    async (tag) => {
+      const response = await post({ candidate: tag });
+      expect(response.status).toBe(400);
+    },
+  );
 });

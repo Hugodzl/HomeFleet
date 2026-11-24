@@ -411,12 +411,12 @@ describe("reusableWorkflowViolations: a job may only call a workflow of this rep
     { name: "ci.yml", text: wf("  t:\n    runs-on: x\n") },
   ];
 
-  test.each([
-    ["./.github/workflows/ci.yml"],
-    ["$/.github/workflows/ci.yml"],
-  ])("accepts %s", (ref) => {
-    expect(reusableWorkflowViolations(scanned(ref))).toEqual([]);
-  });
+  test.each([["./.github/workflows/ci.yml"], ["$/.github/workflows/ci.yml"]])(
+    "accepts %s",
+    (ref) => {
+      expect(reusableWorkflowViolations(scanned(ref))).toEqual([]);
+    },
+  );
 
   test.each([
     [`evil/repo/.github/workflows/w.yml@${SHA}`],
@@ -657,23 +657,21 @@ describe("sign job: no expression anywhere but the one pinned key value", () => 
     expect(signOf(wf(goodSign.replace(from, to)))).not.toBe("");
   });
 
-  test.each([
-    ["nightly"],
-    ["latest"],
-    ["node"],
-    ["24-nightly"],
-  ])("flags node-version %s", (version) => {
-    expect(
-      signOf(
-        wf(
-          goodSign.replace(
-            "          node-version: 22\n",
-            `          node-version: ${version}\n`,
+  test.each([["nightly"], ["latest"], ["node"], ["24-nightly"]])(
+    "flags node-version %s",
+    (version) => {
+      expect(
+        signOf(
+          wf(
+            goodSign.replace(
+              "          node-version: 22\n",
+              `          node-version: ${version}\n`,
+            ),
           ),
         ),
-      ),
-    ).not.toBe("");
-  });
+      ).not.toBe("");
+    },
+  );
 
   test("flags a missing node-version", () => {
     expect(

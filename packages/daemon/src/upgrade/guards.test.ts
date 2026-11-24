@@ -91,16 +91,19 @@ describe("checkCandidate: a candidate may reinstall the same version with other 
     ["same version, unknown hash", "0.8.0", undefined, "0.8.0", B, undefined],
     ["older", "0.8.0", A, "0.7.9", B, "not-newer"],
     ["older, unknown hash", "0.8.0", undefined, "0.7.9", B, "not-newer"],
-  ] as const)("%s", (_name, current, currentSha256, target, targetSha256, code) => {
-    expect(
-      checkCandidate({
-        current,
-        ...(currentSha256 !== undefined ? { currentSha256 } : {}),
-        target,
-        targetSha256,
-      })?.code,
-    ).toBe(code);
-  });
+  ] as const)(
+    "%s",
+    (_name, current, currentSha256, target, targetSha256, code) => {
+      expect(
+        checkCandidate({
+          current,
+          ...(currentSha256 !== undefined ? { currentSha256 } : {}),
+          target,
+          targetSha256,
+        })?.code,
+      ).toBe(code);
+    },
+  );
 
   test("checkUpgradeGuards with candidate uses checkCandidate", () => {
     const same = { ...base, current: "0.8.0", target: "0.8.0" };
