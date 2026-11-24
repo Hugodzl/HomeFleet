@@ -426,15 +426,18 @@ describe("daemon stop", () => {
     [404, "predates `homefleet daemon stop`"],
     ["bad-token", "control token didn't match"],
     [409, "Could not stop homefleetd: cannot"],
-  ] as const)("shutdown answering %s explains and exits 1", async (answer, message) => {
-    const w = world({
-      daemon: { pid: 42, version: "0.6.4", activeJobs: 0 },
-      shutdown: answer,
-    });
-    const h = harness(w);
-    expect(await h.run("stop")).toBe(1);
-    expect(h.text()).toContain(message);
-  });
+  ] as const)(
+    "shutdown answering %s explains and exits 1",
+    async (answer, message) => {
+      const w = world({
+        daemon: { pid: 42, version: "0.6.4", activeJobs: 0 },
+        shutdown: answer,
+      });
+      const h = harness(w);
+      expect(await h.run("stop")).toBe(1);
+      expect(h.text()).toContain(message);
+    },
+  );
 });
 
 describe("daemon stop: unreadable pid", () => {
