@@ -85,8 +85,14 @@ function digestFromEnv() {
   }
   // On a tag run (GitHub sets GITHUB_REF), sign only the tag's own version:
   // a compromised pack can't get some other version signed by the approved run.
+  // A candidate tag vX.Y.Z-rc.N carries exactly the final X.Y.Z, nothing else.
   const ref = process.env.GITHUB_REF ?? "";
-  if (ref.startsWith("refs/tags/v") && ref !== `refs/tags/v${version}`) {
+  const candidate = /^refs\/tags\/v(\d+\.\d+\.\d+)-rc\.[1-9]\d*$/.exec(ref);
+  if (
+    ref.startsWith("refs/tags/v") &&
+    ref !== `refs/tags/v${version}` &&
+    candidate?.[1] !== version
+  ) {
     throw new Error(
       `HOMEFLEET_RELEASE_VERSION ${version} is not the tag ${ref}`,
     );
