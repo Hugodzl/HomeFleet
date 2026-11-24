@@ -93,6 +93,14 @@ async function readTags(dir: string): Promise<string[]> {
   }
 }
 
+/**
+ * Records `tag` on an entry, best effort: a missing tag only means a later
+ * by-tag lookup fetches again, never that a verified release fails.
+ */
+async function tryAddTag(dir: string, tag: string): Promise<void> {
+  await addTag(dir, tag).catch(() => undefined);
+}
+
 /** Per-entry queue so two concurrent tag merges never lose one. */
 const tagWrites = new Map<string, Promise<void>>();
 
@@ -219,6 +227,15 @@ const inFlight = new Map<string, Promise<PreparedRelease>>();
 export function prepareRelease(
   options: PrepareOptions,
 ): Promise<PreparedRelease> {
+  if (options.sha256 !== undefined && options.tag !== undefined) {
+    // A hash hit would gain a tag it was never fetched under: tagging a
+    // candidate's bytes "v<version>" would make them the final.
+    return Promise.reject(
+      new Error(
+        "prepareRelease takes a tag or a sha256, not both: tag and sha256 together could tag a candidate as the final",
+      ),
+    );
+  }
   const key = [
     path.resolve(options.upgradesDir),
     options.version,
@@ -304,7 +321,7 @@ async function prepareReleaseOnce(
   );
   if (cached !== undefined) {
     if (tag !== undefined) {
-      await addTag(cached.dir, tag);
+      await tryAddTag(cached.dir, tag);
     }
     return cached;
   }
@@ -361,7 +378,7 @@ async function prepareReleaseOnce(
       publicKeys,
     );
     if (tag !== undefined) {
-      await addTag(entry.dir, tag);
+      await tryAddTag(entry.dir, tag);
     }
     return entry;
   } catch (error) {

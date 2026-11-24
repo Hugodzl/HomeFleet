@@ -200,14 +200,10 @@ async function twoBuilds() {
 }
 
 describe("the cache is keyed by tarball hash", () => {
-  test("a sha256 request misses a cache holding other bytes of the same version and fetches", async () => {
+  test("a candidate tag misses a cache holding other bytes of the same version and fetches", async () => {
     const { base, source, shaB } = await twoBuilds();
     await prepareRelease(base);
-    const b = await prepareRelease({
-      ...base,
-      tag: "v0.8.0-rc.2",
-      sha256: shaB,
-    });
+    const b = await prepareRelease({ ...base, tag: "v0.8.0-rc.2" });
     expect(b.sha256).toBe(shaB);
     expect(source.fetchCount).toBe(2);
     expect(source.tags).toEqual(["v0.8.0", "v0.8.0-rc.2"]);
@@ -258,14 +254,6 @@ describe("the cache is keyed by tarball hash", () => {
         ...base.publicKeys,
       ]),
     ).toEqual(promoted);
-  });
-
-  test("a sha256 hit with a new tag adds the tag without fetching", async () => {
-    const { base, source, shaA, tagsOf } = await twoBuilds();
-    await prepareRelease({ ...base, sha256: shaA });
-    await prepareRelease({ ...base, sha256: shaA, tag: "v0.8.0-rc.1" });
-    expect(source.fetchCount).toBe(1);
-    expect(await tagsOf(shaA)).toEqual(["v0.8.0-rc.1"]);
   });
 
   test("cacheOnly never calls the source", async () => {
@@ -324,5 +312,27 @@ describe("the cache is keyed by tarball hash", () => {
     expect(root).toBeTruthy();
     await prepareRelease(base);
     expect(source.fetchCount).toBe(1);
+  });
+});
+
+describe("review round 1", () => {
+  test("a tag that cannot be recorded never fails a verified release", async () => {
+    const { base, source, shaA, upgradesDir } = await twoBuilds();
+    await prepareRelease({ ...base, sha256: shaA });
+    const tags = path.join(upgradesDir, RELEASES_DIRNAME, shaA, TAGS_FILE);
+    await rm(tags, { force: true });
+    await mkdir(tags); // tags.json can no longer be replaced
+    // Fetched again under a tag: the entry exists, and recording the tag fails.
+    const hit = await prepareRelease({ ...base, tag: "v0.8.0-rc.1" });
+    expect(hit.sha256).toBe(shaA);
+    expect(source.fetchCount).toBe(2);
+  });
+
+  test("tag and sha256 together are refused: a hash hit must never gain a tag it was not fetched under", async () => {
+    const { base, source, shaA } = await twoBuilds();
+    await expect(
+      prepareRelease({ ...base, sha256: shaA, tag: "v0.8.0" }),
+    ).rejects.toThrow(/tag and sha256/);
+    expect(source.fetchCount).toBe(0);
   });
 });
