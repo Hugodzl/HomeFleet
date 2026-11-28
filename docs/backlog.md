@@ -262,6 +262,10 @@ not yet scheduled.
 - **`pnpm release:prep X.Y.Z`:** one script for the four-place version bump.
 - **OpenSSF Scorecard run:** explain the expected ceiling for a solo repo
   rather than chase it.
+- **`upgrade` checks the Node version first:** refuse a release whose
+  `engines.node` the running Node doesn't satisfy, with a clear message,
+  before installing. npm only warns on `engines`. Found when
+  `@peculiar/x509` 3 raised the floor to `^20.19.0 || >=22.12.0`.
 
 ## Known technical debt (from v0.1)
 

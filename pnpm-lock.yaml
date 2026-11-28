@@ -41,9 +41,15 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
+      '@peculiar/asn1-schema':
+        specifier: ^3.1.0
+        version: 3.1.0(asn1js@4.1.0)
       '@peculiar/x509':
-        specifier: ^2.0.0
-        version: 2.0.0
+        specifier: ^3.1.0
+        version: 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      asn1js:
+        specifier: ^4.1.0
+        version: 4.1.0
       bonjour-service:
         specifier: ^1.4.4
         version: 1.4.4
@@ -346,42 +352,88 @@ packages:
   '@oxc-project/types@0.138.0':
     resolution: {integrity: sha512-1a7ZKmrRTCoN1XMZ4L0PyyqrMnrNlLyPuOkdSX2MZg7IiIGRUyurNhAm73ptDOraoBcIordsIGKNPKUzy3ZmfA==}
 
-  '@peculiar/asn1-cms@2.8.0':
-    resolution: {integrity: sha512-NgekZOrSJFSBFLFoLfwePguAWAx7z1+f2TEsWFUMyiqqfntZ4+S/S5hzqME3q4pCA0iOsFKdwiQ35dwY24eVqA==}
+  '@peculiar/asn1-asym-key@3.1.0':
+    resolution: {integrity: sha512-7wnoQf0UFnt5EN1fK5EYGmWnH+rRP7WjCLSxRflvLvnLfImnLBrY755H0dNURWK0+3kSaP1LHuq0cFBOwrI/Ng==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-csr@2.8.0':
-    resolution: {integrity: sha512-akbF8+uvleHs8sejNPQxwmVFuInAg6FMNHOwMILXfP518YfFJwdR3jr6oNUPOaEJfuEhn/vkNOCIT6ASUd4mbg==}
+  '@peculiar/asn1-cms@3.1.0':
+    resolution: {integrity: sha512-SEXNrOQbjLNZpw6sEU+vO+UFYEYeYqOelit2T6WP9B82V72qPjjVQtr/L/d9XihtkG5JCdAFBJIY05ACTbunXg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-ecc@2.8.0':
-    resolution: {integrity: sha512-ohwlk+u9Rv2NOAY1c6MfHj45ATVF8R1DUN/WCgABiRtLi2ZftlZWZX7KvpAbU8v9xPcmoILfELeEABj/rn18AQ==}
+  '@peculiar/asn1-csr@3.1.0':
+    resolution: {integrity: sha512-DH1cOkbwaPL9iKXB95U5TMiuy82sjGLJ4IdFR/Vv3t8LAKgd4TGSJb3D1ZgoHZrVTl1pehYCrWXnocmw6/ofDw==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-pfx@2.8.0':
-    resolution: {integrity: sha512-5yof1ytoB++RQtaFbqSUJ8pxDJtZT6vbVqZ8XoJ61ph7UjNVvfFwAilnCodqkNsAodpy13gDhoxZXw00pghnyg==}
+  '@peculiar/asn1-ecc@3.1.0':
+    resolution: {integrity: sha512-bZ4OWLDvZfMHb4kYf0/iCq2Tf75lLRjDSH+NdzpwmnJVJ2ec3VHyp0P/bwSA1naw6/cQOdVaAH0wNANx1sq5lA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-pkcs8@2.8.0':
-    resolution: {integrity: sha512-qAKXtLpBEw9LqhKpjw3ajZSXlBur+ipW+y2ivVBQAG6F6qRx94yO+1ZR4mvw+YaCfKSaOzLeYEzsPaBp4SJELA==}
+  '@peculiar/asn1-pfx@3.1.0':
+    resolution: {integrity: sha512-xQyIj/lxReXbRMS8mrXxyRxPM0/HLCj5kfun7U34IanRYNd1CzmupAx9lbx6Dxm0Z9nVfxW4ZJInDdv/GiG3SA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-pkcs9@2.8.0':
-    resolution: {integrity: sha512-b5nDWCnkV60+cQ141D6sVVwK9nz64R5n3zSVnklGd+ECdkW2Ol3U1a6yYFlalpSOaD557yuJB64A+q42jG7lUQ==}
+  '@peculiar/asn1-pkcs8@3.1.0':
+    resolution: {integrity: sha512-OS86pCqdC+Di16qZ8BxcAYZ8qEA0PPYHPwQknIKF8BqBo+4ASXzyBLN8RdJOG39XiCpGcRqCHNzsQvVKQkzVZg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-rsa@2.8.0':
-    resolution: {integrity: sha512-zHEUlCqB2mk7x2lxDwHHJy7hWZOPdGHVlsmITWKB5/PbQo61atbu9PJ/0r9dQNMwFzbKPXZ8uK8/91eUhRznSg==}
+  '@peculiar/asn1-pkcs9@3.1.0':
+    resolution: {integrity: sha512-tlTZyod4CjtvkbkOJlmE/Hr0IOYWl+1vLVJ031utcTykcb0n7z2DqPT/Ii4gfTuWrlr4XpTDFBu1jBMv5oDHqw==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-schema@2.8.0':
-    resolution: {integrity: sha512-7YT0U/ze0tF2QOBbE15gKZwy5tvgGyLRiRHLzhlbOpf7BT032oBSd0haZqXn5W6l26WLlu3dyxzjM+2638/z2Q==}
+  '@peculiar/asn1-rsa@3.1.0':
+    resolution: {integrity: sha512-KN31m8tcjLkoNh18ooxSy09cTaWfF+gSw0U1G1j7zsU8yXfut6Wxm3HQ8Jje+imR3Krgd0oK+FI2e2RIvXM54g==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/asn1-x509-attr@2.8.0':
-    resolution: {integrity: sha512-tHjkfS/qhMnmrlB2J9NhflQlQ7In3khO3CfmVrriOlpTeErY9ZIKOso1hQ5JQiyrJ7ShvqVPk7E5fQmbclkSKA==}
+  '@peculiar/asn1-schema@3.1.0':
+    resolution: {integrity: sha512-YYlOD0XlKWKuSw9SwN1IiD6qQ4mFd4zOzDd+8u1yJhTdIuy30vTjjbEInoAKj+xzRfjNHluSxXnJSyzFMqrtaQ==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      asn1js: ^4.0.0
 
-  '@peculiar/asn1-x509@2.8.0':
-    resolution: {integrity: sha512-N0CMuhWUzsWEVq6F1q9X6+VKUnWzSW+cSVg+aPaGGwDdbFoFWTYgin5MHwXgpWd6y9COMBxnfy/Qc+Xc7F0Zwg==}
+  '@peculiar/asn1-x509-attr@3.1.0':
+    resolution: {integrity: sha512-GBdeVXODDCKEBk+FbeOLvJ83uME2x37QPFbJW2W7QdgTHfEIuMeCP+Sk4ae3Khq9pqaqnJY9QWb2fB0LpPiQCQ==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/utils@2.0.3':
-    resolution: {integrity: sha512-+oL3HPFRIZ1St2K50lWCXiioIgSoxzz7R1J3uF6neO2yl1sgmpgY6XXJH4BdpoDkMWznQTeYF6oWNDZLCdQ4eQ==}
+  '@peculiar/asn1-x509-post-quantum@3.1.0':
+    resolution: {integrity: sha512-ZcyNOpSHLhhX0kDvgMfPOME/HngL2TmJCtQTK6pu8vl2EFSbu18hikE0u3SynPOLMQiDyxI/FSlNPwX3DpEE3Q==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
 
-  '@peculiar/x509@2.0.0':
-    resolution: {integrity: sha512-r10lkuy6BNfRmyYdRAfgu6dq0HOmyIV2OLhXWE3gDEPBdX1b8miztJVyX/UxWhLwemNyDP3CLZHpDxDwSY0xaA==}
-    engines: {node: '>=20.0.0'}
+  '@peculiar/asn1-x509@3.1.0':
+    resolution: {integrity: sha512-GLdK/4Xrn1OKdvYVjIyq37dDFAM/g/InnPFgBFP0SUleSyrKHXPzu0ZSJcxWPjfYnukW8EirPlPwb3Ek4E0uTA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.1.0
+      asn1js: ^4.0.0
+
+  '@peculiar/utils@4.1.1':
+    resolution: {integrity: sha512-Iw+pcp/fKEmKFhM3GCBXWBnfI/KvgZiAnquogvkQf+ExvrVSaj6H0Exa3nU0LgyNRpgnOFyFFpm4T2jAcvbJ0Q==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@peculiar/x509@3.1.0':
+    resolution: {integrity: sha512-wjrnCx9lwiRyusHZcNuujCDQ5hplsVyH0j8KMkVGWYb+UwfbgS/0vfDnE72OpUMRJ5/Snz2Tz75LjqvZF8+tWw==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@peculiar/asn1-schema': ^3.0.0
 
   '@rolldown/binding-android-arm64@1.1.4':
     resolution: {integrity: sha512-EZLpf/8y7GXkkra90ML47kzik/GMP3EMcE9bPyHmRfxLC6z9+aW5A8poCsoxjrT5GfEcNAAvWwUHjvP1pUQkfw==}
@@ -796,9 +848,9 @@ packages:
   any-promise@1.3.0:
     resolution: {integrity: sha512-7UvmKalWRt1wgjL1RrGxoSJW/0QZFIegpeGvZG9kjp8vrRu55XTHbwnqq2GpXm9uLbcuhxm3IqX9OB4MZR1b2A==}
 
-  asn1js@3.0.10:
-    resolution: {integrity: sha512-S2s3aOytiKdFRdulw2qPE51MzjzVOisppcVv7jVFR+Kw0kxwvFrDcYA0h7Ndqbmj0HkMIXYWaoj7fli8kgx1eg==}
-    engines: {node: '>=12.0.0'}
+  asn1js@4.1.0:
+    resolution: {integrity: sha512-kcL7adqQpfp+n+18Hh43X5bmN97JSULs26OpJSycfQA6pWXxxPUgMZc+SqfmB3im32zno+u2qxCd7fTJxVai+A==}
+    engines: {node: ^20.19.0 || >=22.12.0}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1273,13 +1325,6 @@ packages:
   proxy-addr@2.0.8:
     resolution: {integrity: sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==}
     engines: {node: '>= 0.10'}
-
-  pvtsutils@1.3.6:
-    resolution: {integrity: sha512-PLgQXQ6H2FWCaeRak8vvk1GW462lMxB5s3Jm673N82zI4vqtVUPuZdffdZbPDFRoU8kAhItWFtPCWiPpp4/EDg==}
-
-  pvutils@1.1.5:
-    resolution: {integrity: sha512-KTqnxsgGiQ6ZAzZCVlJH5eOjSnvlyEgx1m8bkRJfOhmGRqfo5KLvmAlACQkrjEtOQ4B7wF9TdSLIs9O90MX9xA==}
-    engines: {node: '>=16.0.0'}
 
   qs@6.17.1:
     resolution: {integrity: sha512-jd3COkaKVgGUW+ZHyEHCG9bH7RoaaiWuMgzsIBjUMVjLAaWGWpoUAVwljVvBHxRu/2qEHnadLGZrkutYUBPQJA==}
@@ -1766,98 +1811,112 @@ snapshots:
 
   '@oxc-project/types@0.138.0': {}
 
-  '@peculiar/asn1-cms@2.8.0':
+  '@peculiar/asn1-asym-key@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      '@peculiar/asn1-x509-attr': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-pkcs8': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-csr@2.8.0':
+  '@peculiar/asn1-cms@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-x509-attr': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-ecc@2.8.0':
+  '@peculiar/asn1-csr@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-pfx@2.8.0':
+  '@peculiar/asn1-ecc@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-cms': 2.8.0
-      '@peculiar/asn1-pkcs8': 2.8.0
-      '@peculiar/asn1-rsa': 2.8.0
-      '@peculiar/asn1-schema': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-pkcs8@2.8.0':
+  '@peculiar/asn1-pfx@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-cms': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-pkcs8': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-rsa': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-pkcs9@2.8.0':
+  '@peculiar/asn1-pkcs8@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-cms': 2.8.0
-      '@peculiar/asn1-pfx': 2.8.0
-      '@peculiar/asn1-pkcs8': 2.8.0
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      '@peculiar/asn1-x509-attr': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-rsa@2.8.0':
+  '@peculiar/asn1-pkcs9@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-cms': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-pfx': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-pkcs8': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-x509-attr': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-schema@2.8.0':
+  '@peculiar/asn1-rsa@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/utils': 2.0.3
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/asn1-x509-attr@2.8.0':
+  '@peculiar/asn1-schema@3.1.0(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/utils': 4.1.1
+      asn1js: 4.1.0
 
-  '@peculiar/asn1-x509@2.8.0':
+  '@peculiar/asn1-x509-attr@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/utils': 2.0.3
-      asn1js: 3.0.10
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/utils@2.0.3':
+  '@peculiar/asn1-x509-post-quantum@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      tslib: 2.8.1
+      '@peculiar/asn1-asym-key': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+    transitivePeerDependencies:
+      - asn1js
 
-  '@peculiar/x509@2.0.0':
+  '@peculiar/asn1-x509@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
     dependencies:
-      '@peculiar/asn1-cms': 2.8.0
-      '@peculiar/asn1-csr': 2.8.0
-      '@peculiar/asn1-ecc': 2.8.0
-      '@peculiar/asn1-pkcs9': 2.8.0
-      '@peculiar/asn1-rsa': 2.8.0
-      '@peculiar/asn1-schema': 2.8.0
-      '@peculiar/asn1-x509': 2.8.0
-      pvtsutils: 1.3.6
-      tslib: 2.8.1
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/utils': 4.1.1
+      asn1js: 4.1.0
+
+  '@peculiar/utils@4.1.1': {}
+
+  '@peculiar/x509@3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)':
+    dependencies:
+      '@peculiar/asn1-cms': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-csr': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-ecc': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-pkcs9': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-rsa': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-schema': 3.1.0(asn1js@4.1.0)
+      '@peculiar/asn1-x509': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/asn1-x509-post-quantum': 3.1.0(@peculiar/asn1-schema@3.1.0(asn1js@4.1.0))(asn1js@4.1.0)
+      '@peculiar/utils': 4.1.1
       tsyringe: 4.10.0
+    transitivePeerDependencies:
+      - asn1js
 
   '@rolldown/binding-android-arm64@1.1.4':
     optional: true
@@ -2097,11 +2156,9 @@ snapshots:
 
   any-promise@1.3.0: {}
 
-  asn1js@3.0.10:
+  asn1js@4.1.0:
     dependencies:
-      pvtsutils: 1.3.6
-      pvutils: 1.1.5
-      tslib: 2.8.1
+      '@peculiar/utils': 4.1.1
 
   assertion-error@2.0.1: {}
 
@@ -2542,12 +2599,6 @@ snapshots:
       forwarded: 0.2.0
       ipaddr.js: 1.9.1
 
-  pvtsutils@1.3.6:
-    dependencies:
-      tslib: 2.8.1
-
-  pvutils@1.1.5: {}
-
   qs@6.17.1:
     dependencies:
       es-define-property: 1.0.1
@@ -2739,7 +2790,8 @@ snapshots:
 
   tslib@1.14.1: {}
 
-  tslib@2.8.1: {}
+  tslib@2.8.1:
+    optional: true
 
   tsup@9.0.0(postcss@8.5.16)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1):
     dependencies:
