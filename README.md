@@ -6,7 +6,7 @@
 
 HomeFleet turns the computers in your home into a fleet your AI coding agent can use. Install a small daemon on each machine, pair them once, and any MCP-capable agent (Claude Code, LM Studio, goose, Cline, ...) gains tools to see every machine in the house and delegate work to them — the delegated work runs entirely on **local models**, entirely on **your LAN**; the agent in front can be cloud or local, but the jobs never leave the house.
 
-> **Status: v0.7.0 — pre-alpha.** Windows-first; installed from a GitHub
+> **Status: v0.8.0 — pre-alpha.** Windows-first; installed from a GitHub
 > Release, not from the npm registry yet. The [Quickstart](#quickstart) runs on a
 > single machine; pairing two real machines is the
 > [two-machine demo](#two-machine-demo). What changed in each version is on the
@@ -30,6 +30,8 @@ HomeFleet turns the computers in your home into a fleet your AI coding agent can
   release against a pinned Ed25519 key, installs it, restarts the daemon and
   rolls back if the new version fails to start. `homefleet fleet upgrade`, or
   **Upgrade all** in the dashboard, rolls a release across the fleet.
+  `--candidate <tag>` installs a release candidate first, to prove a build
+  on your own machines before it is published as the final release.
 - **Runs in the background** with `homefleet daemon start|stop|restart|status`.
 
 ### Proven on real hardware
@@ -47,6 +49,7 @@ local Qwen3.6-35B-A3B:
 | v0.5.3 | The laptop pushed the release to the tower with `homefleet fleet upgrade` in 14 s | [fleet push](devlog/2026-10-23-first-fleet-push.md) |
 | v0.6.1 | **Upgrade all** in the dashboard upgraded both nodes, and the page reloaded onto the new version | [dashboard upgrade](devlog/2026-11-02-dashboard-upgrade.md) |
 | v0.7.0 | `homefleet daemon` started and stopped the daemon through the autostart task (laptop) | [daemon command](devlog/2026-11-08-daemon-command.md) |
+| v0.8.0 | Not run on the rig yet: `v0.8.0-rc.1` is installed by hand on both nodes before promotion | — |
 
 Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
 [ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),
@@ -98,7 +101,7 @@ Workers can write code, not just read it. Configure `executors.write` on a worke
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.7.0) globally:
+You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.8.0) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
@@ -116,6 +119,13 @@ Releases since v0.5.0 are signed (that's what `homefleet upgrade` checks).
 Releases after v0.7.0 also carry a build-provenance attestation, so anyone
 can check which commit and workflow built a downloaded tarball with
 `gh attestation verify homefleet-<version>.tgz -R Hugodzl/HomeFleet`.
+
+Release candidates (`vX.Y.Z-rc.N`, GitHub prereleases) are never offered by
+`homefleet upgrade` or the dashboard. Install one on purpose with
+`homefleet upgrade --candidate <tag>` or `homefleet fleet upgrade --candidate <tag>`
+(v0.8.0 or later): a candidate may reinstall the same version when its bytes
+differ, and `homefleet status` shows which bytes a node runs as
+`releaseSha256`. See [Release candidates](docs/reference/releasing.md#release-candidates).
 
 To upgrade the whole fleet from one node, run `homefleet fleet upgrade`
 (optionally `--to <version>`, or `--nodes <name|id>…` to pick peers). The
@@ -356,6 +366,8 @@ Done:
 - **v0.6** upgrades from the dashboard
 - **v0.7** `homefleet daemon start|stop|restart|status` ([spec](docs/specs/2026-11-05-daemon-lifecycle-command-design.md)),
   the first step of node lifecycle automation
+- **v0.8** release candidates: `--candidate <tag>`, release hashes, promotion
+  without a rebuild ([spec](docs/specs/2026-11-12-release-candidates-design.md))
 
 Still open from the approved order ([backlog structuring doc](docs/specs/2026-07-12-backlog-structuring.md),
 2026-07-12): painless install and fleet expansion (B1, beyond the v0.3

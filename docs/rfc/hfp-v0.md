@@ -144,7 +144,7 @@ catalog-derived model. `GpuInfo` is `{ name: string, vramBytes?: integer ≥ 0 }
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
-  "daemonVersion": "0.7.0",
+  "daemonVersion": "0.8.0",
   "protocolVersion": "0.5.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
