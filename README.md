@@ -49,7 +49,7 @@ local Qwen3.6-35B-A3B:
 | v0.5.3 | The laptop pushed the release to the tower with `homefleet fleet upgrade` in 14 s | [fleet push](devlog/2026-10-23-first-fleet-push.md) |
 | v0.6.1 | **Upgrade all** in the dashboard upgraded both nodes, and the page reloaded onto the new version | [dashboard upgrade](devlog/2026-11-02-dashboard-upgrade.md) |
 | v0.7.0 | `homefleet daemon` started and stopped the daemon through the autostart task (laptop) | [daemon command](devlog/2026-11-08-daemon-command.md) |
-| v0.8.0 | Not run on the rig yet: `v0.8.0-rc.1` is installed by hand on both nodes before promotion | — |
+| v0.8.0 | The first release cut as a candidate: `v0.8.0-rc.1` installed by hand on both nodes, then promoted to v0.8.0 without a rebuild | [release candidates](devlog/2026-11-28-release-candidates.md) |
 
 Design history is in the open: the [protocol RFC](docs/rfc/hfp-v0.md),
 [ADRs](docs/adr/), the [design doc](docs/specs/2026-07-06-homefleet-design.md),
