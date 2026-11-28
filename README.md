@@ -101,7 +101,7 @@ Workers can write code, not just read it. Configure `executors.write` on a worke
 
 ## Install
 
-You need **Node ≥ 20** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.8.0) globally:
+You need **Node 20.19+ or 22.12+** and git. Install the [latest release](https://github.com/Hugodzl/HomeFleet/releases/latest) (currently v0.8.0) globally:
 
 ```bash
 npm i -g https://github.com/Hugodzl/HomeFleet/releases/download/v<version>/homefleet-<version>.tgz
