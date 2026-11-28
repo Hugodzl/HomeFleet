@@ -18,7 +18,7 @@ disagree, the schemas win and this document has a bug.
 
 ## Status of This Document
 
-Draft. Describes protocol version **0.4.0** as implemented by the
+Draft. Describes protocol version **0.5.0** as implemented by the
 `@homefleet/protocol` package. Everything in a v0.x protocol version is
 subject to change until v1.
 
@@ -120,7 +120,7 @@ What a node advertises about itself during `hello` and pairing.
 | `deviceId`          | string                                  | 64-char lowercase hex SHA-256 cert fingerprint |
 | `name`              | string                                  | Human-readable, 1–64 chars, no control characters (C0 or DEL) |
 | `daemonVersion`     | string                                  | `homefleetd` semver (`X.Y.Z`)                  |
-| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.4.0"` for this document |
+| `protocolVersion`   | string                                  | HFP semver (`X.Y.Z`), `"0.5.0"` for this document |
 | `platform`          | `"win32" \| "linux" \| "darwin"`        |                                                |
 | `roles`             | `("inference" \| "execution")[]`        | A weak-GPU machine can still execute           |
 | `executors`         | `("command" \| "agent" \| "write")[]`   | Executor kinds this node offers                |
@@ -130,6 +130,7 @@ What a node advertises about itself during `hello` and pairing.
 | `activeJobs`        | integer ≥ 0                             |                                                |
 | `upgrade`           | `{ allowRemote: boolean }`              | Optional. Whether this node accepts pushed upgrades; absent on pre-0.4 peers |
 | `lastUpgrade`       | `{ version, outcome, reason?, at }`     | Optional. Latest self-upgrade: `outcome` is `"succeeded" \| "rolled-back" \| "failed"`, `at` an ISO 8601 UTC string |
+| `releaseSha256`     | string                                  | Optional. sha256 (64 lower-case hex) of the release tarball this node runs; absent when unknown (pre-0.5 peers, or a node installed outside `homefleet upgrade`) |
 
 `ModelInfo` is `{ id: string, label?: string, contextWindow?: integer ≥ 1,
 status?: ModelStatus }`, where `ModelStatus` is `"ok" | "not_served" |
@@ -143,8 +144,8 @@ catalog-derived model. `GpuInfo` is `{ name: string, vramBytes?: integer ≥ 0 }
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
-  "daemonVersion": "0.7.0",
-  "protocolVersion": "0.4.0",
+  "daemonVersion": "0.8.0",
+  "protocolVersion": "0.5.0",
   "platform": "win32",
   "roles": ["inference", "execution"],
   "executors": ["command", "agent"],
@@ -633,13 +634,14 @@ downgrade, signed releases only) exactly as for a local upgrade.
 
 ### Upgrade request — `UpgradeRequest` / `UpgradeAccepted`
 
-`POST /hfp/v0/upgrade` with body `{ version, manifest, signature }`:
+`POST /hfp/v0/upgrade` with body `{ version, manifest, signature, candidate? }`:
 
 | Field       | Type   | Notes                                                              |
 | ----------- | ------ | ------------------------------------------------------------------ |
 | `version`   | string | Strict semver `X.Y.Z` of the release being pushed                  |
 | `manifest`  | string | Base64 of the exact signed manifest bytes (never re-serialized)    |
 | `signature` | string | Base64 detached signature (the content of the `.sig` file)         |
+| `candidate` | boolean | Optional. `true` for a release candidate: the receiver may reinstall the same `version` when the tarball's sha256 differs from the one it runs, and MUST fetch the tarball from the sender only, never from another source |
 
 The receiver MUST verify the signature and its guards before replying. On
 success it replies `202` with `UpgradeAccepted`, `{ accepted: true, version }`,
@@ -659,6 +661,11 @@ Refusals use `HfpError`:
 | 422  | `UPGRADE_REJECTED` | Bad signature or a failed guard; `details: { reason }` names the upgrade error code |
 | 409  | `UPGRADE_BUSY`     | An upgrade is already in progress, or jobs are running       |
 
+A `candidate` push of the exact bytes the receiver already runs is refused
+`422 UPGRADE_REJECTED` with `details: { reason: "same-release" }` and the
+message "already running these bytes"; a sender SHOULD count that node as
+already upgraded, not as a failure.
+
 A 0.3.x peer does not know the route and answers 404 `INVALID_REQUEST`
 ("unknown endpoint") to `POST /upgrade`; a sender SHOULD report such a peer as
 too old and continue.
@@ -670,6 +677,11 @@ too old and continue.
 the sender. The node serves only a version that is cached AND verified, and
 `{version}` MUST be strict semver `X.Y.Z`; the path is never derived from
 anything else. Any other request responds 404.
+
+For the version it is currently pushing, a node serves exactly the bytes it
+pushed (whose manifest the receiver already holds), which for a release
+candidate are not the final release of that version. For any other version
+it serves the final release (`vX.Y.Z`) if it has one cached.
 
 ## Discovery
 
@@ -704,14 +716,14 @@ LocalSend ships); response rate-limiting is a possible future hardening.
 | `deviceId`        | string  | 64-char lowercase hex SHA-256 cert fingerprint (a hint — see above) |
 | `name`            | string  | Human-readable, 1–64 chars, no control characters (same constraints as `NodeInfo.name`) |
 | `port`            | integer | The node's HFP HTTPS port, 1–65535                           |
-| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.4.0"` for this document            |
+| `protocolVersion` | string  | HFP semver (`X.Y.Z`), `"0.5.0"` for this document            |
 
 ```json
 {
   "deviceId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "tower",
   "port": 47113,
-  "protocolVersion": "0.4.0"
+  "protocolVersion": "0.5.0"
 }
 ```
 
@@ -758,7 +770,7 @@ as one JSON document per datagram, at most 4096 bytes.
 | `kind` | `"announce" \| "response"`  | See exchange rules below     |
 
 ```json
-{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.4.0" }
+{ "kind": "announce", "deviceId": "…", "name": "tower", "port": 47113, "protocolVersion": "0.5.0" }
 ```
 
 Exchange rules:
@@ -802,7 +814,7 @@ queued ---> running +-----------> failed
 
 ## Versioning
 
-- The protocol version is a semver string (this document: **0.4.0**),
+- The protocol version is a semver string (this document: **0.5.0**),
   exported as `HFP_PROTOCOL_VERSION`; the HTTP path prefix carries the major
   version (`/hfp/v0`, exported as `HFP_PATH_PREFIX` and derived from the
   protocol version so the two cannot drift).
@@ -821,6 +833,9 @@ queued ---> running +-----------> failed
   on write params — additive.
 - 0.4.0: fleet upgrade — `POST /upgrade`, `GET /upgrade/tarball/{version}`,
   `NodeInfo.upgrade`/`lastUpgrade`, three `UPGRADE_*` error codes — additive.
+- 0.5.0: release candidates — `UpgradeRequest.candidate` and
+  `NodeInfo.releaseSha256` — additive. A pre-0.5 receiver strips
+  `candidate` and refuses a same-version push as not newer.
 
 ## Security Considerations
 

@@ -176,6 +176,11 @@ export interface ControlStatus {
   /** A newer release than this daemon, from the dashboard-gated cached check. */
   availableUpgrade?: string;
   /**
+   * sha256 of the release tarball this daemon runs (installed-release.json);
+   * absent when unknown or on a pre-0.8 daemon.
+   */
+  releaseSha256?: string;
+  /**
    * The daemon's own `process.pid` — how `homefleet daemon status|stop` find
    * the live process without a pid file. Optional only because daemons
    * before `homefleet daemon` (v0.6.4 and older) don't send it.
@@ -531,6 +536,8 @@ function upgradeErrorStatus(error: UpgradeError): number {
       return 422;
     case "unknown-node":
       return 400;
+    case "same-release":
+      return 409;
     default:
       return 409;
   }

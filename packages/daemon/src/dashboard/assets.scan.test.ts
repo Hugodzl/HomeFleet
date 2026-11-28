@@ -151,3 +151,12 @@ test("index.html has no inline script, inline handlers, or inline styles", async
   expect(html).not.toMatch(/\sstyle\s*=/i);
   expect(html).toContain('<dialog id="upgrade-dialog"');
 });
+
+test("dashboard assets never send a candidate field: candidates are CLI-only", async () => {
+  for (const [name, source] of await assetSources(".js")) {
+    expect({ name, hit: /\bcandidate\b/.test(source) }).toEqual({
+      name,
+      hit: false,
+    });
+  }
+});

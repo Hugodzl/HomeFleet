@@ -18,11 +18,10 @@ import { createDaemonHarness, HOST } from "../test-fixtures.js";
 import { HfpRequestError } from "../transport/client.js";
 import { STATE_FILE, upgradesDir } from "./files.js";
 import {
-  manifestFileName,
-  releaseFileName,
-  signatureFileName,
-} from "./manifest.js";
-import { prepareRelease } from "./prepare.js";
+  type PreparedRelease,
+  prepareRelease,
+  readVerifiedCache,
+} from "./prepare.js";
 import type { RolloutStatus } from "./rollout.js";
 import {
   FakeReleaseSource,
@@ -120,15 +119,25 @@ async function setup(
   return { a, b };
 }
 
+async function cachedRelease(a: Node): Promise<PreparedRelease> {
+  const cached = await readVerifiedCache(
+    upgradesDir(a.dataDir),
+    { version: VERSION },
+    [keys.publicKey],
+  );
+  if (cached === undefined) {
+    throw new Error(`${VERSION} is not cached on ${a.dataDir}`);
+  }
+  return cached;
+}
+
 async function pushBody(a: Node, tamper = false) {
-  const dir = path.join(upgradesDir(a.dataDir), VERSION);
-  let manifest = await readFile(path.join(dir, manifestFileName(VERSION)));
+  const cached = await cachedRelease(a);
+  let manifest = cached.manifestBytes;
   if (tamper) {
     manifest = Buffer.concat([manifest, Buffer.from(" ")]);
   }
-  const signature = (
-    await readFile(path.join(dir, signatureFileName(VERSION)), "utf8")
-  ).trim();
+  const signature = cached.signature;
   return {
     version: VERSION,
     manifest: manifest.toString("base64"),
@@ -278,12 +287,7 @@ test("the tarball route refuses unverified or non-semver versions and serves ver
   expect(await status(VERSION)).toBe(200);
   expect(await readFile(dest, "utf8")).toBe(`fake tarball ${VERSION}`);
 
-  const cached = path.join(
-    upgradesDir(a.dataDir),
-    VERSION,
-    releaseFileName(VERSION),
-  );
-  await writeFile(cached, "corrupted");
+  await writeFile((await cachedRelease(a)).tarballPath, "corrupted");
   expect(await status(VERSION)).toBe(404);
 });
 

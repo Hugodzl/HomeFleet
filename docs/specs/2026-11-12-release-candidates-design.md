@@ -1,7 +1,28 @@
 # Release candidates and release-pipeline hardening — design
 
 **Status:** PR 1 (hardening) implemented 2026-11-12–13, PR #25; PR 2 (release
-candidates) not started.
+candidates) implemented 2026-11-16–24 (plan
+`docs/plans/2026-11-16-release-candidates.md`).
+
+**As built, PR 2 differs from the design below in these ways:**
+- **Promote re-signs instead of republishing the candidate's signature.**
+  The unchanged `sign` job signs the candidate's digest again; Ed25519 is
+  deterministic and the manifest has no timestamp, so the bytes are
+  identical. `release` compares the tarball and manifest with the candidate
+  Release before publishing. This keeps `sign` the only job that sees the
+  key, with no new environment.
+- **`release` plans the run itself** (bash, from the tag and the published
+  Releases) instead of reading `pack`'s outputs, which come from a job that
+  runs dependencies.
+- **The installed hash** lives in `<dataDir>/installed-release.json`,
+  written by the updater before relaunch; the release cache is
+  `upgrades/releases/<sha256>/` with a `tags.json` of the GitHub tags each
+  entry came from. A plain by-version lookup only reuses an entry tagged
+  `vX.Y.Z`.
+- **The tarball route needs no new parameter:** for the version a node is
+  pushing it serves exactly the pushed hash, otherwise the final.
+- **HFP goes to 0.5.0** (additive), following the RFC's convention of a
+  minor bump per additive change.
 
 **As built, PR 1 differs from the design below in two ways**, both from its
 review loop:

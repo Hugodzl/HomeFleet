@@ -15,6 +15,11 @@ export interface GuardInput {
   force: boolean;
   /** `process.argv[1]` of the running daemon. */
   entryPath: string;
+  /**
+   * A release-candidate install: the same version is allowed when its bytes
+   * differ from the running ones (see {@link checkCandidate}).
+   */
+  candidate?: { currentSha256?: string; targetSha256: string };
 }
 
 /**
@@ -40,10 +45,52 @@ export function checkNewer(
       );
 }
 
+/**
+ * The version rule for a release candidate. A newer version passes. The same
+ * version passes when its tarball hash differs from the running one, or the
+ * running hash is unknown (a node that reached this version before hashes
+ * were recorded); the same hash is `same-release`, a no-op. Older is refused.
+ */
+export function checkCandidate(input: {
+  current: string;
+  currentSha256?: string;
+  target: string;
+  targetSha256: string;
+}): UpgradeError | undefined {
+  const order = compareSemver(input.target, input.current);
+  if (order > 0) {
+    return undefined;
+  }
+  if (order < 0) {
+    return new UpgradeError(
+      "not-newer",
+      `${input.target} is older than the running ${input.current} (downgrades are refused)`,
+    );
+  }
+  if (input.currentSha256 === input.targetSha256) {
+    return new UpgradeError(
+      "same-release",
+      `already running ${input.target} (sha256 ${input.targetSha256.slice(0, 12)})`,
+      { peerMessage: "already running these bytes" },
+    );
+  }
+  return undefined;
+}
+
 export function checkUpgradeGuards(
   input: GuardInput,
 ): UpgradeError | undefined {
-  const notNewer = checkNewer(input.current, input.target);
+  const notNewer =
+    input.candidate !== undefined
+      ? checkCandidate({
+          current: input.current,
+          ...(input.candidate.currentSha256 !== undefined
+            ? { currentSha256: input.candidate.currentSha256 }
+            : {}),
+          target: input.target,
+          targetSha256: input.candidate.targetSha256,
+        })
+      : checkNewer(input.current, input.target);
   if (notNewer !== undefined) {
     return notNewer;
   }

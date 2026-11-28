@@ -53,6 +53,12 @@ export type ShutdownRequest = z.infer<typeof ShutdownRequestSchema>;
  * `includeSelf: false` makes a rollout target peers only (the dashboard's
  * per-node button); it is meaningless for "self", so that combo is a 400.
  */
+/**
+ * A release tag for `candidate`: `vX.Y.Z-rc.N` (N >= 1, no leading zero) or
+ * the final `vX.Y.Z`. Mirrors scripts/lib/tag-version.ts.
+ */
+export const CANDIDATE_OR_FINAL_TAG = /^v\d+\.\d+\.\d+(-rc\.[1-9]\d*)?$/;
+
 export const UpgradeRequestSchema = z
   .strictObject({
     targets: z
@@ -69,10 +75,23 @@ export const UpgradeRequestSchema = z
     force: z.boolean().optional(),
     forceLocal: z.boolean().optional(),
     includeSelf: z.boolean().optional(),
+    /**
+     * A release candidate (or final) tag: install exactly that release, a
+     * same-version reinstall allowed when its bytes differ. Never offered by
+     * the dashboard.
+     */
+    candidate: z
+      .string()
+      .regex(CANDIDATE_OR_FINAL_TAG, "must be vX.Y.Z or vX.Y.Z-rc.N")
+      .optional(),
   })
   .refine((r) => !(r.targets === "self" && r.includeSelf !== undefined), {
     message: 'includeSelf cannot be combined with targets "self"',
     path: ["includeSelf"],
+  })
+  .refine((r) => !(r.version !== undefined && r.candidate !== undefined), {
+    message: "version and candidate are mutually exclusive",
+    path: ["candidate"],
   });
 export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;
 

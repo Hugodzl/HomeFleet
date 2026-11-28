@@ -192,19 +192,22 @@ homefleet dashboard [--no-open]
     Print the running daemon's read-only dashboard URL and open it in
     the default browser (--no-open: print only).
 
-homefleet upgrade [--to <version>] [--check] [--force]
+homefleet upgrade [--to <version> | --candidate <tag>] [--check] [--force]
     Upgrade THIS node's running daemon to the latest signed release (or
     --to <version>), restart it in the background, and wait until it is
     back. Rolls back automatically if the new version fails to start.
-    --check only reports whether an upgrade is available; --force
-    upgrades even while jobs are running.
+    --candidate <tag> installs a release candidate (vX.Y.Z-rc.N), even
+    over the same version when its bytes differ. --check only reports
+    whether an upgrade is available; --force upgrades even while jobs
+    are running.
 
-homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]
-    Roll the latest signed release (or --to <version>) out across the
-    fleet: paired peers one at a time, THIS node last, stopping at the
-    first failure. --nodes limits it to the named peers (names or id
-    prefixes); --force-local upgrades this node even while jobs run.
-    Peers must have "upgrade.allowRemote" enabled.
+homefleet fleet upgrade [--to <version> | --candidate <tag>] [--nodes <name|id>...] [--force-local]
+    Roll the latest signed release (or --to <version>, or the release
+    candidate --candidate <tag>) out across the fleet: paired peers one
+    at a time, THIS node last, stopping at the first failure. --nodes
+    limits it to the named peers (names or id prefixes); --force-local
+    upgrades this node even while jobs run. Peers must have
+    "upgrade.allowRemote" enabled.
 
 homefleet daemon start [--allow-packaged]
     Start THIS data dir's daemon in the background and wait until it

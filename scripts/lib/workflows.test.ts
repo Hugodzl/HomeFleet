@@ -250,3 +250,87 @@ test("pack's digest step fails when no tarball matches", () => {
   expect(run).toContain("shopt -s nullglob");
   expect(run.indexOf("shopt -s nullglob")).toBeLessThan(run.indexOf("files=("));
 });
+
+// --- Release candidates (spec 2026-11-12, PR 2) ---
+
+const stepsOf = (id: string) => job(release, id).steps ?? [];
+const stepNamed = (id: string, name: string) =>
+  stepsOf(id).find((s) => s.name === name);
+const envOf = (step: Step | undefined) =>
+  (step?.env ?? {}) as Record<string, unknown>;
+
+test("pack plans the run with release:plan, using only github.token", () => {
+  const plan = stepsOf("pack").find((s) => s.id === "plan");
+  expect(plan?.run).toContain("pnpm release:plan");
+  expect(plan?.run).toContain("--paginate --slurp");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal GitHub expression
+  expect(envOf(plan)).toEqual({ GH_TOKEN: "${{ github.token }}" });
+  for (const step of stepsOf("pack")) {
+    for (const value of Object.values(envOf(step))) {
+      expect(String(value)).not.toMatch(/secrets\./);
+    }
+  }
+});
+
+test("promote: pack refuses unless the final tag's commit is the candidate's, then downloads and verifies the candidate instead of building", () => {
+  const promote = stepNamed("pack", "Promote: take the candidate's tarball");
+  expect(promote?.if).toBe("steps.plan.outputs.mode == 'promote'");
+  const run = promote?.run ?? "";
+  expect(run).toContain('git rev-list -n 1 "$CANDIDATE"');
+  expect(run).toContain('"$GITHUB_SHA"');
+  expect(run).toContain('gh release download "$CANDIDATE"');
+  expect(run).toContain("pnpm verify:release candidate/homefleet-*.tgz");
+  expect(run.indexOf("rev-list")).toBeLessThan(run.indexOf("release download"));
+  const pack = stepsOf("pack").find((s) =>
+    s.name?.toString().startsWith("Pack"),
+  );
+  expect(pack?.if).toBe("steps.plan.outputs.mode != 'promote'");
+});
+
+test("notes are read from docs/releases/<final>.md, for candidates too", () => {
+  const check = stepNamed(
+    "pack",
+    'Release notes exist and are titled "# HomeFleet <final> — …"',
+  );
+  expect(check?.run).toContain('notes="docs/releases/$FINAL.md"');
+  const publish = stepNamed("release", "Publish the GitHub Release");
+  expect(publish?.run).toContain('notes="docs/releases/$final.md"');
+});
+
+test("release re-derives the plan itself and never reads pack's", () => {
+  expect(job(release, "release").needs).toEqual(["verify", "smoke"]);
+  const plan = stepsOf("release").find((s) => s.id === "plan");
+  const run = plan?.run ?? "";
+  expect(run).toContain("--paginate --slurp");
+  expect(run).toContain("sort -V");
+  expect(run).toContain('commits/$candidate" --jq .sha');
+  for (const step of stepsOf("release")) {
+    expect(JSON.stringify(step)).not.toContain("needs.pack");
+  }
+});
+
+test("promote: release compares the tarball and manifest with the candidate Release's before publishing", () => {
+  const steps = stepsOf("release");
+  const compare = steps.findIndex(
+    (s) => s.name === "Promote: the bytes are the candidate's",
+  );
+  const publish = steps.findIndex(
+    (s) => s.name === "Publish the GitHub Release",
+  );
+  expect(compare).toBeGreaterThanOrEqual(0);
+  expect(compare).toBeLessThan(publish);
+  const step = steps[compare];
+  expect(step?.if).toBe("steps.plan.outputs.mode == 'promote'");
+  const run = step?.run ?? "";
+  expect(run).toContain("cmp");
+  expect(run).toContain("release/homefleet-*.tgz");
+  expect(run).toContain("release/homefleet-*.manifest.json");
+});
+
+test("a candidate is published as a prerelease that is never latest, with the notice line", () => {
+  const run = stepNamed("release", "Publish the GitHub Release")?.run ?? "";
+  expect(run).toContain("--prerelease --latest=false");
+  expect(run).toContain("Release candidate for testing on Hugo's rig");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal bash expansion
+  expect(run).toContain('title="${title/"$final"/"$tag"}"');
+});

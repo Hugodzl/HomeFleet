@@ -3,6 +3,7 @@ import { NodeInfoSchema } from "./node.js";
 import { validNodeInfo } from "./test-fixtures.js";
 import {
   LastUpgradeSchema,
+  ReleaseSha256Schema,
   UpgradeAcceptedSchema,
   UpgradeRequestSchema,
 } from "./upgrade.js";
@@ -63,4 +64,37 @@ test("NodeInfoSchema keeps upgrade and lastUpgrade", () => {
   expect(NodeInfoSchema.parse({ ...validNodeInfo, ...extra })).toMatchObject(
     extra,
   );
+});
+
+test("UpgradeRequestSchema accepts candidate: true, and its absence (an older pusher)", () => {
+  const ok = { version: "0.8.0", manifest: "eyJ9", signature: "c2ln" };
+  expect(UpgradeRequestSchema.parse({ ...ok, candidate: true })).toEqual({
+    ...ok,
+    candidate: true,
+  });
+  expect(UpgradeRequestSchema.parse(ok)).toEqual(ok);
+  expect(
+    UpgradeRequestSchema.safeParse({ ...ok, candidate: "yes" }).success,
+  ).toBe(false);
+});
+
+test("ReleaseSha256Schema accepts 64 lower-case hex only", () => {
+  expect(ReleaseSha256Schema.safeParse("a".repeat(64)).success).toBe(true);
+  expect(ReleaseSha256Schema.safeParse("A".repeat(64)).success).toBe(false);
+  expect(ReleaseSha256Schema.safeParse("a".repeat(63)).success).toBe(false);
+});
+
+test("NodeInfoSchema takes an optional releaseSha256; a v0.7.0 shape still parses", () => {
+  const sha = "b".repeat(64);
+  expect(
+    NodeInfoSchema.parse({ ...validNodeInfo, releaseSha256: sha })
+      .releaseSha256,
+  ).toBe(sha);
+  expect(NodeInfoSchema.parse(validNodeInfo).releaseSha256).toBeUndefined();
+  expect(
+    NodeInfoSchema.safeParse({
+      ...validNodeInfo,
+      releaseSha256: "B".repeat(64),
+    }).success,
+  ).toBe(false);
 });

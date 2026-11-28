@@ -31,7 +31,7 @@ import {
   writeUpgradeResult,
   writeUpgradeState,
 } from "./files.js";
-import { checkNewer, checkUpgradeGuards } from "./guards.js";
+import { checkCandidate, checkNewer, checkUpgradeGuards } from "./guards.js";
 import { verifyManifestSignature } from "./manifest.js";
 import { PeerReleaseSource } from "./peer-release-source.js";
 import { type PreparedRelease, prepareRelease } from "./prepare.js";
@@ -48,6 +48,13 @@ export interface UpgradeCheck {
 export interface UpgradeStarted {
   from: string;
   to: string;
+  /**
+   * sha256 of the tarball being installed. Always set by this coordinator;
+   * optional because a pre-0.8 daemon's control API does not send it.
+   */
+  sha256?: string;
+  /** Present for a release-candidate install. */
+  candidate?: true;
 }
 
 export interface UpgradeSelfInput {
@@ -55,7 +62,24 @@ export interface UpgradeSelfInput {
   force?: boolean;
   /** Overrides the coordinator's source for this call (target AND rollback copy). */
   source?: ReleaseSource;
+  /**
+   * A release-candidate install: the same version may be reinstalled when
+   * its bytes differ from the running ones. `tag` is a candidate or final
+   * tag (`vX.Y.Z-rc.N` / `vX.Y.Z`) and gives the version; `sha256` asks for
+   * exact bytes (a rollout's self step) and needs `version` too.
+   */
+  candidate?: { tag?: string; sha256?: string };
 }
+
+/** What a run needs beyond the public input (pushes only). */
+interface RunInput extends UpgradeSelfInput {
+  /** Where the rollback copy of the running version comes from. */
+  rollbackSource?: ReleaseSource;
+  /** Exact bytes for the target (a push names its manifest's hash). */
+  sha256?: string;
+}
+
+const RELEASE_TAG = /^v(\d+\.\d+\.\d+)(?:-rc\.[1-9]\d*)?$/;
 
 export interface UpgradeRuntime {
   pid: number;
@@ -67,6 +91,11 @@ export interface UpgradeRuntime {
 export interface UpgradeCoordinatorOptions {
   dataDir: string;
   currentVersion: string;
+  /**
+   * sha256 of the release tarball this daemon runs (installed-release.json);
+   * undefined when unknown. Candidate installs compare against it.
+   */
+  currentSha256?: string;
   localHfpVersion: string;
   source: ReleaseSource;
   activeJobs: () => number;
@@ -150,7 +179,7 @@ export class UpgradeCoordinator {
   }
 
   /** The upgrade itself; the caller must hold the {@link claim}. */
-  private async runUpgrade(input: UpgradeSelfInput): Promise<UpgradeStarted> {
+  private async runUpgrade(input: RunInput): Promise<UpgradeStarted> {
     const { requestShutdown } = this.options;
     if (requestShutdown === undefined) {
       throw new UpgradeError(
@@ -160,15 +189,46 @@ export class UpgradeCoordinator {
     }
     const runtime = this.runtime();
     const source = input.source ?? this.options.source;
+    const rollbackSource = input.rollbackSource ?? source;
+    const candidate = input.candidate;
     const from = this.options.currentVersion;
-    const to = await this.resolveTarget(input.version, source);
-    const notNewer = checkNewer(from, to);
-    if (notNewer !== undefined) {
-      throw notNewer; // before downloading anything
+    const currentSha256 = this.options.currentSha256;
+    const to = await this.resolveTarget(
+      input.version ?? versionOfTag(candidate?.tag),
+      source,
+    );
+    if (candidate?.tag !== undefined && versionOfTag(candidate.tag) !== to) {
+      throw new UpgradeError(
+        "not-newer",
+        `tag ${candidate.tag} does not carry version ${to}`,
+      );
+    }
+    const wanted = candidate?.sha256 ?? input.sha256;
+    // Before downloading anything. A candidate's own hash is only known
+    // here when the caller named the bytes (a rollout's self step).
+    const early =
+      candidate === undefined
+        ? checkNewer(from, to)
+        : wanted !== undefined
+          ? checkCandidate({
+              current: from,
+              ...(currentSha256 !== undefined ? { currentSha256 } : {}),
+              target: to,
+              targetSha256: wanted,
+            })
+          : compareSemver(to, from) < 0
+            ? checkNewer(from, to)
+            : undefined;
+    if (early !== undefined) {
+      throw early;
     }
 
     const dir = upgradesDir(this.options.dataDir);
-    const prepared = await prepareRelease(this.prepareOptions(dir, to, source));
+    const prepared = await prepareRelease({
+      ...this.prepareOptions(dir, to, source),
+      ...(candidate?.tag !== undefined ? { tag: candidate.tag } : {}),
+      ...(wanted !== undefined ? { sha256: wanted } : {}),
+    });
     const refusal = checkUpgradeGuards({
       current: from,
       target: to,
@@ -177,14 +237,19 @@ export class UpgradeCoordinator {
       activeJobs: this.options.activeJobs(),
       force: input.force ?? false,
       entryPath: runtime.argv[1] ?? "",
+      ...(candidate !== undefined
+        ? {
+            candidate: {
+              ...(currentSha256 !== undefined ? { currentSha256 } : {}),
+              targetSha256: prepared.sha256,
+            },
+          }
+        : {}),
     });
     if (refusal !== undefined) {
       throw refusal;
     }
-    // Best effort: pre-0.5 releases are unsigned, and GitHub may be down.
-    const rollback: PreparedRelease | undefined = await prepareRelease(
-      this.prepareOptions(dir, from, source),
-    ).catch(() => undefined);
+    const rollback = await this.prepareRollback(dir, from, to, rollbackSource);
 
     if (!(await acquireLock(dir, { pid: runtime.pid, now: Date.now() }))) {
       throw new UpgradeError(
@@ -200,6 +265,9 @@ export class UpgradeCoordinator {
         from,
         to,
         tarballPath: prepared.tarballPath,
+        toSha256: prepared.sha256,
+        ...(currentSha256 !== undefined ? { fromSha256: currentSha256 } : {}),
+        ...(candidate !== undefined ? { candidate: true } : {}),
         ...(rollback !== undefined
           ? { rollbackTarballPath: rollback.tarballPath }
           : {}),
@@ -232,7 +300,37 @@ export class UpgradeCoordinator {
       () => requestShutdown(`upgrading to ${to}`),
       this.options.shutdownDelayMs ?? 250,
     );
-    return { from, to };
+    return {
+      from,
+      to,
+      sha256: prepared.sha256,
+      ...(candidate !== undefined ? { candidate: true as const } : {}),
+    };
+  }
+
+  /**
+   * A copy of the running release to roll back to; best effort (pre-0.5
+   * releases are unsigned, and GitHub may be down). When the running hash is
+   * known only those bytes will do: from the cache, or - for an older
+   * version - from the source by version. The same version (a candidate
+   * reinstall) can only come from the cache: GitHub's copy under that
+   * version is some other build.
+   */
+  private async prepareRollback(
+    dir: string,
+    from: string,
+    to: string,
+    source: ReleaseSource,
+  ): Promise<PreparedRelease | undefined> {
+    const currentSha256 = this.options.currentSha256;
+    if (from === to && currentSha256 === undefined) {
+      return undefined;
+    }
+    return prepareRelease({
+      ...this.prepareOptions(dir, from, source),
+      ...(currentSha256 !== undefined ? { sha256: currentSha256 } : {}),
+      ...(from === to ? { cacheOnly: true } : {}),
+    }).catch(() => undefined);
   }
 
   /**
@@ -295,7 +393,19 @@ export class UpgradeCoordinator {
     }
     const from = this.options.currentVersion;
     const version = request.version;
-    const notNewer = checkNewer(from, version);
+    const isCandidate = request.candidate === true;
+    const pushedSha256 = verified.manifest.sha256;
+    const currentSha256 = this.options.currentSha256;
+    const candidateGuard = isCandidate
+      ? {
+          ...(currentSha256 !== undefined ? { currentSha256 } : {}),
+          targetSha256: pushedSha256,
+        }
+      : undefined;
+    const notNewer =
+      candidateGuard !== undefined
+        ? checkCandidate({ current: from, target: version, ...candidateGuard })
+        : checkNewer(from, version);
     if (notNewer !== undefined) {
       throw notNewer;
     }
@@ -307,12 +417,21 @@ export class UpgradeCoordinator {
       activeJobs: this.options.activeJobs(),
       force: false,
       entryPath: this.runtime().argv[1] ?? "",
+      ...(candidateGuard !== undefined ? { candidate: candidateGuard } : {}),
     });
     if (refusal !== undefined) {
       throw refusal;
     }
 
     const target = this.options.resolvePeer?.(requesterDeviceId);
+    if (isCandidate && target === undefined) {
+      // A candidate's bytes exist only on the pusher: GitHub has nothing
+      // under that version before promotion, and other bytes after.
+      throw new UpgradeError(
+        "fetch-failed",
+        "no address for the requesting node, and a release candidate can only be fetched from it",
+      );
+    }
     const peer =
       target !== undefined
         ? new PeerReleaseSource({
@@ -322,11 +441,27 @@ export class UpgradeCoordinator {
             signature: request.signature,
           })
         : undefined;
-    const source = new FallbackReleaseSource(
-      peer !== undefined ? [peer, this.options.source] : [this.options.source],
-    );
+    // The target: a candidate from the pusher only; a release from the
+    // pusher, then our own source. The rollback copy of what we run never
+    // comes from the pusher, which serves only the pushed version.
+    const source =
+      isCandidate && peer !== undefined
+        ? peer
+        : new FallbackReleaseSource(
+            peer !== undefined
+              ? [peer, this.options.source]
+              : [this.options.source],
+          );
     this.claim();
-    void this.runUpgrade({ version, source })
+    void this.runUpgrade({
+      version,
+      source,
+      rollbackSource: this.options.source,
+      // Pinned to the pushed bytes, so the cache entry is found by hash and
+      // never reused as the final release by a plain by-version lookup.
+      sha256: pushedSha256,
+      ...(isCandidate ? { candidate: {} } : {}),
+    })
       .catch(async (error: unknown) => {
         await writeUpgradeResult(this.options.dataDir, {
           from,
@@ -384,4 +519,19 @@ export class UpgradeCoordinator {
       );
     }
   }
+}
+
+/** The X.Y.Z of a `vX.Y.Z` or `vX.Y.Z-rc.N` tag; undefined for no tag. */
+function versionOfTag(tag: string | undefined): string | undefined {
+  if (tag === undefined) {
+    return undefined;
+  }
+  const match = RELEASE_TAG.exec(tag);
+  if (match === null) {
+    throw new UpgradeError(
+      "not-newer",
+      `"${tag}" is not a release tag (vX.Y.Z or vX.Y.Z-rc.N)`,
+    );
+  }
+  return match[1];
 }

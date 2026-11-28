@@ -267,6 +267,38 @@ not yet scheduled.
   before installing. npm only warns on `engines`. Found when
   `@peculiar/x509` 3 raised the floor to `^20.19.0 || >=22.12.0`.
 
+Deferred from PR 2 (release candidates):
+
+- **Release cache pruning:** `upgrades/releases/<sha256>/` keeps every
+  candidate and final a node has fetched or been pushed. Prune entries that
+  are neither the running release nor its rollback copy.
+- **Legacy cache cleanup:** pre-0.8 `upgrades/<version>/` dirs are ignored
+  but never deleted.
+- **Stale hash after a manual reinstall:** a manual `npm i -g` of the same
+  version with other bytes leaves `installed-release.json` naming the old
+  hash. Workaround: delete the file. A fix could compare against npm's
+  recorded `integrity` for the installed package.
+- **The record is per data dir, the install per machine:** two data dirs on
+  one machine share the npm install but each keeps its own
+  `installed-release.json`.
+- **A transient read error can replace a cache entry** (review round 1, N3):
+  when two prepares of the same bytes race, the second re-verifies the
+  existing entry and, if that read fails for a moment (antivirus lock), deletes
+  and replaces it. An updater whose state points into it then fails its install
+  and rolls back. Fix: retry the verify once before replacing, or move the
+  entry aside instead of deleting it.
+- **A same-version stale record is trusted** (N5): a manual `npm i -g` of
+  another build of the same version keeps the old hash in
+  `installed-release.json`, so a candidate rollout may time out on that node
+  or see it as already done. Documented workaround in `releasing.md`: delete
+  the file.
+- **A new rollout switches what the tarball route serves** (N6): a peer still
+  downloading from an earlier, stopped rollout of the same version gets the
+  new bytes and fails verification (safe, but the message is confusing).
+- **An old `--nodes` peer can time out** (N9): with no directory entry and a
+  failed pre-push hello, a v0.7.0 peer's starting version is unknown, so
+  coming back on the target without a hash is not counted as done.
+
 ## Known technical debt (from v0.1)
 
 Carried over from the [v0.1 release-polish devlog](../devlog/2026-07-09-v01-release-polish.md).

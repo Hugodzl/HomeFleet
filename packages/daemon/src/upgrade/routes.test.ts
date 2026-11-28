@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { UpgradeError } from "./errors.js";
 import { checkUpgradeGuards } from "./guards.js";
-import { peerFacingMessage } from "./routes.js";
+import { peerFacingMessage, tarballQuery } from "./routes.js";
 
 const guardInput = {
   current: "0.5.0",
@@ -36,5 +36,21 @@ describe("peerFacingMessage", () => {
   test("every other refusal passes through unchanged", () => {
     const error = new UpgradeError("disabled", "remote upgrades are disabled");
     expect(peerFacingMessage(error)).toBe("remote upgrades are disabled");
+  });
+});
+
+describe("tarballQuery: which cached bytes the tarball route serves", () => {
+  const sha = "d".repeat(64);
+  test("the release this node is pushing, by hash", () => {
+    expect(tarballQuery("0.8.0", { version: "0.8.0", sha256: sha })).toEqual({
+      version: "0.8.0",
+      sha256: sha,
+    });
+  });
+  test("any other version: the final release (v<version>-tagged)", () => {
+    expect(tarballQuery("0.7.0", { version: "0.8.0", sha256: sha })).toEqual({
+      version: "0.7.0",
+    });
+    expect(tarballQuery("0.7.0", undefined)).toEqual({ version: "0.7.0" });
   });
 });

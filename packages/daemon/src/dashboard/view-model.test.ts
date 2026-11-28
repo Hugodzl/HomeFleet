@@ -161,6 +161,7 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       endpoint: "192.168.68.73:56370",
       reachable: "yes",
       version: "0.3.0",
+      release: "—",
       skew: true,
       executors: "command, agent, write",
       models: "qwen3.6-35b-a3b",
@@ -177,6 +178,7 @@ test("nodeRows flags version skew and handles unreachable peers", () => {
       endpoint: "—",
       reachable: "no",
       version: "—",
+      release: "—",
       skew: false,
       executors: "—",
       models: "—",
@@ -760,5 +762,50 @@ describe("tooltips", () => {
         expect(text).not.toMatch(/[\n<>]/);
       }
     }
+  });
+});
+
+describe("release hash", () => {
+  const SHA = "abcdef012345".padEnd(64, "9");
+
+  test("nodeRows gives the peer's short release hash, or a dash", () => {
+    const node = (releaseSha256?: string) =>
+      ({
+        deviceId: "b".repeat(64),
+        name: "tower",
+        reachable: true,
+        nodeInfo: {
+          deviceId: "b".repeat(64),
+          name: "tower",
+          daemonVersion: "0.8.0",
+          protocolVersion: "0.5.0",
+          platform: "win32",
+          roles: [],
+          executors: [],
+          models: [],
+          hardware: { cpu: "x", ramBytes: 1, gpus: [] },
+          maxConcurrentJobs: 1,
+          activeJobs: 0,
+          ...(releaseSha256 !== undefined ? { releaseSha256 } : {}),
+        },
+      }) as NodeDirectoryEntry;
+    expect(nodeRows([node(SHA)], "0.8.0")[0]?.release).toBe("abcdef012345");
+    expect(nodeRows([node()], "0.8.0")[0]?.release).toBe("—");
+  });
+
+  test("the nodes table has a Release column with help text", () => {
+    expect(COLUMNS.nodes?.map(([key]) => key)).toContain("release");
+    expect(helpText("nodes.release")).not.toBe("");
+  });
+
+  test("selfRows shows this node's release hash next to its version when known", () => {
+    expect(selfRows({ ...SELF, releaseSha256: SHA })[3]).toEqual([
+      "Version",
+      "daemon 0.3.1 (abcdef012345) · protocol 0.3.0",
+    ]);
+    expect(selfRows(SELF)[3]).toEqual([
+      "Version",
+      "daemon 0.3.1 · protocol 0.3.0",
+    ]);
   });
 });

@@ -14,6 +14,7 @@
     "pack:release": "tsx scripts/pack-release.ts",
     "sign:release": "node scripts/sign-release.mjs",
     "verify:release": "tsx scripts/verify-release.ts",
+    "release:plan": "tsx scripts/release-plan.ts",
     "release:keygen": "tsx scripts/release-keygen.ts",
     "check:docs": "tsx scripts/check-docs.ts"
   },

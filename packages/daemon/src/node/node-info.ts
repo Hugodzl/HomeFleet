@@ -62,6 +62,8 @@ export interface NodeInfoProviderOptions {
    * reports the upgrade that just ran).
    */
   lastUpgrade?: () => LastUpgrade | undefined;
+  /** sha256 of the release tarball this daemon runs; absent when unknown. */
+  releaseSha256?: string;
   /**
    * The status-stamped catalog to advertise (built by the daemon). A function
    * is re-read on every profile build, so periodic re-probes (see
@@ -182,6 +184,9 @@ export function createNodeInfoProvider(
       activeJobs: jobs?.activeJobs ?? 0,
       upgrade: { allowRemote: config.upgrade.allowRemote },
       lastUpgrade: options.lastUpgrade?.(),
+      ...(options.releaseSha256 !== undefined
+        ? { releaseSha256: options.releaseSha256 }
+        : {}),
     } satisfies NodeInfo);
 
   // Eager validation: every realistically-failable field (name, versions,

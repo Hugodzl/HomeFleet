@@ -370,10 +370,25 @@ describe("--digest on a tag run: the version must be the tag's", () => {
     expect(out.stderr).toMatch(/tag/);
   });
 
-  test.each([["refs/tags/v0.5.0"], ["refs/heads/main"], [undefined]])(
-    "%s is accepted",
-    async (ref) => {
-      expect((await signWith(ref)).code).toBe(0);
-    },
-  );
+  test.each([
+    ["refs/tags/v0.5.1-rc.2"],
+    ["refs/tags/v0.5.0-beta.1"],
+    ["refs/tags/v0.5.0-rc.0"],
+    ["refs/tags/v0.5.0-rc.01"],
+    ["refs/tags/v0.5.0-rc.1.2"],
+  ])("%s is refused for version 0.5.0", async (ref) => {
+    const out = await signWith(ref);
+    expect(out.code).toBe(1);
+    expect(out.stderr).toMatch(/tag/);
+  });
+
+  test.each([
+    ["refs/tags/v0.5.0"],
+    ["refs/tags/v0.5.0-rc.2"],
+    ["refs/tags/v0.5.0-rc.10"],
+    ["refs/heads/main"],
+    [undefined],
+  ])("%s is accepted", async (ref) => {
+    expect((await signWith(ref)).code).toBe(0);
+  });
 });

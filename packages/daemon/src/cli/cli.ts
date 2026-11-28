@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import type { ModelInfo } from "@homefleet/protocol";
 import type { DaemonConfig } from "../config/config.js";
 import { CONTROL_TOKEN_FILE } from "../control/control-token.js";
+import { CANDIDATE_OR_FINAL_TAG } from "../control/messages.js";
 import type { UpgradeStarted } from "../upgrade/coordinator.js";
 import {
   UPDATER_LOG,
@@ -152,19 +153,22 @@ Usage:
       Print the running daemon's read-only dashboard URL and open it in
       the default browser (--no-open: print only).
 
-  homefleet upgrade [--to <version>] [--check] [--force]
+  homefleet upgrade [--to <version> | --candidate <tag>] [--check] [--force]
       Upgrade THIS node's running daemon to the latest signed release (or
       --to <version>), restart it in the background, and wait until it is
       back. Rolls back automatically if the new version fails to start.
-      --check only reports whether an upgrade is available; --force
-      upgrades even while jobs are running.
+      --candidate <tag> installs a release candidate (vX.Y.Z-rc.N), even
+      over the same version when its bytes differ. --check only reports
+      whether an upgrade is available; --force upgrades even while jobs
+      are running.
 
-  homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]
-      Roll the latest signed release (or --to <version>) out across the
-      fleet: paired peers one at a time, THIS node last, stopping at the
-      first failure. --nodes limits it to the named peers (names or id
-      prefixes); --force-local upgrades this node even while jobs run.
-      Peers must have "upgrade.allowRemote" enabled.
+  homefleet fleet upgrade [--to <version> | --candidate <tag>] [--nodes <name|id>...] [--force-local]
+      Roll the latest signed release (or --to <version>, or the release
+      candidate --candidate <tag>) out across the fleet: paired peers one
+      at a time, THIS node last, stopping at the first failure. --nodes
+      limits it to the named peers (names or id prefixes); --force-local
+      upgrades this node even while jobs run. Peers must have
+      "upgrade.allowRemote" enabled.
 
   homefleet daemon start [--allow-packaged]
       Start THIS data dir's daemon in the background and wait until it
@@ -584,6 +588,7 @@ async function runStatus(deps: CliDeps): Promise<number> {
     deps.stdout(`activeJobs: ${status.activeJobs}`);
     deps.stdout(`maxConcurrentJobs: ${status.maxConcurrentJobs}`);
     deps.stdout(`lastUpgrade: ${formatLastUpgrade(status.lastUpgrade)}`);
+    deps.stdout(`releaseSha256: ${shortSha(status.releaseSha256)}`);
     return 0;
   });
 }
@@ -640,6 +645,66 @@ interface UpgradeArgs {
   check: boolean;
   force: boolean;
   version?: string;
+  candidate?: string;
+}
+
+/** The first 12 hex chars of a release hash, or "unknown". */
+function shortSha(sha256: string | undefined): string {
+  return sha256 === undefined ? "unknown" : sha256.slice(0, 12);
+}
+
+/**
+ * Parses `--candidate <tag>` at `args[i]`; returns the tag, or undefined
+ * after writing the usage error.
+ */
+function parseCandidateArg(
+  command: string,
+  value: string | undefined,
+  deps: CliDeps,
+): string | undefined {
+  if (value === undefined || !CANDIDATE_OR_FINAL_TAG.test(value)) {
+    deps.stderr(
+      `${command}: --candidate requires a release tag like v0.8.0-rc.1`,
+    );
+    return undefined;
+  }
+  return value;
+}
+
+/** True (after the usage error) when both --to and --candidate were given. */
+function bothToAndCandidate(
+  command: string,
+  parsed: { version?: string; candidate?: string },
+  deps: CliDeps,
+): boolean {
+  if (parsed.version !== undefined && parsed.candidate !== undefined) {
+    deps.stderr(`${command}: --to and --candidate are mutually exclusive`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A daemon from before release candidates answers a request carrying
+ * `candidate` with 400 (its control schema is strict). Prints the clear
+ * message and returns true when `error` is that refusal.
+ */
+async function reportCandidateUnsupported(
+  error: ControlRequestError,
+  client: ControlClientLike,
+  deps: CliDeps,
+): Promise<boolean> {
+  if (error.status !== 400 || !/candidate/.test(error.message)) {
+    return false;
+  }
+  const version = await client
+    .status()
+    .then((status) => status.daemonVersion)
+    .catch(() => "unknown version");
+  deps.stderr(
+    `The running homefleetd (${version}) does not support --candidate; upgrade it to a release first.`,
+  );
+  return true;
 }
 
 function parseUpgradeArgs(
@@ -660,10 +725,19 @@ function parseUpgradeArgs(
         return undefined;
       }
       parsed.version = version;
+    } else if (arg === "--candidate") {
+      const tag = parseCandidateArg("upgrade", args[++i], deps);
+      if (tag === undefined) {
+        return undefined;
+      }
+      parsed.candidate = tag;
     } else {
       deps.stderr(`upgrade: unexpected argument "${arg}"`);
       return undefined;
     }
+  }
+  if (bothToAndCandidate("upgrade", parsed, deps)) {
+    return undefined;
   }
   return parsed;
 }
@@ -676,6 +750,12 @@ function reportUpgradeFailure(last: UpgradeResult, deps: CliDeps): number {
       : `Upgrade to ${last.to} failed: ${reason}`,
   );
   return 1;
+}
+
+function upgradedLine(started: UpgradeStarted): string {
+  return started.candidate === true
+    ? `Upgraded to ${started.to} (sha256 ${shortSha(started.sha256)}).`
+    : `Upgraded to ${started.to}.`;
 }
 
 /**
@@ -713,15 +793,19 @@ async function waitForUpgrade(
     ) {
       return reportUpgradeFailure(status.lastUpgrade, deps);
     }
-    if (status.daemonVersion === started.to) {
-      deps.stdout(`Upgraded to ${started.to}.`);
+    // A candidate may keep the version: only its hash says it is running.
+    if (
+      status.daemonVersion === started.to &&
+      (started.candidate !== true || status.releaseSha256 === started.sha256)
+    ) {
+      deps.stdout(upgradedLine(started));
       return 0;
     }
   }
   const last = deps.readUpgradeResult?.(deps.dataDir);
   if (isFresh(last)) {
     if (last.outcome === "succeeded") {
-      deps.stdout(`Upgraded to ${started.to}.`);
+      deps.stdout(upgradedLine(started));
       return 0;
     }
     return reportUpgradeFailure(last, deps);
@@ -759,6 +843,9 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
       const response = await client.upgrade({
         targets: "self",
         ...(parsed.version !== undefined ? { version: parsed.version } : {}),
+        ...(parsed.candidate !== undefined
+          ? { candidate: parsed.candidate }
+          : {}),
         ...(parsed.force ? { force: true } : {}),
       });
       // A "self" request never yields a rollout status; narrow for the types.
@@ -771,6 +858,19 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
       started = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
+        if (error.code === "same-release") {
+          const status = await client.status().catch(() => undefined);
+          deps.stdout(
+            `Already running ${parsed.candidate ?? parsed.version ?? "that release"} (sha256 ${shortSha(status?.releaseSha256)}).`,
+          );
+          return 0;
+        }
+        if (
+          parsed.candidate !== undefined &&
+          (await reportCandidateUnsupported(error, client, deps))
+        ) {
+          return 1;
+        }
         deps.stderr(
           error.code === "bad-token"
             ? badTokenMessage(deps)
@@ -790,6 +890,7 @@ async function runUpgrade(args: string[], deps: CliDeps): Promise<number> {
 
 interface FleetUpgradeArgs {
   version?: string;
+  candidate?: string;
   nodes?: string[];
   forceLocal: boolean;
 }
@@ -811,6 +912,12 @@ function parseFleetUpgradeArgs(
         return undefined;
       }
       parsed.version = version;
+    } else if (arg === "--candidate") {
+      const tag = parseCandidateArg("fleet upgrade", args[++i], deps);
+      if (tag === undefined) {
+        return undefined;
+      }
+      parsed.candidate = tag;
     } else if (arg === "--nodes") {
       // Takes every following non-flag argument.
       const queries: string[] = [];
@@ -826,6 +933,9 @@ function parseFleetUpgradeArgs(
       deps.stderr(`fleet upgrade: unexpected argument "${arg}"`);
       return undefined;
     }
+  }
+  if (bothToAndCandidate("fleet upgrade", parsed, deps)) {
+    return undefined;
   }
   return parsed;
 }
@@ -955,6 +1065,9 @@ async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
       const response = await client.upgrade({
         targets,
         ...(parsed.version !== undefined ? { version: parsed.version } : {}),
+        ...(parsed.candidate !== undefined
+          ? { candidate: parsed.candidate }
+          : {}),
         ...(parsed.forceLocal ? { forceLocal: true } : {}),
       });
       if (!("peers" in response)) {
@@ -966,6 +1079,12 @@ async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
       rollout = response;
     } catch (error) {
       if (error instanceof ControlRequestError) {
+        if (
+          parsed.candidate !== undefined &&
+          (await reportCandidateUnsupported(error, client, deps))
+        ) {
+          return 1;
+        }
         deps.stderr(
           error.code === "bad-token"
             ? badTokenMessage(deps)
@@ -1016,7 +1135,13 @@ async function runFleetUpgrade(args: string[], deps: CliDeps): Promise<number> {
     const finishWithSelf = async (last: RolloutStatus): Promise<number> => {
       const waited = await waitForUpgrade(
         client,
-        { from: current, to: target },
+        {
+          from: current,
+          to: target,
+          ...(rollout.candidateSha256 !== undefined
+            ? { sha256: rollout.candidateSha256, candidate: true as const }
+            : {}),
+        },
         deps,
       );
       if (waited !== 0) {
@@ -1070,7 +1195,7 @@ async function runFleet(args: string[], deps: CliDeps): Promise<number> {
     return runFleetUpgrade(rest, deps);
   }
   deps.stderr(
-    "usage: homefleet fleet upgrade [--to <version>] [--nodes <name|id>...] [--force-local]",
+    "usage: homefleet fleet upgrade [--to <version> | --candidate <tag>] [--nodes <name|id>...] [--force-local]",
   );
   return 2;
 }

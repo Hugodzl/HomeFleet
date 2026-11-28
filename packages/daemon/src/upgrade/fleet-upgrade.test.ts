@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NodeInfo } from "@homefleet/protocol";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { HfpRequestError } from "../transport/client.js";
 import { UpgradeError } from "./errors.js";
 import {
@@ -14,7 +14,6 @@ import {
   createFleetUpgradeSurface,
   type FleetUpgradeSurfaceOptions,
 } from "./fleet-upgrade.js";
-import { manifestFileName, signatureFileName } from "./manifest.js";
 import type { PreparedRelease } from "./prepare.js";
 import {
   FleetRollout,
@@ -52,17 +51,17 @@ async function harness(
 ) {
   const upgradesDir = await mkdtemp(path.join(tmpdir(), "hf-fleet-"));
   dirs.push(upgradesDir);
-  const dir = path.join(upgradesDir, "0.5.2");
-  await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, manifestFileName("0.5.2")), "MANIFEST");
-  await writeFile(path.join(dir, signatureFileName("0.5.2")), "SIG\n");
   const prepared = {
     version: "0.5.2",
+    sha256: "c".repeat(64),
+    manifestBytes: Buffer.from("MANIFEST"),
+    signature: "SIG",
     manifest: { size: 4096 },
   } as PreparedRelease;
   const calls = {
     start: [] as RolloutStartInput[],
     prepare: [] as string[],
+    prepareOptions: [] as unknown[],
     self: [] as unknown[],
     check: 0,
   };
@@ -96,7 +95,8 @@ async function harness(
     pairedDeviceIds: () => [PEER],
     prepare:
       opts.prepare ??
-      (async (version) => {
+      (async (version, prepareOptions = {}) => {
+        calls.prepareOptions.push(prepareOptions);
         calls.prepare.push(version);
         return prepared;
       }),
@@ -372,4 +372,60 @@ test("without a version the latest is looked up once; current is the option", as
   });
   expect(calls.check).toBe(1);
   expect(calls.prepare).toEqual(["0.5.2"]);
+});
+
+describe("servedRelease: what the tarball route serves", () => {
+  test("undefined before any rollout", async () => {
+    const { surface } = await harness();
+    expect(surface.servedRelease()).toBeUndefined();
+  });
+
+  test("set to the pushed release once a rollout starts", async () => {
+    const { surface } = await harness();
+    await surface.upgrade({ targets: "fleet" });
+    expect(surface.servedRelease()).toEqual({
+      version: "0.5.2",
+      sha256: "c".repeat(64),
+    });
+  });
+
+  test("a refused second rollout start does not change the served release", async () => {
+    const { surface } = await harness({ running: true });
+    await surface.upgrade({ targets: "fleet" }).catch(() => undefined);
+    expect(surface.servedRelease()).toBeUndefined();
+  });
+
+  test("a start whose prepare fails does not change the served release", async () => {
+    const { surface } = await harness({
+      prepare: async () => {
+        throw new UpgradeError("fetch-failed", "offline");
+      },
+    });
+    await surface.upgrade({ targets: "fleet" }).catch(() => undefined);
+    expect(surface.servedRelease()).toBeUndefined();
+  });
+});
+
+describe("candidate requests", () => {
+  test("a self candidate goes to the coordinator with the tag", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "self", candidate: "v0.5.2-rc.1" });
+    expect(calls.self).toEqual([{ candidate: { tag: "v0.5.2-rc.1" } }]);
+  });
+
+  test("a fleet candidate resolves the version from the tag, prepares with { tag }, and starts a candidate rollout", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "fleet", candidate: "v0.5.2-rc.1" });
+    expect(calls.prepare).toEqual(["0.5.2"]);
+    expect(calls.prepareOptions).toEqual([{ tag: "v0.5.2-rc.1" }]);
+    expect(calls.check).toBe(0);
+    expect(calls.start[0]?.candidate).toBe(true);
+  });
+
+  test("a plain fleet request starts a plain rollout", async () => {
+    const { surface, calls } = await harness();
+    await surface.upgrade({ targets: "fleet" });
+    expect(calls.start[0]?.candidate).toBeUndefined();
+    expect(calls.prepareOptions).toEqual([{}]);
+  });
 });

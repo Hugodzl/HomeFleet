@@ -17,6 +17,13 @@
  * from the selection snapshot is remembered before the push, and only a
  * target-version failure record that differs from it counts as fresh.
  *
+ * A release-candidate rollout (`candidate: true`) shares its version with
+ * the final, so progress is counted by tarball hash (`NodeInfo.
+ * releaseSha256`): a node is on the candidate when it runs a newer version,
+ * or the target version with the candidate's hash. One that was on an older
+ * version and comes back on the target with no hash also counts: an old
+ * updater writes no hash record.
+ *
  * The final status is handed to `persist` (the data directory) whenever the
  * run ends AND right after this node's own upgrade hands off, because that
  * restart loses the in-memory status; the restarted daemon serves it back via
@@ -62,6 +69,8 @@ export interface PeerRolloutStatus {
 export interface RolloutStatus {
   id: string;
   target: string;
+  /** The candidate's tarball hash; present only for a candidate rollout. */
+  candidateSha256?: string;
   startedAt: string;
   state: "running" | "stopped" | "done";
   peers: PeerRolloutStatus[];
@@ -91,6 +100,8 @@ export interface RolloutPeers {
 export interface FleetRolloutOptions {
   peers: RolloutPeers;
   currentVersion: string;
+  /** sha256 of the release this node runs; undefined when unknown. */
+  currentSha256?: string;
   upgradeSelf: (input: UpgradeSelfInput) => Promise<UpgradeStarted>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -111,6 +122,35 @@ export interface RolloutStartInput {
   forceLocal?: boolean;
   /** Default true. False targets peers only: this node's own step is skipped. */
   includeSelf?: boolean;
+  /** A release-candidate rollout: progress is counted by hash. */
+  candidate?: boolean;
+}
+
+/**
+ * Whether a node reporting `version` (and `sha256`) already runs the
+ * rollout's release. Plain: the target version or newer. Candidate: newer,
+ * or the target version with the candidate's hash.
+ */
+function isOnRelease(
+  version: string | undefined,
+  sha256: string | undefined,
+  target: string,
+  candidateSha256: string | undefined,
+): boolean {
+  if (version === undefined || !isSemver(version)) {
+    return false;
+  }
+  const order = compareSemver(version, target);
+  if (candidateSha256 === undefined) {
+    return order >= 0;
+  }
+  return order > 0 || (order === 0 && sha256 === candidateSha256);
+}
+
+/** A peer's refusal that means "already running these bytes". */
+function isSameRelease(error: HfpRequestError): boolean {
+  const details = error.hfpError?.details as { reason?: unknown } | undefined;
+  return details?.reason === "same-release";
 }
 
 function messageOf(error: unknown): string {
@@ -140,7 +180,11 @@ const ABORTED_REASON = "the daemon stopped during the rollout";
  */
 export function restoreRolloutStatus(
   saved: RolloutStatus,
-  now: { daemonVersion: string; lastUpgrade?: UpgradeResult | undefined },
+  now: {
+    daemonVersion: string;
+    releaseSha256?: string | undefined;
+    lastUpgrade?: UpgradeResult | undefined;
+  },
 ): RolloutStatus {
   const status = structuredClone(saved);
   if (status.state === "running") {
@@ -151,8 +195,12 @@ export function restoreRolloutStatus(
   }
   const last = now.lastUpgrade;
   if (
-    isSemver(now.daemonVersion) &&
-    compareSemver(now.daemonVersion, status.target) >= 0
+    isOnRelease(
+      now.daemonVersion,
+      now.releaseSha256,
+      status.target,
+      status.candidateSha256,
+    )
   ) {
     status.self = { state: "succeeded" };
   } else if (
@@ -172,6 +220,7 @@ export function restoreRolloutStatus(
 export class FleetRollout {
   private readonly peers: RolloutPeers;
   private readonly currentVersion: string;
+  private readonly currentSha256: string | undefined;
   private readonly upgradeSelf: FleetRolloutOptions["upgradeSelf"];
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -186,6 +235,7 @@ export class FleetRollout {
   constructor(options: FleetRolloutOptions) {
     this.peers = options.peers;
     this.currentVersion = options.currentVersion;
+    this.currentSha256 = options.currentSha256;
     this.upgradeSelf = options.upgradeSelf;
     this.now = options.now ?? Date.now;
     // The default sleep ends early on abort, so a stopping daemon is neither
@@ -219,12 +269,15 @@ export class FleetRollout {
   /** Selects peers and returns the initial status; the loop continues in the background. */
   async start(input: RolloutStartInput): Promise<RolloutStatus> {
     const target = input.prepared.version;
+    const candidateSha256 =
+      input.candidate === true ? input.prepared.sha256 : undefined;
     const entries = await this.peers.list();
-    const selected = this.select(entries, target, input.nodes);
+    const selected = this.select(entries, target, candidateSha256, input.nodes);
 
     const status: RolloutStatus = {
       id: randomUUID(),
       target,
+      ...(candidateSha256 !== undefined ? { candidateSha256 } : {}),
       startedAt: new Date(this.now()).toISOString(),
       state: "running",
       peers: selected.map((entry) => {
@@ -242,7 +295,13 @@ export class FleetRollout {
       self: {
         state:
           input.includeSelf !== false &&
-          compareSemver(this.currentVersion, target) < 0
+          compareSemver(this.currentVersion, target) <= 0 &&
+          !isOnRelease(
+            this.currentVersion,
+            this.currentSha256,
+            target,
+            candidateSha256,
+          )
             ? "pending"
             : "skipped",
       },
@@ -253,6 +312,7 @@ export class FleetRollout {
       version: target,
       manifest: input.manifestBytes.toString("base64"),
       signature: input.signature,
+      ...(candidateSha256 !== undefined ? { candidate: true } : {}),
     };
     this.running = this.run(
       status,
@@ -299,6 +359,7 @@ export class FleetRollout {
   private select(
     entries: NodeDirectoryEntry[],
     target: string,
+    candidateSha256: string | undefined,
     nodes: string[] | undefined,
   ): NodeDirectoryEntry[] {
     if (nodes !== undefined) {
@@ -309,7 +370,14 @@ export class FleetRollout {
       return (
         e.reachable &&
         version !== undefined &&
-        compareSemver(version, target) < 0
+        isSemver(version) &&
+        compareSemver(version, target) <= 0 &&
+        !isOnRelease(
+          version,
+          e.nodeInfo?.releaseSha256,
+          target,
+          candidateSha256,
+        )
       );
     });
   }
@@ -331,6 +399,7 @@ export class FleetRollout {
         entry,
         peer,
         status.target,
+        status.candidateSha256,
         request,
       );
       if (!proceed) {
@@ -349,7 +418,13 @@ export class FleetRollout {
       return;
     }
     try {
-      await this.upgradeSelf({ version: status.target, force: forceLocal });
+      await this.upgradeSelf({
+        version: status.target,
+        force: forceLocal,
+        ...(status.candidateSha256 !== undefined
+          ? { candidate: { sha256: status.candidateSha256 } }
+          : {}),
+      });
       // state stays "running": this daemon is about to exit and restart.
       status.self.state = "restarting";
     } catch (error) {
@@ -363,22 +438,32 @@ export class FleetRollout {
     entry: NodeDirectoryEntry,
     peer: PeerRolloutStatus,
     target: string,
+    candidateSha256: string | undefined,
     request: HfpUpgradeRequest,
   ): Promise<boolean> {
     peer.state = "pushing";
     // What the peer reported before this push; a record equal to it is stale.
     // A --nodes peer may have been selected without a hello (no nodeInfo):
     // ask now, or an old failure for the same target would look fresh.
-    const before =
-      entry.nodeInfo !== undefined
-        ? entry.nodeInfo.lastUpgrade
-        : (await this.peers.hello(entry).catch(() => undefined))?.lastUpgrade;
+    const beforeInfo =
+      entry.nodeInfo ?? (await this.peers.hello(entry).catch(() => undefined));
+    const before = beforeInfo?.lastUpgrade;
+    const fromVersion = beforeInfo?.daemonVersion;
+    // An older peer runs an older updater, which may record no hash: back on
+    // the target version with no hash is then the candidate.
+    const wasOlder =
+      fromVersion !== undefined &&
+      isSemver(fromVersion) &&
+      compareSemver(fromVersion, target) < 0;
     const pushedAt = this.now(); // our clock only: the wait deadline
     try {
       await this.peers.push(entry, request);
     } catch (error) {
       if (error instanceof HfpRequestError) {
-        if (error.status === 404) {
+        if (isSameRelease(error)) {
+          peer.state = "succeeded";
+          peer.reason = "already running these bytes";
+        } else if (error.status === 404) {
           peer.state = "too-old";
           peer.reason =
             'too old for remote upgrade; run "homefleet upgrade" there (npm i -g on v0.4 or older)';
@@ -401,10 +486,13 @@ export class FleetRollout {
       }
       const info = await this.peers.hello(entry).catch(() => undefined);
       const version = info?.daemonVersion;
+      const sha256 = info?.releaseSha256;
       if (
-        version !== undefined &&
-        isSemver(version) &&
-        compareSemver(version, target) >= 0
+        isOnRelease(version, sha256, target, candidateSha256) ||
+        (candidateSha256 !== undefined &&
+          wasOlder &&
+          version === target &&
+          sha256 === undefined)
       ) {
         peer.state = "succeeded";
         return true;

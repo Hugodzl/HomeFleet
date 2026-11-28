@@ -58,7 +58,11 @@ export function selfRows(status) {
     ["Platform", status.platform],
     [
       "Version",
-      `daemon ${status.daemonVersion} · protocol ${status.protocolVersion}`,
+      `daemon ${status.daemonVersion}${
+        typeof status.releaseSha256 === "string"
+          ? ` (${status.releaseSha256.slice(0, 12)})`
+          : ""
+      } · protocol ${status.protocolVersion}`,
     ],
     [
       "Ports",
@@ -171,6 +175,12 @@ export function nodeRows(nodes, ourVersion, target) {
           : DASH,
       reachable: node.reachable ? "yes" : "no",
       version: info?.daemonVersion ?? DASH,
+      // The tarball hash tells two builds of one version apart (a pre-release
+      // build and its final); a dash when the peer does not report it.
+      release:
+        typeof info?.releaseSha256 === "string"
+          ? info.releaseSha256.slice(0, 12)
+          : DASH,
       skew: info !== undefined && info.daemonVersion !== ourVersion,
       executors: info !== undefined ? list(info.executors) : DASH,
       // Same `id (status)` form as `homefleet nodes`: a reachable daemon can
@@ -441,6 +451,7 @@ export const COLUMNS = {
     ["endpoint", "Endpoint"],
     ["reachable", "Reachable"],
     ["version", "Version"],
+    ["release", "Release"],
     ["executors", "Executors"],
     ["models", "Models"],
     ["load", "Load"],
@@ -534,6 +545,8 @@ export const HELP = {
       "yes = a hello to the peer just succeeded. no = no known address, or the hello failed or timed out (asleep, offline, wrong identity). The columns to the right need yes.",
     version:
       "Peer's daemon version. '(differs from ours)' = not the version this node runs. '⬆ X available' = this node can push that signed release to it (the peer has upgrade.allowRemote on and is older).",
+    release:
+      "Start of the sha256 of the release tarball the peer runs: it tells two builds of one version apart. A dash means the peer does not report it (older, or installed by hand).",
     executors: "Job runners the peer has enabled.",
     models:
       "Peer's catalog, each with its startup check: ok, not_served or unreachable (see This node's Catalog status). Amber when any is not ok; no status = older peer.",

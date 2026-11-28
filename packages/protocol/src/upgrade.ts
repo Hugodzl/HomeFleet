@@ -7,6 +7,11 @@
 import { z } from "zod";
 import { SemverSchema } from "./semver.js";
 
+/** The sha256 of a release tarball: 64 lower-case hex characters. */
+export const ReleaseSha256Schema = z
+  .string()
+  .regex(/^[0-9a-f]{64}$/, "must be 64 lower-case hex chars (sha256)");
+
 /**
  * `POST /hfp/v0/upgrade` request. `manifest` is the base64 of the exact signed
  * manifest bytes; `signature` is the base64 detached signature (the `.sig`
@@ -16,6 +21,12 @@ export const UpgradeRequestSchema = z.object({
   version: SemverSchema,
   manifest: z.base64(),
   signature: z.base64(),
+  /**
+   * A release candidate push: the receiver may reinstall the same version
+   * when the tarball hash differs, and fetches the tarball from the pusher
+   * only (never from GitHub). Absent from pre-0.8 pushers.
+   */
+  candidate: z.boolean().optional(),
 });
 export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;
 

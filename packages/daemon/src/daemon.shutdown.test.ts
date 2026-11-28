@@ -113,7 +113,7 @@ test("during an upgrade: the upgrade's own shutdown goes out once, a stop is 409
     token: readControlTokenSync(dataDir),
   });
 
-  await expect(client.upgrade({ targets: "self" })).resolves.toEqual({
+  await expect(client.upgrade({ targets: "self" })).resolves.toMatchObject({
     from: "0.5.0",
     to: "0.5.1",
   });
